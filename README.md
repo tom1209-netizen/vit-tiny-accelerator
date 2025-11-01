@@ -107,9 +107,14 @@ The PL contains the custom hardware for the ViT computation.
 
 ### 5.4 `gemm_core`
 
-**Purpose:** INT8×INT8->INT32 tiled GEMM, 8×8 systolic PEs.  
-**Perf goal:** >=0.8 MAC/cycle/PE (steady state).  
-**Verification:** bit-exact vs NumPy INT8/INT32; back-pressure safe.
+**Purpose:** The primary compute engine of the accelerator, performing high-throughput tiled General Matrix Multiplication (GEMM) with INT8 inputs and INT32 accumulation.
+**Key Functionality:**
+
+- **Compute Kernel:** Implements the core $C_{int32} = A_{int8} \times B_{int8}$ operation as an 8x8 systolic array.
+- **Handshake:** Receives a start_tile pulse from the gemm_start_mux to begin computation on a new tile.
+- **Data Inputs:** Consumes two parallel AXI-Streams: axis_gemm_a (from gemm_a_mux) and axis_gemm_b (from gemm_b_mux). These streams carry the packed INT8 data for the A and B matrices.
+- **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
+- **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
 
 ### 5.5 `requant_unit`
 
@@ -118,7 +123,13 @@ The PL contains the custom hardware for the ViT computation.
 
 ### 5.6 `residual`
 
-- **`residual_add`**: handles scale mismatches before saturation.
+**Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
+
+**Key Functionality:**
+
+- **Data Inputs:** Receives two AXI-Streams, axis_residual_a and axis_residual_b, from their respective input multiplexers. These represent the two tensors to be added.
+- **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
+- **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
 
 ## 6. Attention Block
 
