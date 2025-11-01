@@ -371,7 +371,47 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - **Stream Interface (S2MM):** When dma_direction is 1 (PL to DDR), it consumes an AXI-Stream and writes the data to the target DDR address.
 - **Synchronization:** Asserts dma_transfer_done back to the scheduler_tiler upon completion of the requested byte transfer, allowing the main FSM to proceed.
 
-### 6.4 `gemm_core`
+### 6.4 AXI DMA IP
+
+**Purpose:** The Xilinx AXI DMA IP is a high-performance IP block from AMD/Xilinx, responsible for high-bandwidth data movement between external DDR memory and the Programmable Logic (PL) via AXI4-Stream interfaces.
+
+**Key Functionality:**
+- **Control Flow**: The AXI DMA IP itself is controlled by its own AXI4-Lite slave interface. However,  in this specific accelerator design, this AXI-Lite interface is not exposed directly to the Processing System (PS). Instead, it is managed by the custom axi_dma_shim module. This provides a hardware-friendly interface for the accelerator's main controller (scheduler_tiler). Here is the specific data flow:
+	+ The PS (ARM Core) writes high-level parameters (like DDR base addresses) to the axi_lite_regs.
+	+ The scheduler_tiler (the master FSM) reads these parameters and decides when a data transfer is needed.
+	+ The scheduler_tiler issues simple commands (e.g., dma_start_transfer, dma_ddr_addr, dma_length_bytes) to the axi_dma_shim.
+	+ The axi_dma_shim translates these simple commands into the specific, low-level AXI-Lite register writes required by the Xilinx AXI DMA IP to execute the transfer.
+
+- **Key Register:** This project uses the AXI DMA in **Direct Register Mode** (also known as Simple DMA), which uses registers to define a single transfer rather than complex descriptor chains. The key registers used for this mode are:
+
+  |Register (Offset)|Channel|Purpose|
+  |---|---|---|
+  |`0x00`|MM2S_DMACR|Control (start, reset, interrupt enable).|
+  |`0x04`|MM2S_DMASR|Status (halted, idle, errors, interrupt flags).|
+  |`0x18`|MM2S_SA|Source address in DDR for reads.|
+  |`0x28`|MM2S_LENGTH|Number of bytes to transfer.|
+  |`0x30`|S2MM_DMACR|Control register for write channel.|
+  |`0x34`|S2MM_DMASR|Status for write channel.|
+  |`0x48`|S2MM_DA|Destination address in DDR.|
+  |`0x58`|S2MM_LENGTH|Number of bytes to write.|
+
+- **Programming Sequence:** The axi_dma_shim follows this standard sequence to manage the AXI DMA IP:
+
+  📤 MM2S (Read from DDR to Accelerator)
+  - Start Channel: Set the Run/Stop bit: MM2S_DMACR.RS = 1.
+  - Check Halted: Wait for the status register's Halted bit to deassert (go to 0).
+  - Enable Interrupts (Optional): Set MM2S_DMACR.IOC_IrqEn = 1 to enable an interrupt upon completion.
+  - Set Address: Write the DDR source address to the MM2S_SA register.
+  - Start Transfer: Write the total number of bytes to transfer to the MM2S_LENGTH register. This final write triggers the DMA to begin fetching data.
+
+  📥 S2MM (Write from Accelerator to DDR)
+  - Start Channel: Set the Run/Stop bit: S2MM_DMACR.RS = 1.
+  - Check Halted: Wait for the status register's Halted bit to deassert (go to 0).
+  - Enable Interrupts (Optional): Set S2MM_DMACR.IOC_IrqEn = 1.
+  - Set Address: Write the DDR destination address to the S2MM_DA register.
+  - Arm Receiver: Write the maximum size of the buffer allocated in memory to the S2MM_LENGTH register. This must be written last. This action arms the DMA, which will now wait for an AXI-Stream packet to arrive, write the data to the S2MM_DA, and assert an interrupt       (if enabled) when the stream's TLAST signal is seen.
+
+### 6.5 `gemm_core`
 
 **Purpose:** The primary compute engine of the accelerator, performing high-throughput tiled General Matrix Multiplication (GEMM) with INT8 inputs and INT32 accumulation.
 **Key Functionality:**
@@ -382,7 +422,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
 - **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
 
-### 6.5 `requant_unit`
+### 6.6 `requant_unit`
 
 **Purpose:** Converts the 32-bit integer accumulator values from the gemm_core back into 8-bit integers.
 
@@ -393,7 +433,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
 - **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
 
-### 6.6 `residual`
+### 6.7 `residual`
 
 **Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
 
