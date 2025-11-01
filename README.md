@@ -33,9 +33,10 @@
   - [6.1. axi_lite_regs](#61-axi_lite_regs)
   - [6.2. scheduler_tiler](#62-scheduler_tiler)
   - [6.3. axi_dma_shim](#63-axi_dma_shim)
-  - [6.4. gemm_core](#64-gemm_core)
-  - [6.5. requant_unit](#65-requant_unit)
+  - [6.4. axi_dma_ip](#64-axi-dma-ip)
+  - [6.5. gemm_core](#65-gemm_core)
   - [6.6. residual](#66-residual)
+  - [6.7. requant_unit](#67-requant_unit)
 - [7. Attention Block](#7-attention-block)
   - [7.1. Interfaces](#71-interfaces)
   - [7.2. Phase Map](#72-phase-map)
@@ -422,7 +423,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
   - Check Halted: Wait for the status register's Halted bit to deassert (go to 0).
   - Enable Interrupts (Optional): Set S2MM_DMACR.IOC_IrqEn = 1.
   - Set Address: Write the DDR destination address to the S2MM_DA register.
-  - Arm Receiver: Write the maximum size of the buffer allocated in memory to the S2MM_LENGTH register. This must be written last. This action arms the DMA, which will now wait for an AXI-Stream packet to arrive, write the data to the S2MM_DA, and assert an interrupt       (if enabled) when the stream's TLAST signal is seen.
+  - Arm Receiver: Write the maximum size of the buffer allocated in memory to the S2MM_LENGTH register. This must be written last. This action arms the DMA, which will now wait for an AXI-Stream packet to arrive, write the data to the S2MM_DA, and assert an interrupt (if enabled) when the stream's TLAST signal is seen.
 
 ### 6.5 `gemm_core`
 
@@ -452,7 +453,17 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **Requant in mux**          |                    |               |                           |                                                                                 |
 | `axis_0[130:0]`             | 131 bits           | Output        | `requant_in_mux`          | Output data stream of GEMM result (INT32 partial sums or accumulated INT8).     |
 
-### 6.6 `requant_unit`
+### 6.6 `residual`
+
+**Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
+
+**Key Functionality:**
+
+- **Data Inputs:** Receives two AXI-Streams, axis_residual_a and axis_residual_b, from their respective input multiplexers. These represent the two tensors to be added.
+- **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
+- **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
+
+### 6.7 `requant_unit`
 
 **Purpose:** Converts the 32-bit integer accumulator values from the gemm_core back into 8-bit integers.
 
@@ -463,15 +474,6 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
 - **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
 
-### 6.7 `residual`
-
-**Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
-
-**Key Functionality:**
-
-- **Data Inputs:** Receives two AXI-Streams, axis_residual_a and axis_residual_b, from their respective input multiplexers. These represent the two tensors to be added.
-- **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
-- **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
 
 ## 7. Attention Block
 
