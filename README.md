@@ -90,8 +90,15 @@ The PL contains the custom hardware for the ViT computation.
 
 ### 5.2 `scheduler_tiler`
 
-**Purpose:** global sequencer for Attention+MLP layer; issues `start_tile`, collects `op_done`, flips ping-pong banks, asserts `layer_done`.  
-**Verification:** full FSM transitions incl. stalls from other units.
+**Purpose:** Acts as the global sequencer and master controller for the entire accelerator. It orchestrates the full computation of a Transformer layer, issuing commands to all other blocks.
+
+**Key Functionality:**
+
+- **Top-Level Control:** Responds to the start signal from axi_lite_regs to begin its main FSM. It manages the overall operation sequence (e.g., Attention block, then MLP block).
+- **DMA Coordination:** Issues high-level commands to the axi_dma_shim (e.g., dma_start_transfer, dma_ddr_addr, dma_length_bytes, dma_direction) to move data tiles from DDR into the PL or write results back. It waits for the dma_transfer_done signal before proceeding.
+- **Compute Block Orchestration:** Controls the attention_block and mlp_block by asserting compute_start_op and setting the compute_op_select signal. It waits for their respective attn_block_op_done or mlp_block_op_done flags to synchronize operations.
+- **Data Path Configuration:** Dynamically configures the accelerator's internal data path by driving the sel lines for all multiplexers (e.g., gemm_a_mux_sel, requant_in_sel, residual_b_mux_sel, dma_sel). This allows it to route data streams between the correct source and destination modules for each computational phase.
+- **Status Reporting:** Provides its current state (status[2:0]) back to the axi_lite_regs for the PS to read.
 
 ### 5.3 `axi_dma_shim`
 
