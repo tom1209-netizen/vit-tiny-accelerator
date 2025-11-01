@@ -463,6 +463,18 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
 - **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
 
+**Interface**
+<!-- # Module residual (Skip Connection) -->
+
+| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                  |
+| -------------------------- | ------------------ | ------------- | ------------------------- | -------------------------------------------------------------------------------- |
+| **Requant In Mux**         |                    |               |                           |                                                                                  |
+| `axis_1[130:0]`            | 131 bits           | Output        | `requant_in_mux`          | Output data stream (sum of input A and B, element-wise INT8 addition result).    |
+| **Residual in a mux**      |                    |               |                           |                                                                                  |
+| `axis_residual_a[130:0]`   | 131 bits           | Input         | `residual`                | First input tensor (skip path or previous layer output).                         |
+| **Residual in b mux**      |                    |               |                           |                                                                                  |
+| `axis_residual_b[130:0]`   | 131 bits           | Input         | `residual`                | Second input tensor (current sublayer output or activation).                     |
+
 ### 6.7 `requant_unit`
 
 **Purpose:** Converts the 32-bit integer accumulator values from the gemm_core back into 8-bit integers.
