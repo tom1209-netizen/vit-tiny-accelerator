@@ -425,6 +425,21 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
   - Set Address: Write the DDR destination address to the S2MM_DA register.
   - Arm Receiver: Write the maximum size of the buffer allocated in memory to the S2MM_LENGTH register. This must be written last. This action arms the DMA, which will now wait for an AXI-Stream packet to arrive, write the data to the S2MM_DA, and assert an interrupt (if enabled) when the stream's TLAST signal is seen.
 
+**Interface**
+<!-- # Module AXI DMA IP -->
+
+| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
+| -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
+| **AXI Stream MM2S**        |                    |               |                           |                                                                                 |
+| `m_axis_mm2s[130:0]`       | 131 bits           | Input         | `axi_dma_shim`            | Data stream from memory to accelerator (MM2S).                                  |
+| **AXI Stream S2MM**        |                    |               |                           |                                                                                 |
+| `s_axis_s2mm[130:0]`       | 131 bits           | Input         | `axi_dma_shim`            | Data stream from accelerator to memory (S2MM).                                  |
+| **AXI DMA Lite Interface** |                    |               |                           |                                                                                 |
+| `axi_lite`                 | 147 bits           | Input         | `axi_dma_shim`            | AXI-Lite interface for control and status register communication.               |
+| **Scheduler Tiler**        |                    |               |                           |                                                                                 |
+| `mm2s_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
+| `s2mm_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
+
 ### 6.5 `gemm_core`
 
 **Purpose:** The primary compute engine of the accelerator, performing high-throughput tiled General Matrix Multiplication (GEMM) with INT8 inputs and INT32 accumulation.
