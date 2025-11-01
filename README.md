@@ -1,1 +1,208 @@
-# vit-tiny-accelerator
+# Vision Transformer (Tiny-ViT) Accelerator on Zynq-7000
+
+## 1. Abstract
+
+We implement a TinyViT-5M accelerator on Xilinx Zynq-7000 (Arty Z7) in pure Verilog. Target: **≥1 FPS** on 224×224 input with **INT8** weights/activations and **INT32** accumulation; accuracy within **1–2%** of an INT8 software baseline. Data moves via **AXI-HP + AXI DMA**; control via **AXI-Lite**.
+
+## 2. System Overview
+
+### 2.1 Goals & Metrics
+
+- **Throughput:** ≥1 FPS baseline; stretch 2–5 FPS on Z7-20.  
+- **Accuracy:** ≤2% drop vs. INT8 golden model.  
+- **Implementation:** Verilog RTL
+
+### 2.2 Hardware/Software Partition
+
+- **PS (ARM):** config, DMA setup, I/O management, post-processing.  
+- **PL:** compute kernels (GEMM, Softmax, GELU, Norm), buffers, control FSMs.  
+- **Memory:** External DDR for images/weights/results.
+
+### 2.3 Top-Level Architecture
+
+![Top level diagram](./block_diagram/top.png)
+*Figure 1: Top level diagram*
+
+#### 2.3.1 Processing System (PS)
+
+The PS runs the main control firmware on its ARM core. Its primary responsibilities include:
+
+- **Memory Management:** Allocating and managing DDR memory buffers for input images, model weights, and output results.
+- **Accelerator Control:** Programming the accelerator's control registers via the AXI-Lite interface to set parameters and start computation.
+- **Data Movement:** Configuring AXI DMA transfer descriptors to move data between DDR and the PL.
+- **Supervision:** Handling interrupts, monitoring for timeouts, and managing error recovery.
+- **Post-processing:** Optionally performing final computations on the results, such as argmax to find the classification.
+
+#### 2.3.2 Programmable Logic (PL)
+
+The PL contains the custom hardware for the ViT computation.
+
+- **ViT Accelerator Core:** A dedicated RTL module containing the compute engines (GEMM, Softmax, Norm, GELU), on-chip tile buffers, and control FSMs that orchestrate the layer computations.
+- **AXI DMA Engine:** Provides high-bandwidth data transfer between the external DDR and the accelerator core over AXI-Stream interfaces.
+  - **MM2S (Memory-to-Stream):** Reads input tokens and weights from DDR and streams them into the accelerator.
+  - **S2MM (Stream-to-Memory):** Captures processed results from the accelerator and writes them back to DDR.
+
+## 3. Global Design Constraints
+
+### 3.1 Clocking & Reset
+
+- Single PL clock domain (**aclk**).  
+- **Initial Fmax:** 150 MHz; **Optimization target:** 180–200 MHz.  
+- **aresetn:** active-low, synchronous; deterministic reset state.
+
+### 3.2 Numerics & Data Representation
+
+- **INT8** activations/weights (symmetric −128..127); **INT32** accumulators.  
+- **Requantization:** `y_int8 = saturate(round((acc * M)/2^s) + zp)` (zp≈0).  
+- **Scales:** per-channel (weights) + per-tensor (activations).
+
+### 3.3 Interface Standards
+
+- **AXI4-Stream:** default 128-bit (16×INT8), full tvalid/tready back-pressure, `tlast` on packet end.  
+- **AXI4-Lite:** 32-bit CSRs, 32-bit aligned; W1C status flags.
+
+## 4. Accelerator Architecture (PL)
+
+![ViT PL Block Diagram](./block_diagram/vit_pl.png)
+*Figure 2: ViT PL Block Diagram, you can look at more detailed version at [google drive](https://drive.google.com/file/d/162GrEpLs2getctECauzURsrsy7bRrSK8/view?usp=sharing)*
+
+### 4.1 Module Inventory
+
+- **axi_lite_regs** – CSR bank (config, status, perf counters).  
+- **scheduler_tiler** – master FSM: tiling loops, op sequencing, ping-pong banks.  
+- **axi_dma_shim** – DMA command/stream bridge; sustains ≥80% bus bandwidth.  
+- **tile_buffer** – BRAM double-buffer for overlap of DMA & compute.  
+- **gemm_core** – 8×8 INT8 MAC systolic array (INT32 accumulate).  
+- **requant_unit** – INT32→INT8 conversion (+optional bias).  
+- **residual** - Adds two INT8 vectors, handling potential differences in quantization scales before saturation.
+- **attention_block**, **mlp_block** – integrators that sequence shared kernels.
+
+## 5. Functional Block Descriptions
+
+### 5.1 `axi_lite_regs`
+
+**Purpose:** single PS<->PL memory-mapped interface.  
+**Key:** config registers for tile sizes, addresses, quant params; status (busy/done/error), perf counters.  
+**Verification:** BFM read/write incl. W1C semantics.
+
+### 5.2 `scheduler_tiler`
+
+**Purpose:** global sequencer for Attention+MLP layer; issues `start_tile`, collects `op_done`, flips ping-pong banks, asserts `layer_done`.  
+**Verification:** full FSM transitions incl. stalls from other units.
+
+### 5.3 `axi_dma_shim`
+
+**Purpose:** configures AXI DMA (MM2S/S2MM), tiles streams, collects outputs to DDR.  
+**Perf:** target ≥80% of theoretical bus BW; randomized back-pressure loopback test.
+
+### 5.4 `gemm_core`
+
+**Purpose:** INT8×INT8→INT32 tiled GEMM, 8×8 systolic PEs.  
+**Perf goal:** ≥0.8 MAC/cycle/PE (steady state).  
+**Verification:** bit-exact vs NumPy INT8/INT32; back-pressure safe.
+
+### 5.5 `requant_unit`
+
+**Purpose:** `(acc * M >> s) + zp`, per-tensor/per-channel; saturates to INT8; 1 elem/cycle.  
+**Verification:** exhaustive sweep vs software model (rounding & saturation edges).
+
+### 5.6 `residual`
+
+- **`residual_add`**: handles scale mismatches before saturation.
+
+## 6. Attention Block
+
+![Attention Block](./block_diagram/attention_block.png)
+
+**Role:** orchestrates Q/K/V projections on shared `gemm_core`, computes QKᵀ → Softmax → Attn×V; owns tile buffers for Q/K/V and uses `norm_unit`, `softmax_unit`.
+
+### 6.1 Interfaces
+
+### 6.2 Phase map
+
+| Phase   | DMA mode (`dma_mode`) | A-side (`axis_0`) | B-side (`axis_1`) | Requant-A usage |
+|---|---|---|---|---|
+| **Q-proj** | 0 = tokens | `norm_out` | `axis_wgt` (Wq) | `cap_en=1, cap=Q` |
+| **K-proj** | 0 = tokens | `norm_out` | `axis_wgt` (Wk) | `cap_en=1, cap=K` |
+| **V-proj** | 0 = tokens | `norm_out` | `axis_wgt` (Wv) | `cap_en=1, cap=V` |
+| **QKᵀ** | (no DMA) | `Q_buf` | `Kᵀ` (from buf) | `sfm_en=1` → **Softmax** |
+| **Attn×V** | (no DMA) | `softmax_out` | `V` (from buf) | normal requant → residual |
+
+> _Implementation note:_ Q/K/V projection phases stream **tokens (A)** against **weights (B)**; intermediate Q & K are captured into tile buffers. QKᵀ result goes through `softmax_unit`; the softmax output tiles multiply **V** to produce the head output (then residual path).  
+
+### 6.3 Control FSM (summary)
+
+1. **Normalize** tokens → enable Q/K/V projections (three GEMM jobs).  
+2. **Sync** when Q/K buffers ready → schedule **QKᵀ** matmul; gate to Softmax.  
+3. **Schedule** **Softmax×V** GEMM; write tiles to output/residual mux.  
+4. **Assert** `attn_block_op_done`. _(Insert your state names if you have them.)_
+
+---
+
+## 7. MLP Block
+
+![MLP Block](./block_diagram/mlp_block.png)
+
+Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses weight buffer and tile buffer; orchestrated by local FSM and `scheduler_tiler`.
+
+## 8. Dataflow & Pipeline
+
+1. **DDR → DMA (MM2S)** streams tokens/weights to tile buffers.  
+2. **Scheduler** kicks **Attention** phases per §6.2, then **MLP**.  
+3. **GEMM** outputs (INT32) → **requant_unit** → INT8.  
+4. **Residual add** and write-back via **DMA (S2MM)** to DDR.  
+5. **PS** reads logits, computes argmax.
+
+## 9. Interfaces & Register Map (AXI-Lite)
+
+| Offset | Register | Dir | Description |
+|---:|---|---|---|
+| 0x00 | CONTROL | R/W | `[0]=start, [1]=soft_reset, [2]=irq_enable` |
+| 0x04 | STATUS | R | `[0]=done_tick, [1]=busy, [2]=error_flag` |
+| 0x10 | TILE_CFG | R/W | M/N/K, strides |
+| 0x20 | ADDR_A_BASE | R/W | DDR base for A |
+| 0x24 | ADDR_B_BASE | R/W | DDR base for B |
+| 0x28 | ADDR_C_BASE | R/W | DDR base for C |
+| 0x40 | REQUANT_SCALE | R/W | integer `M` |
+| 0x44 | REQUANT_SHIFT | R/W | shift `s` |
+| 0x70 | LAYER_CFG | R/W | layer index, heads, d, tokens N |
+
+---
+
+## 10. Verification Plan
+
+### 10.1 Unit Tests
+
+- **gemm_core:** vector tests vs NumPy golden; stall + back-pressure.  
+- **requant_unit:** exhaustive sweep for rounding/saturation edges.  
+- **softmax_unit:** L1 error ≤1.5% vs FP target; sum≈1.0 (quantized).  
+- **elementwise_ops:** GELU ≤2 LSB; Norm cosine sim ≥0.995.
+
+### 10.2 Integration Tests
+
+- **attention_block / mlp_block:** end-to-end match vs PyTorch INT8 tensors within MSE tolerance.
+
+### 10.3 System Tests
+
+- DMA loopback; GEMM microbenchmark; PS<->PL regression.
+
+## 12. Risks & Mitigations
+
+- **DDR bandwidth bottleneck:** double-buffering, larger bursts, on-chip reuse.  
+- **Timing closure @ 180–200 MHz:** extra pipelining, floorplanning, temp smaller PE array.  
+- **Quantization accuracy:** per-channel scales, larger LUTs, post-quant calibration.
+
+## 13. Tools & Environment
+
+Vivado/Vitis 2024.x, Verilator/xsim, Python 3.10 reference model; Arty Z7-20 board; XDC constraints.
+
+## Appendix A. Requantization Details
+
+Derive `M,s,zp` from INT8 calibration; discuss per-channel vs per-tensor trade-offs.
+
+## Appendix B. Signal Dictionary (excerpt)
+
+- `axis_0`, `axis_1`: dual compute paths (A/B) from blocks.  
+- `dma_mode`: 0=tokens, 1=weights.  
+- `cap_en`: capture enable into phase buffer (Q/K/V).  
+- `sfm_en`: route to softmax pipeline.
