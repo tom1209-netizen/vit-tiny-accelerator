@@ -2,14 +2,14 @@
 
 ## 1. Abstract
 
-We implement a TinyViT-5M accelerator on Xilinx Zynq-7000 (Arty Z7) in pure Verilog. Target: **≥1 FPS** on 224×224 input with **INT8** weights/activations and **INT32** accumulation; accuracy within **1–2%** of an INT8 software baseline. Data moves via **AXI-HP + AXI DMA**; control via **AXI-Lite**.
+We implement a TinyViT-5M accelerator on Xilinx Zynq-7000 (Arty Z7) in pure Verilog. Target: **>=1 FPS** on 224×224 input with **INT8** weights/activations and **INT32** accumulation; accuracy within **1–2%** of an INT8 software baseline. Data moves via **AXI-HP + AXI DMA**; control via **AXI-Lite**.
 
 ## 2. System Overview
 
 ### 2.1 Goals & Metrics
 
-- **Throughput:** ≥1 FPS baseline; stretch 2–5 FPS on Z7-20.  
-- **Accuracy:** ≤2% drop vs. INT8 golden model.  
+- **Throughput:** >=1 FPS baseline; stretch 2–5 FPS on Z7-20.  
+- **Accuracy:** <=2% drop vs. INT8 golden model.  
 - **Implementation:** Verilog RTL
 
 ### 2.2 Hardware/Software Partition
@@ -69,11 +69,10 @@ The PL contains the custom hardware for the ViT computation.
 ### 4.1 Module Inventory
 
 - **axi_lite_regs** – CSR bank (config, status, perf counters).  
-- **scheduler_tiler** – master FSM: tiling loops, op sequencing, ping-pong banks.  
-- **axi_dma_shim** – DMA command/stream bridge; sustains ≥80% bus bandwidth.  
-- **tile_buffer** – BRAM double-buffer for overlap of DMA & compute.  
+- **scheduler_tiler** – master FSM: tiling loops, op sequencing.
+- **axi_dma_shim** – DMA command/stream bridge; sustains >= 80% bus bandwidth.  
 - **gemm_core** – 8×8 INT8 MAC systolic array (INT32 accumulate).  
-- **requant_unit** – INT32→INT8 conversion (+optional bias).  
+- **requant_unit** – INT32->INT8 conversion.
 - **residual** - Adds two INT8 vectors, handling potential differences in quantization scales before saturation.
 - **attention_block**, **mlp_block** – integrators that sequence shared kernels.
 
@@ -93,12 +92,12 @@ The PL contains the custom hardware for the ViT computation.
 ### 5.3 `axi_dma_shim`
 
 **Purpose:** configures AXI DMA (MM2S/S2MM), tiles streams, collects outputs to DDR.  
-**Perf:** target ≥80% of theoretical bus BW; randomized back-pressure loopback test.
+**Perf:** target >=80% of theoretical bus BW; randomized back-pressure loopback test.
 
 ### 5.4 `gemm_core`
 
-**Purpose:** INT8×INT8→INT32 tiled GEMM, 8×8 systolic PEs.  
-**Perf goal:** ≥0.8 MAC/cycle/PE (steady state).  
+**Purpose:** INT8×INT8->INT32 tiled GEMM, 8×8 systolic PEs.  
+**Perf goal:** >=0.8 MAC/cycle/PE (steady state).  
 **Verification:** bit-exact vs NumPy INT8/INT32; back-pressure safe.
 
 ### 5.5 `requant_unit`
@@ -114,7 +113,7 @@ The PL contains the custom hardware for the ViT computation.
 
 ![Attention Block](./block_diagram/attention_block.png)
 
-**Role:** orchestrates Q/K/V projections on shared `gemm_core`, computes QKᵀ → Softmax → Attn×V; owns tile buffers for Q/K/V and uses `norm_unit`, `softmax_unit`.
+**Role:** orchestrates Q/K/V projections on shared `gemm_core`, computes QKᵀ -> Softmax -> Attn×V; owns tile buffers for Q/K/V and uses `norm_unit`, `softmax_unit`.
 
 ### 6.1 Interfaces
 
@@ -125,17 +124,17 @@ The PL contains the custom hardware for the ViT computation.
 | **Q-proj** | 0 = tokens | `norm_out` | `axis_wgt` (Wq) | `cap_en=1, cap=Q` |
 | **K-proj** | 0 = tokens | `norm_out` | `axis_wgt` (Wk) | `cap_en=1, cap=K` |
 | **V-proj** | 0 = tokens | `norm_out` | `axis_wgt` (Wv) | `cap_en=1, cap=V` |
-| **QKᵀ** | (no DMA) | `Q_buf` | `Kᵀ` (from buf) | `sfm_en=1` → **Softmax** |
-| **Attn×V** | (no DMA) | `softmax_out` | `V` (from buf) | normal requant → residual |
+| **QKᵀ** | (no DMA) | `Q_buf` | `Kᵀ` (from buf) | `sfm_en=1` -> **Softmax** |
+| **Attn×V** | (no DMA) | `softmax_out` | `V` (from buf) | normal requant -> residual |
 
-> _Implementation note:_ Q/K/V projection phases stream **tokens (A)** against **weights (B)**; intermediate Q & K are captured into tile buffers. QKᵀ result goes through `softmax_unit`; the softmax output tiles multiply **V** to produce the head output (then residual path).  
+> Implementation note: Q/K/V projection phases stream **tokens (A)** against **weights (B)**; intermediate Q & K are captured into tile buffers. QKᵀ result goes through `softmax_unit`; the softmax output tiles multiply **V** to produce the head output (then residual path).  
 
 ### 6.3 Control FSM (summary)
 
-1. **Normalize** tokens → enable Q/K/V projections (three GEMM jobs).  
-2. **Sync** when Q/K buffers ready → schedule **QKᵀ** matmul; gate to Softmax.  
+1. **Normalize** tokens -> enable Q/K/V projections (three GEMM jobs).  
+2. **Sync** when Q/K buffers ready -> schedule **QKᵀ** matmul; gate to Softmax.  
 3. **Schedule** **Softmax×V** GEMM; write tiles to output/residual mux.  
-4. **Assert** `attn_block_op_done`. _(Insert your state names if you have them.)_
+4. **Assert** `attn_block_op_done`.
 
 ---
 
@@ -147,9 +146,9 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 
 ## 8. Dataflow & Pipeline
 
-1. **DDR → DMA (MM2S)** streams tokens/weights to tile buffers.  
+1. **DDR -> DMA (MM2S)** streams tokens/weights to tile buffers.  
 2. **Scheduler** kicks **Attention** phases per §6.2, then **MLP**.  
-3. **GEMM** outputs (INT32) → **requant_unit** → INT8.  
+3. **GEMM** outputs (INT32) -> **requant_unit** -> INT8.  
 4. **Residual add** and write-back via **DMA (S2MM)** to DDR.  
 5. **PS** reads logits, computes argmax.
 
@@ -175,8 +174,8 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 
 - **gemm_core:** vector tests vs NumPy golden; stall + back-pressure.  
 - **requant_unit:** exhaustive sweep for rounding/saturation edges.  
-- **softmax_unit:** L1 error ≤1.5% vs FP target; sum≈1.0 (quantized).  
-- **elementwise_ops:** GELU ≤2 LSB; Norm cosine sim ≥0.995.
+- **softmax_unit:** L1 error <=1.5% vs FP target; sum≈1.0 (quantized).  
+- **elementwise_ops:** GELU <=2 LSB; Norm cosine sim >=0.995.
 
 ### 10.2 Integration Tests
 
