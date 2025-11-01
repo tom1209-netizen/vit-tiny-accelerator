@@ -486,6 +486,15 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
 - **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
 
+**Interface**
+<!-- # Module requant_unit -->
+
+| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
+| -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
+| **Requant in mux**         |                    |               |                           |                                                                                 |
+| `axis_in[130:0]`           | 131 bits           | Input         | `requant_unit`            | Input activation data stream (INT32 or INT8, 128-bit per beat).                 |
+| **Requant out demux**      |                    |               |                           |                                                                                 |
+| `axis_out[130:0]`          | 131 bits           | Output        | `requant_out_demux`       | Requantized output data stream (INT8, 128-bit per beat, packed tensor output).  |
 
 ## 7. Attention Block
 
