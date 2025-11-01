@@ -299,7 +299,6 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | `requant_shift[31:0]`         | 32 bits            | Input         | `scheduler_tiler`      | Requantization right-shift value for scaling adjustment                         |
 | `layer_cfg[31:0]`             | 32 bits            | Input         | `scheduler_tiler`      | Layer configuration register (defines layer type, sequence, etc.)               |
 
-
 ### 6.2 `scheduler_tiler`
 
 **Purpose:** Acts as the global sequencer and master controller for the entire accelerator. It orchestrates the full computation of a Transformer layer, issuing commands to all other blocks.
@@ -360,7 +359,6 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **DMA Demux**                        |                    |               |                                |                                                                           |
 | `dma_sel`                            | 1 bit              | Input         | `dma_demux`                    | Select data path or buffer for DMA read/write.                            |
 
-
 ### 6.3 axi_dma_shim
 
 **Purpose:** Acts as a simplified hardware-friendly interface to the complex AXI DMA IP. It translates high-level commands from the scheduler_tiler into the necessary AXI protocol signals to manage data transfers between DDR and the PL's AXI-Streams.
@@ -385,7 +383,6 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | `dma_transfer_done`           | 1 bit              | Output        | `scheduler_tiler`        | Indicates DMA transaction completion.                                           |
 | **DMA Demux**                 |                    |               |                          |                                                                                 |
 | `axis_in[130:0]`              | 131 bits           | Output        | `dma_demux`              | AXI4-Stream data output for DMA Demux.                                          |
-
 
 ### 6.4 AXI DMA IP
 
@@ -430,6 +427,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 ### 6.5 `gemm_core`
 
 **Purpose:** The primary compute engine of the accelerator, performing high-throughput tiled General Matrix Multiplication (GEMM) with INT8 inputs and INT32 accumulation.
+
 **Key Functionality:**
 
 - **Compute Kernel:** Implements the core $C_{int32} = A_{int8} \times B_{int8}$ operation as an 8x8 systolic array.
@@ -437,6 +435,22 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - **Data Inputs:** Consumes two parallel AXI-Streams: axis_gemm_a (from gemm_a_mux) and axis_gemm_b (from gemm_b_mux). These streams carry the packed INT8 data for the A and B matrices.
 - **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
 - **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
+
+**Interface**
+<!-- # Module gemm_core -->
+
+| **Signal Name**             | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
+| --------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
+| **GEMM start mux**          |                    |               |                           |                                                                                 |
+| `start_tile`                | 1 bit              | Input         | `gemm_core`               | Start signal for the current tile computation.                                  |
+| **GEMM done demux**         |                    |               |                           |                                                                                 |
+| `tile_done`                 | 1 bit              | Output        | `gemm_done_demux`         | Tile computation completion signal.                                             |
+| **GEMM a mux**              |                    |               |                           |                                                                                 |
+| `axis_gemm_a[130:0]`        | 131 bits           | Input         | `gemm_core`               | Input matrix tile A (INT8 elements packed, 128-bit per beat).                   |
+| **GEMM b mux**              |                    |               |                           |                                                                                 |
+| `axis_gemm_b[130:0]`        | 131 bits           | Input         | `gemm_core`               | Input matrix tile B (INT8 elements packed, 128-bit per beat).                   |
+| **Requant in mux**          |                    |               |                           |                                                                                 |
+| `axis_0[130:0]`             | 131 bits           | Output        | `requant_in_mux`          | Output data stream of GEMM result (INT32 partial sums or accumulated INT8).     |
 
 ### 6.6 `requant_unit`
 
