@@ -118,8 +118,14 @@ The PL contains the custom hardware for the ViT computation.
 
 ### 5.5 `requant_unit`
 
-**Purpose:** `(acc * M >> s) + zp`, per-tensor/per-channel; saturates to INT8; 1 elem/cycle.  
-**Verification:** exhaustive sweep vs software model (rounding & saturation edges).
+**Purpose:** Converts the 32-bit integer accumulator values from the gemm_core back into 8-bit integers.
+
+**Key Functionality:**
+
+- **Data Input:** Receives an AXI-Stream (axis_in) from the requant_in_mux. This stream can be either INT32 data from the gemm_core or INT8 data from the residual block.
+- **Quantization:** When processing INT32 data, it applies the per-tensor or per-channel requantization formula (acc * M >> s) + zp using the scale (M) and shift (s) values provided by the scheduler_tiler (via axi_lite_regs).
+- **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
+- **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
 
 ### 5.6 `residual`
 
