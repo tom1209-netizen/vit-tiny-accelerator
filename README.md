@@ -286,7 +286,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | ----------------------------- | ------------------ | ------------- | ---------------------- | ------------------------------------------------------------------------------- |
 | **AXI Stream**                |                    |               |                        |                                                                                 |
 | `axi_lite[146:0]`             | 147 bits           | Input         | `Processing System`    | This is the bus to control AXI Regs                                             |
-| **w/ Scheduler**              |                    |               |                        |                                                                                 |
+| **Scheduler**                 |                    |               |                        |                                                                                 |
 | `status[2:0]`                 | 3 bits             | Output        | `scheduler_tiler`      | Scheduler status flags (e.g., `idle`, `busy`, `done`, or `error`)               |
 | `start`                       | 1 bit              | Input         | `scheduler_tiler`      | Start signal - triggers the Scheduler to begin operation sequence               |
 | `soft_reset`                  | 1 bit              | Input         | `scheduler_tiler`      | Soft reset control for internal FSMs                                            |
@@ -315,61 +315,77 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 **Interface**
 <!-- # Module scheduler_tiler -->
 
-| **Signal Name**             | **Signal Width**   | **Direction** | **Destination**            | **Description**                                                           |
-| --------------------------- | ------------------ | ------------- | -------------------------- | ------------------------------------------------------------------------- |
-| **w/ AXI Lite Regs**        |                    |               |                            |                                                                           |
-| `status[2:0]`               | 3 bits             | Output        | `axi_lite_regs`            | Scheduler status flags (e.g., idle, busy, done).                          |
-| `start`                     | 1 bit              | Input         | `axi_lite_regs`            | Trigger to start the scheduler operation.                                 |
-| `soft_reset`                | 1 bit              | Input         | `axi_lite_regs`            | Soft reset for internal FSM reset.                                        |
-| `irq_enable`                | 1 bit              | Input         | `axi_lite_regs`            | Interrupt enable flag.                                                    |
-| `tile_cfg[31:0]`            | 32 bits            | Input         | `axi_lite_regs`            | Tile configuration (defines M, N, K sizes).                               |
-| `addr_a_base[31:0]`         | 32 bits            | Input         | `axi_lite_regs`            | Base DDR address for matrix A.                                            |
-| `addr_b_base[31:0]`         | 32 bits            | Input         | `axi_lite_regs`            | Base DDR address for matrix B.                                            |
-| `addr_c_base[31:0]`         | 32 bits            | Input         | `axi_lite_regs`            | Base DDR address for matrix C (output buffer).                            |
-| `requant_scale[31:0]`       | 32 bits            | Input         | `axi_lite_regs`            | Requantization scaling factor for INT8.                                   |
-| `requant_shift[31:0]`       | 32 bits            | Input         | `axi_lite_regs`            | Requantization shift value.                                               |
-| `layer_cfg[31:0]`           | 32 bits            | Input         | `axi_lite_regs`            | Layer configuration register.                                             |
-| **w/ AXI DMA Shim**         |                    |               |                            |                                                                           |
-| `dma_start_transfer`        | 1 bit              | Input         | `axi_dma_shim`             | Command to start the DMA transfer.                                        |
-| `dma_ddr_addr[31:0]`        | 32 bits            | Input         | `axi_dma_shim`             | DDR address for DMA operation.                                            |
-| `dma_length_bytes[31:0]`    | 32 bits            | Input         | `axi_dma_shim`             | Data length for DMA transfer.                                             |
-| `dma_direction`             | 1 bit              | Input         | `axi_dma_shim`             | Direction for DMA operation (0 = read, 1 = write).                        |
-| `dma_transfer_done`         | 1 bit              | Output        | `axi_dma_shim`             | Flag indicating DMA transfer completion.                                  |
-| **w/ AXI DMA IP**           |                    |               |                            |                                                                           |
-| `mm2s_introut`              | 32 bits            | Input         | `axi_dma_ip`               | Interrupt output for the memory-to-stream (MM2S) transfer completion.        |
-| `s2mm_introut`              | 32 bits            | Input         | `axi_dma_ip`               | Interrupt output for the stream-to-memory (S2MM) transfer completion.       |
-| **w/ Attention & MLP**      |                    |               |                            |                                                                           |
-| `compute_start_op`          | 1 bit              | Input         | `attention_block`, `mlp_block` | Start signal for compute operations.                                      |
-| `compute_op_select[3:0]`    | 4 bits             | Input         | `attention_block`, `mlp_block` | Select operation type (e.g., Attention, MLP, GEMM, Requant).              |
-| `mlp_block_op_done`         | 1 bit              | Output        | `mlp_block`                | Operation done signal from MLP block.                                     |
-| `attn_block_op_done`        | 1 bit              | Output        | `attention_block`          | Operation done signal from Attention block.                               |
-| **w/ requant_in_mux**       |                    |               |                            |                                                                           |
-| `requant_in_sel`            | 1 bit              | Input         | `requant_in_mux`           | Select input source for the Requantization Unit.                          |
-| **w/ requant_out_demux**    |                    |               |                            |                                                                           |
-| `requant_out_sel`           | 1 bit              | Input         | `requant_out_demux`        | Select output destination for the Requantization Unit.                    |
-| **w/ gemm_a_mux**           |                    |               |                            |                                                                           |
-| `gemm_a_mux_sel`            | 1 bit              | Input         | `gemm_a_mux`               | Select data stream for GEMM input A.                                      |
-| **w/ gemm_b_mux**           |                    |               |                            |                                                                           |
-| `gemm_b_mux_sel`            | 1 bit              | Input         | `gemm_b_mux`               | Select data stream for GEMM input B.                                      |
-| **w/ residual_in_a_mux**    |                    |               |                            |                                                                           |
-| `residual_a_mux_sel`        | 1 bit              | Input         | `residual_in_a_mux`        | Select first operand for Residual Add.                                    |
-| **w/ residual_in_b_mux**    |                    |               |                            |                                                                           |
-| `residual_b_mux_sel`        | 1 bit              | Input         | `residual_in_b_mux`        | Select second operand for Residual Add.                                   |
-| **w/ GEMM done demux & GEMM start mux** |               |               |                            |                                                                           |
-| `sel`                       | 1 bit              | Input         | `gemm_start_mux`, `gemm_done_demux` | Select GEMM start/done routing for parallel compute paths.                |
-| **w/ DMA Demux**            |                    |               |                            |                                                                           |
-| `dma_sel`                   | 1 bit              | Input         | `dma_demux`                 | Select data path or buffer for DMA read/write.                             |
+| **Signal Name**                      | **Signal Width**   | **Direction** | **Destination**                | **Description**                                                           |
+| ------------------------------------ | ------------------ | ------------- | ------------------------------ | ------------------------------------------------------------------------- |
+| **AXI Lite Regs**                    |                    |               |                                |                                                                           |
+| `status[2:0]`                        | 3 bits             | Output        | `axi_lite_regs`                | Scheduler status flags (e.g., idle, busy, done).                          |
+| `start`                              | 1 bit              | Input         | `axi_lite_regs`                | Trigger to start the scheduler operation.                                 |
+| `soft_reset`                         | 1 bit              | Input         | `axi_lite_regs`                | Soft reset for internal FSM reset.                                        |
+| `irq_enable`                         | 1 bit              | Input         | `axi_lite_regs`                | Interrupt enable flag.                                                    |
+| `tile_cfg[31:0]`                     | 32 bits            | Input         | `axi_lite_regs`                | Tile configuration (defines M, N, K sizes).                               |
+| `addr_a_base[31:0]`                  | 32 bits            | Input         | `axi_lite_regs`                | Base DDR address for matrix A.                                            |
+| `addr_b_base[31:0]`                  | 32 bits            | Input         | `axi_lite_regs`                | Base DDR address for matrix B.                                            |
+| `addr_c_base[31:0]`                  | 32 bits            | Input         | `axi_lite_regs`                | Base DDR address for matrix C (output buffer).                            |
+| `requant_scale[31:0]`                | 32 bits            | Input         | `axi_lite_regs`                | Requantization scaling factor for INT8.                                   |
+| `requant_shift[31:0]`                | 32 bits            | Input         | `axi_lite_regs`                | Requantization shift value.                                               |
+| `layer_cfg[31:0]`                    | 32 bits            | Input         | `axi_lite_regs`                | Layer configuration register.                                             |
+| **AXI DMA Shim**                     |                    |               |                                |                                                                           |
+| `dma_start_transfer`                 | 1 bit              | Input         | `axi_dma_shim`                 | Command to start the DMA transfer.                                        |
+| `dma_ddr_addr[31:0]`                 | 32 bits            | Input         | `axi_dma_shim`                 | DDR address for DMA operation.                                            |
+| `dma_length_bytes[31:0]`             | 32 bits            | Input         | `axi_dma_shim`                 | Data length for DMA transfer.                                             |
+| `dma_direction`                      | 1 bit              | Input         | `axi_dma_shim`                 | Direction for DMA operation (0 = read, 1 = write).                        |
+| `dma_transfer_done`                  | 1 bit              | Output        | `axi_dma_shim`                 | Flag indicating DMA transfer completion.                                  |
+| **AXI DMA IP**                       |                    |               |                                |                                                                           |
+| `mm2s_introut`                       | 32 bits            | Input         | `axi_dma_ip`                   | Interrupt output for the memory-to-stream (MM2S) transfer completion.     |
+| `s2mm_introut`                       | 32 bits            | Input         | `axi_dma_ip`                   | Interrupt output for the stream-to-memory (S2MM) transfer completion.     |
+| **Attention & MLP**                  |                    |               |                                |                                                                           |
+| `compute_start_op`                   | 1 bit              | Input         | `attention_block`, `mlp_block` | Start signal for compute operations.                                      |
+| `compute_op_select[3:0]`             | 4 bits             | Input         | `attention_block`, `mlp_block` | Select operation type (e.g., Attention, MLP, GEMM, Requant).              |
+| `mlp_block_op_done`                  | 1 bit              | Output        | `mlp_block`                    | Operation done signal from MLP block.                                     |
+| `attn_block_op_done`                 | 1 bit              | Output        | `attention_block`              | Operation done signal from Attention block.                               |
+| **requant_in_mux**                   |                    |               |                                |                                                                           |
+| `requant_in_sel`                     | 1 bit              | Input         | `requant_in_mux`               | Select input source for the Requantization Unit.                          |
+| **requant_out_demux**                |                    |               |                                |                                                                           |
+| `requant_out_sel`                    | 1 bit              | Input         | `requant_out_demux`            | Select output destination for the Requantization Unit.                    |
+| **gemm_a_mux**                       |                    |               |                                |                                                                           |
+| `gemm_a_mux_sel`                     | 1 bit              | Input         | `gemm_a_mux`                   | Select data stream for GEMM input A.                                      |
+| **gemm_b_mux**                       |                    |               |                                |                                                                           |
+| `gemm_b_mux_sel`                     | 1 bit              | Input         | `gemm_b_mux`                   | Select data stream for GEMM input B.                                      |
+| **residual_in_a_mux**                |                    |               |                                |                                                                           |
+| `residual_a_mux_sel`                 | 1 bit              | Input         | `residual_in_a_mux`            | Select first operand for Residual Add.                                    |
+| **residual_in_b_mux**                |                    |               |                                |                                                                           |
+| `residual_b_mux_sel`                 | 1 bit              | Input         | `residual_in_b_mux`            | Select second operand for Residual Add.                                   |
+| **GEMM done demux & GEMM start mux** |                    |               |                                |                                                                           |
+| `sel`                                | 1 bit              | Input         | `gemm_start_mux`, `gemm_done_demux` | Select GEMM start/done routing for parallel compute paths.           |
+| **DMA Demux**                        |                    |               |                                |                                                                           |
+| `dma_sel`                            | 1 bit              | Input         | `dma_demux`                    | Select data path or buffer for DMA read/write.                            |
 
 
 ### 6.3 axi_dma_shim
 
 **Purpose:** Acts as a simplified hardware-friendly interface to the complex AXI DMA IP. It translates high-level commands from the scheduler_tiler into the necessary AXI protocol signals to manage data transfers between DDR and the PL's AXI-Streams.
+
 **Key Functionality:**
 
 - **Command Interface:** Receives simple commands (dma_start_transfer, dma_ddr_addr, dma_length_bytes, dma_direction) from the scheduler_tiler.
 - **Stream Interface (MM2S):** When dma_direction is 0 (DDR to PL), it fetches data from the specified dma_ddr_addr and streams it out as an AXI-Stream (axis_in) to the dma_demux.
 - **Stream Interface (S2MM):** When dma_direction is 1 (PL to DDR), it consumes an AXI-Stream and writes the data to the target DDR address.
 - **Synchronization:** Asserts dma_transfer_done back to the scheduler_tiler upon completion of the requested byte transfer, allowing the main FSM to proceed.
+
+**Interface**
+<!-- # Module axi_dma_shim -->
+
+| **Signal Name**               | **Signal Width**   | **Direction** | **Destination**          | **Description**                                                                 |
+| ----------------------------- | ------------------ | ------------- | ------------------------ | ------------------------------------------------------------------------------- |
+| **Scheduler tiler**           |                    |               |                          |                                                                                 |
+| `dma_start_transfer`          | 1 bit              | Input         | `scheduler_tiler`        | Trigger to start a DMA read/write operation.                                    |
+| `dma_ddr_addr[31:0]`          | 32 bits            | Input         | `scheduler_tiler`        | Base DDR address for the DMA transaction.                                       |
+| `dma_length_bytes[31:0]`      | 32 bits            | Input         | `scheduler_tiler`        | Total data length in bytes for the DMA transfer.                                |
+| `dma_direction`               | 1 bit              | Input         | `scheduler_tiler`        | DMA direction control: 0 = MM2S (DDR -> PL), 1 = S2MM (PL -> DDR).              |
+| `dma_transfer_done`           | 1 bit              | Output        | `scheduler_tiler`        | Indicates DMA transaction completion.                                           |
+| **DMA Demux**                 |                    |               |                          |                                                                                 |
+| `axis_in[130:0]`              | 131 bits           | Output        | `dma_demux`              | AXI4-Stream data output for DMA Demux.                                          |
+
 
 ### 6.4 AXI DMA IP
 
