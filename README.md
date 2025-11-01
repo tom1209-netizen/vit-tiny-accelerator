@@ -1,5 +1,58 @@
 # Vision Transformer (Tiny-ViT) Accelerator on Zynq-7000
 
+## Table of Contents
+
+- [1. Abstract](#1-abstract)
+- [2. System Overview](#2-system-overview)
+  - [2.1. Goals & Metrics](#21-goals--metrics)
+  - [2.2. Hardware/Software Partition](#22-hardwaresoftware-partition)
+  - [2.3. Top-Level Architecture](#23-top-level-architecture)
+    - [2.3.1. Processing System (PS)](#231-processing-system-ps)
+    - [2.3.2. Programmable Logic (PL)](#232-programmable-logic-pl)
+- [3. TinyViT-5M Model Architecture](#3-tinyvit-5m-model-architecture)
+  - [3.1. Model Parameters (TinyViT-5M)](#31-model-parameters-tinyvit-5m)
+  - [3.2. Architectural Stages](#32-architectural-stages)
+    - [1. Convolutional Stem (PatchEmbed)](#1-convolutional-stem-patchembed)
+    - [2. Stage 1 – Convolutional Layer](#2-stage-1--convolutional-layer)
+    - [3. Stages 2–4 – Transformer Layers](#3-stages-24--transformer-layers)
+      - [a. Windowed Multi-Head Self-Attention (MSA)](#a-windowed-multi-head-self-attention-msa)
+      - [b. Residual Connection 1](#b-residual-connection-1)
+      - [c. Local Convolution](#c-local-convolution)
+      - [d. MLP Block (Feed-Forward Network)](#d-mlp-block-feed-forward-network)
+      - [e. Residual Connection 2](#e-residual-connection-2)
+    - [4. Downsampling (PatchMerging)](#4-downsampling-patchmerging)
+    - [5. Classifier Head](#5-classifier-head)
+  - [3.3. Hardware Relevance Summary](#33-hardware-relevance-summary)
+- [4. Global Design Constraints](#4-global-design-constraints)
+  - [4.1. Clocking & Reset](#41-clocking--reset)
+  - [4.2. Numerics & Data Representation](#42-numerics--data-representation)
+  - [4.3. Interface Standards](#43-interface-standards)
+- [5. Accelerator Architecture (PL)](#5-accelerator-architecture-pl)
+  - [5.1. Module Inventory](#51-module-inventory)
+- [6. Functional Block Descriptions](#6-functional-block-descriptions)
+  - [6.1. axi_lite_regs](#61-axi_lite_regs)
+  - [6.2. scheduler_tiler](#62-scheduler_tiler)
+  - [6.3. axi_dma_shim](#63-axi_dma_shim)
+  - [6.4. gemm_core](#64-gemm_core)
+  - [6.5. requant_unit](#65-requant_unit)
+  - [6.6. residual](#66-residual)
+- [7. Attention Block](#7-attention-block)
+  - [7.1. Interfaces](#71-interfaces)
+  - [7.2. Phase Map](#72-phase-map)
+  - [7.3. Control FSM (summary)](#73-control-fsm-summary)
+- [8. MLP Block](#8-mlp-block)
+- [9. Dataflow & Pipeline](#9-dataflow--pipeline)
+- [10. Interfaces & Register Map (AXI-Lite)](#10-interfaces--register-map-axi-lite)
+- [11. Verification Plan](#11-verification-plan)
+  - [11.1. Unit Tests](#111-unit-tests)
+  - [11.2. Integration Tests](#112-integration-tests)
+  - [11.3. System Tests](#113-system-tests)
+- [12. Risks & Mitigations](#12-risks--mitigations)
+- [13. Tools & Environment](#13-tools--environment)
+- [Appendix A. Requantization Details](#appendix-a-requantization-details)
+- [Appendix B. Signal Dictionary (excerpt)](#appendix-b-signal-dictionary-excerpt)
+
+
 ## 1. Abstract
 
 We implement a TinyViT-5M accelerator on Xilinx Zynq-7000 (Arty Z7) in pure Verilog. Target: **>=1 FPS** on 224×224 input with **INT8** weights/activations and **INT32** accumulation; accuracy within **1–2%** of an INT8 software baseline. Data moves via **AXI-HP + AXI DMA**; control via **AXI-Lite**.
@@ -42,31 +95,169 @@ The PL contains the custom hardware for the ViT computation.
   - **MM2S (Memory-to-Stream):** Reads input tokens and weights from DDR and streams them into the accelerator.
   - **S2MM (Stream-to-Memory):** Captures processed results from the accelerator and writes them back to DDR.
 
-## 3. Global Design Constraints
+## 3. TinyViT-5M Model Architecture
 
-### 3.1 Clocking & Reset
+To understand the hardware requirements, it is essential to first analyze the target neural network.  
+The accelerator is designed for **TinyViT-5M**, a compact, high-performance hybrid vision model.
+
+Unlike the original **Vision Transformer (ViT)** which relies purely on self-attention, **TinyViT** employs a *hybrid architecture* that strategically combines:
+
+- **Convolution** for efficient low-level feature extraction, and  
+- **Windowed self-attention** for global information mixing.
+
+This hybrid design is key to TinyViT’s computational efficiency — and maps directly to our hardware modules (Attention Block, MLP Block, GEMM, and Scheduler).
+
+The model is organized into a **convolutional stem**, **four sequential stages**, and a **classifier head**.
+
+### 3.1 Model Parameters (TinyViT-5M)
+
+The target variant is `tiny_vit_5m_224`, which determines the compute and memory footprint of the accelerator.
+
+| Parameter | Description | Value |
+|------------|--------------|--------|
+| **Input Resolution** | Image size | 224 × 224 |
+| **Stages (Layers)** | Sequential depth | 4 |
+| **Blocks per Stage** | Depth per stage | [2, 2, 6, 2] |
+| **Embedding Dims** | Feature width per stage | [64, 128, 160, 320] |
+| **Attention Heads** | Multi-head attention configuration | [2, 4, 5, 10] |
+| **Attention Windows** | Window sizes per stage | [7, 7, 14, 7] |
+
+### 3.2 Architectural Stages
+
+The data flows through the network as follows:
+
+#### 1. Convolutional Stem (PatchEmbed)
+
+The model begins with a **PatchEmbed** module.  
+Instead of a single large convolution, TinyViT uses **two sequential 3×3 convolutions** (each with stride 2, followed by BatchNorm and GELU).  
+This down-samples the image by 4× and forms the initial token embeddings.
+
+#### 2. Stage 1 – Convolutional Layer
+
+This stage is **purely convolutional**, built from **MBConv** (Mobile Inverted Bottleneck) blocks inspired by MobileNetV2.  
+It efficiently processes high-resolution, low-level features without the quadratic cost of self-attention.
+
+#### 3. Stages 2–4 – Transformer Layers
+
+These are the **core transformer stages**.  
+Each stage is a stack of **TinyViTBlock** modules — the primary target of our accelerator.
+
+For an input token $X_{in}$, the computation proceeds as follows:
+
+##### a. Windowed Multi-Head Self-Attention (MSA)
+
+Each block begins with normalization and a windowed attention operation:
+
+$$
+\begin{aligned}
+X_{\text{norm1}} &= \text{LayerNorm}(X_{in}) \\
+Q, K, V &= \text{Linear}(X_{\text{norm1}}) \\
+\text{AttnMatrix} &= \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}} + B\right) \\
+X_{\text{attn}} &= \text{Linear}(\text{AttnMatrix} \cdot V)
+\end{aligned}
+$$
+
+- **Hardware mapping:** The `attention_block` orchestrates this flow using the `gemm_core` for:
+  - Three linear projections (Q, K, V)
+  - $QK^T$ multiplication
+  - $\text{AttnMatrix} \times V$ multiplication  
+  - $B$ represents the learned relative position bias.
+
+##### b. Residual Connection 1
+
+A skip connection adds the attention output to its input:
+
+$$
+X' = X_{in} + X_{\text{attn}}
+$$
+
+Handled by the **Residual** module in hardware.
+
+##### c. Local Convolution
+
+After the first residual, a **3×3 depthwise convolution** (LocalConv) refines local features:
+
+$$
+X'' = \text{LocalConv}(X')
+$$
+
+##### d. MLP Block (Feed-Forward Network)
+
+This stage applies a two-layer MLP with GELU activation:
+
+$$
+\begin{aligned}
+X_{\text{norm2}} &= \text{LayerNorm}(X'') \\
+X_{\text{mlp}} &= \text{Linear}(\text{GELU}(\text{Linear}(X_{\text{norm2}})))
+\end{aligned}
+$$
+
+- **Hardware mapping:** Implemented in the `mlp_block`, which uses:
+  - `gemm_core` for both linear layers  
+  - A lightweight LUT-based GELU approximation.
+
+##### e. Residual Connection 2
+
+A second skip connection merges the MLP output with the LocalConv result:
+
+$$
+X_{\text{out}} = X'' + X_{\text{mlp}}
+$$
+
+#### 4. Downsampling (PatchMerging)
+
+Between stages, **PatchMerging** reduces spatial resolution while increasing channel width.  
+It consists of **1×1**, **3×3 (stride=2)**, and **1×1** convolutions.  
+Example transitions:
+
+- 56×56 → 28×28 spatially  
+- 64 → 128 channels
+
+#### 5. Classifier Head
+
+Finally, all token outputs are **average pooled**, passed through a **LayerNorm**, and a final **Linear layer** (GEMM) produces the classification logits.
+
+$$
+\text{logits} = \text{Linear}(\text{AvgPool}(\text{LayerNorm}(X_{\text{out}})))
+$$
+
+This is the only layer executed on the **ARM core** (optional) or the **GEMM hardware unit** for full acceleration.
+
+### 3.3 Hardware Relevance Summary
+
+| Model Component | Hardware Module | Operation Type |
+|------------------|------------------|----------------|
+| PatchEmbed / PatchMerging | Scheduler + AXI DMA | Convolution / Data Movement |
+| Attention (Q, K, V, MSA) | Attention Block + GEMM Core | Matrix Multiply + Softmax |
+| MLP (fc1, GELU, fc2) | MLP Block + GEMM Core | Matrix Multiply + Non-linear |
+| Residual / LayerNorm | Residual + Norm Units | Elementwise Add / Normalization |
+| Classifier Head | GEMM Core | Fully Connected Layer |
+
+## 4. Global Design Constraints
+
+### 4.1 Clocking & Reset
 
 - Single PL clock domain (**aclk**).  
 - **Initial Fmax:** 150 MHz; **Optimization target:** 180–200 MHz.  
 - **aresetn:** active-low, synchronous; deterministic reset state.
 
-### 3.2 Numerics & Data Representation
+### 4.2 Numerics & Data Representation
 
 - **INT8** activations/weights (symmetric −128..127); **INT32** accumulators.  
 - **Requantization:** `y_int8 = saturate(round((acc * M)/2^s) + zp)` (zp≈0).  
 - **Scales:** per-channel (weights) + per-tensor (activations).
 
-### 3.3 Interface Standards
+### 4.3 Interface Standards
 
 - **AXI4-Stream:** default 128-bit (16×INT8), full tvalid/tready back-pressure, `tlast` on packet end.  
 - **AXI4-Lite:** 32-bit CSRs, 32-bit aligned; W1C status flags.
 
-## 4. Accelerator Architecture (PL)
+## 5. Accelerator Architecture (PL)
 
 ![ViT PL Block Diagram](./block_diagram/vit_pl.png)
 *Figure 2: ViT PL Block Diagram, you can look at more detailed version at [google drive](https://drive.google.com/file/d/162GrEpLs2getctECauzURsrsy7bRrSK8/view?usp=sharing)*
 
-### 4.1 Module Inventory
+### 5.1 Module Inventory
 
 - **axi_lite_regs** – CSR bank (config, status, perf counters).  
 - **scheduler_tiler** – master FSM: tiling loops, op sequencing.
@@ -76,9 +267,9 @@ The PL contains the custom hardware for the ViT computation.
 - **residual** - Adds two INT8 vectors, handling potential differences in quantization scales before saturation.
 - **attention_block**, **mlp_block** – integrators that sequence shared kernels.
 
-## 5. Functional Block Descriptions
+## 6. Functional Block Descriptions
 
-### 5.1 `axi_lite_regs`
+### 6.1 `axi_lite_regs`
 
 **Purpose:** Serves as the single memory-mapped interface between the Processing System (PS) and the Programmable Logic (PL) accelerator.
 
@@ -88,7 +279,7 @@ The PL contains the custom hardware for the ViT computation.
 - PS-to-PL (Control): Provides control signals to the accelerator, most notably the start signal to begin computation, a soft_reset for the FSMs, and an irq_enable flag.
 - PL-to-PS (Status): Receives status flags (status[2:0]) from the scheduler_tiler, allowing the PS to poll for accelerator state (e.g., idle, busy, done). This register bank is the central point for all software control and monitoring
 
-### 5.2 `scheduler_tiler`
+### 6.2 `scheduler_tiler`
 
 **Purpose:** Acts as the global sequencer and master controller for the entire accelerator. It orchestrates the full computation of a Transformer layer, issuing commands to all other blocks.
 
@@ -100,7 +291,7 @@ The PL contains the custom hardware for the ViT computation.
 - **Data Path Configuration:** Dynamically configures the accelerator's internal data path by driving the sel lines for all multiplexers (e.g., gemm_a_mux_sel, requant_in_sel, residual_b_mux_sel, dma_sel). This allows it to route data streams between the correct source and destination modules for each computational phase.
 - **Status Reporting:** Provides its current state (status[2:0]) back to the axi_lite_regs for the PS to read.
 
-### 5.3 axi_dma_shim
+### 6.3 axi_dma_shim
 
 **Purpose:** Acts as a simplified hardware-friendly interface to the complex AXI DMA IP. It translates high-level commands from the scheduler_tiler into the necessary AXI protocol signals to manage data transfers between DDR and the PL's AXI-Streams.
 **Key Functionality:**
@@ -110,7 +301,7 @@ The PL contains the custom hardware for the ViT computation.
 - **Stream Interface (S2MM):** When dma_direction is 1 (PL to DDR), it consumes an AXI-Stream and writes the data to the target DDR address.
 - **Synchronization:** Asserts dma_transfer_done back to the scheduler_tiler upon completion of the requested byte transfer, allowing the main FSM to proceed.
 
-### 5.4 `gemm_core`
+### 6.4 `gemm_core`
 
 **Purpose:** The primary compute engine of the accelerator, performing high-throughput tiled General Matrix Multiplication (GEMM) with INT8 inputs and INT32 accumulation.
 **Key Functionality:**
@@ -121,7 +312,7 @@ The PL contains the custom hardware for the ViT computation.
 - **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
 - **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
 
-### 5.5 `requant_unit`
+### 6.5 `requant_unit`
 
 **Purpose:** Converts the 32-bit integer accumulator values from the gemm_core back into 8-bit integers.
 
@@ -132,7 +323,7 @@ The PL contains the custom hardware for the ViT computation.
 - **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
 - **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
 
-### 5.6 `residual`
+### 6.6 `residual`
 
 **Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
 
@@ -142,15 +333,15 @@ The PL contains the custom hardware for the ViT computation.
 - **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
 - **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
 
-## 6. Attention Block
+## 7. Attention Block
 
 ![Attention Block](./block_diagram/attention_block.png)
 
 **Role:** orchestrates Q/K/V projections on shared `gemm_core`, computes QKᵀ -> Softmax -> Attn×V; owns tile buffers for Q/K/V and uses `norm_unit`, `softmax_unit`.
 
-### 6.1 Interfaces
+### 7.1 Interfaces
 
-### 6.2 Phase map
+### 7.2 Phase map
 
 | Phase   | DMA mode (`dma_mode`) | A-side (`axis_0`) | B-side (`axis_1`) | Requant-A usage |
 |---|---|---|---|---|
@@ -162,7 +353,7 @@ The PL contains the custom hardware for the ViT computation.
 
 > Implementation note: Q/K/V projection phases stream **tokens (A)** against **weights (B)**; intermediate Q & K are captured into tile buffers. QKᵀ result goes through `softmax_unit`; the softmax output tiles multiply **V** to produce the head output (then residual path).  
 
-### 6.3 Control FSM (summary)
+### 7.3 Control FSM (summary)
 
 1. **Normalize** tokens -> enable Q/K/V projections (three GEMM jobs).  
 2. **Sync** when Q/K buffers ready -> schedule **QKᵀ** matmul; gate to Softmax.  
@@ -171,13 +362,13 @@ The PL contains the custom hardware for the ViT computation.
 
 ---
 
-## 7. MLP Block
+## 8. MLP Block
 
 ![MLP Block](./block_diagram/mlp_block.png)
 
 Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses weight buffer and tile buffer; orchestrated by local FSM and `scheduler_tiler`.
 
-## 8. Dataflow & Pipeline
+## 9. Dataflow & Pipeline
 
 1. **DDR -> DMA (MM2S)** streams tokens/weights to tile buffers.  
 2. **Scheduler** kicks **Attention** phases per §6.2, then **MLP**.  
@@ -185,7 +376,7 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 4. **Residual add** and write-back via **DMA (S2MM)** to DDR.  
 5. **PS** reads logits, computes argmax.
 
-## 9. Interfaces & Register Map (AXI-Lite)
+## 10. Interfaces & Register Map (AXI-Lite)
 
 | Offset | Register | Dir | Description |
 |---:|---|---|---|
@@ -201,20 +392,20 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 
 ---
 
-## 10. Verification Plan
+## 11. Verification Plan
 
-### 10.1 Unit Tests
+### 11.1 Unit Tests
 
 - **gemm_core:** vector tests vs NumPy golden; stall + back-pressure.  
 - **requant_unit:** exhaustive sweep for rounding/saturation edges.  
 - **softmax_unit:** L1 error <=1.5% vs FP target; sum≈1.0 (quantized).  
 - **elementwise_ops:** GELU <=2 LSB; Norm cosine sim >=0.995.
 
-### 10.2 Integration Tests
+### 11.2 Integration Tests
 
 - **attention_block / mlp_block:** end-to-end match vs PyTorch INT8 tensors within MSE tolerance.
 
-### 10.3 System Tests
+### 11.3 System Tests
 
 - DMA loopback; GEMM microbenchmark; PS<->PL regression.
 
