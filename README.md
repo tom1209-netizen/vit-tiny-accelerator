@@ -42,6 +42,9 @@
   - [7.2. Phase Map](#72-phase-map)
   - [7.3. Control FSM (summary)](#73-control-fsm-summary)
 - [8. MLP Block](#8-mlp-block)
+  - [8.1. Interfaces](#81-interfaces)
+  - [8.2. Phase Map](#82-phase-map)
+  - [8.3. Control FSM (summary)](#83-control-fsm-summary)
 - [9. Dataflow & Pipeline](#9-dataflow--pipeline)
 - [10. Interfaces & Register Map (AXI-Lite)](#10-interfaces--register-map-axi-lite)
 - [11. Verification Plan](#11-verification-plan)
@@ -435,7 +438,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **AXI Stream S2MM**        |                    |               |                           |                                                                                 |
 | `s_axis_s2mm[130:0]`       | 131 bits           | Input         | `axi_dma_shim`            | Data stream from accelerator to memory (S2MM).                                  |
 | **AXI DMA Lite Interface** |                    |               |                           |                                                                                 |
-| `axi_lite`                 | 147 bits           | Input         | `axi_dma_shim`            | AXI-Lite interface for control and status register communication.               |
+| `axi_lite[146:0]`          | 147 bits           | Input         | `axi_dma_shim`            | AXI-Lite interface for control and status register communication.               |
 | **Scheduler Tiler**        |                    |               |                           |                                                                                 |
 | `mm2s_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
 | `s2mm_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
@@ -545,6 +548,26 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 ![MLP Block](./block_diagram/mlp_block.png)
 
 Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses weight buffer and tile buffer; orchestrated by local FSM and `scheduler_tiler`.
+
+### 8.1 Interfaces
+
+### 8.2 Phase map
+
+| Phase       | DMA mode (`dma_mode`) | A-side (`axis_0`)        | B-side (`axis_1`)         | Requant-A usage           |
+|-------------|-----------------------|--------------------------|---------------------------|---------------------------|
+| **GEMM1**   | 0 = tokens            | `axis_wgt` (W1)          | `axis_1` (input data)     | `cap_en=1, cap=GEMM1`     |
+| **GELU**    | (no DMA)              | `gemm1_out`              | (N/A)                     | `sfm_en=0`                |
+| **GEMM2**   | 0 = tokens            | `axis_wgt` (W2)          | `gemm1_out`               | `cap_en=1, cap=GEMM2`     |
+| **Residual**| (no DMA)              | `gemm2_out`              | (Residual data)           | normal requant -> residual|
+
+> **Implementation note:** The MLP block operates with two **GEMM** phases where the first GEMM computes the transformation of input data (`axis_1`) with the first weight matrix (`axis_wgt` for W1). The result goes through **GELU** activation. The second GEMM phase computes the transformation with the second weight matrix (`axis_wgt` for W2) and adds the optional residual. The result from **GEMM2** can optionally be passed to the residual add phase.
+
+### 8.3 Control FSM (summary)
+
+1. **Normalize** input tokens -> enable **GEMM1** computation.
+2. **Schedule** **GEMM1** -> output result to **GELU** activation.
+3. **Schedule** **GEMM2** with **GELU** output -> write the result to output or residual mux.
+4. **Assert** `mlp_block_op_done`.
 
 ## 9. Dataflow & Pipeline
 
