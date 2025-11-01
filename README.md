@@ -100,10 +100,15 @@ The PL contains the custom hardware for the ViT computation.
 - **Data Path Configuration:** Dynamically configures the accelerator's internal data path by driving the sel lines for all multiplexers (e.g., gemm_a_mux_sel, requant_in_sel, residual_b_mux_sel, dma_sel). This allows it to route data streams between the correct source and destination modules for each computational phase.
 - **Status Reporting:** Provides its current state (status[2:0]) back to the axi_lite_regs for the PS to read.
 
-### 5.3 `axi_dma_shim`
+### 5.3 axi_dma_shim
 
-**Purpose:** configures AXI DMA (MM2S/S2MM), tiles streams, collects outputs to DDR.  
-**Perf:** target >=80% of theoretical bus BW; randomized back-pressure loopback test.
+**Purpose:** Acts as a simplified hardware-friendly interface to the complex AXI DMA IP. It translates high-level commands from the scheduler_tiler into the necessary AXI protocol signals to manage data transfers between DDR and the PL's AXI-Streams.
+**Key Functionality:**
+
+- **Command Interface:** Receives simple commands (dma_start_transfer, dma_ddr_addr, dma_length_bytes, dma_direction) from the scheduler_tiler.
+- **Stream Interface (MM2S):** When dma_direction is 0 (DDR to PL), it fetches data from the specified dma_ddr_addr and streams it out as an AXI-Stream (axis_in) to the dma_demux.
+- **Stream Interface (S2MM):** When dma_direction is 1 (PL to DDR), it consumes an AXI-Stream and writes the data to the target DDR address.
+- **Synchronization:** Asserts dma_transfer_done back to the scheduler_tiler upon completion of the requested byte transfer, allowing the main FSM to proceed.
 
 ### 5.4 `gemm_core`
 
