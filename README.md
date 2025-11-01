@@ -80,9 +80,13 @@ The PL contains the custom hardware for the ViT computation.
 
 ### 5.1 `axi_lite_regs`
 
-**Purpose:** single PS<->PL memory-mapped interface.  
-**Key:** config registers for tile sizes, addresses, quant params; status (busy/done/error), perf counters.  
-**Verification:** BFM read/write incl. W1C semantics.
+**Purpose:** Serves as the single memory-mapped interface between the Processing System (PS) and the Programmable Logic (PL) accelerator.
+
+**Key Functionality:**
+
+- PS-to-PL (Configuration): Receives configuration data from the ARM core via the AXI-Lite bus. It holds registers for base addresses (addr_a_base, addr_b_base, addr_c_base), layer parameters (tile_cfg, layer_cfg), and quantization values (requant_scale, requant_shift).
+- PS-to-PL (Control): Provides control signals to the accelerator, most notably the start signal to begin computation, a soft_reset for the FSMs, and an irq_enable flag.
+- PL-to-PS (Status): Receives status flags (status[2:0]) from the scheduler_tiler, allowing the PS to poll for accelerator state (e.g., idle, busy, done). This register bank is the central point for all software control and monitoring
 
 ### 5.2 `scheduler_tiler`
 
