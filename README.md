@@ -286,16 +286,16 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | `axi_lite[146:0]`             | 147 bits           | Input         | `Processing System`    | This is the bus to control AXI Regs                                             |
 | **Scheduler**                 |                    |               |                        |                                                                                 |
 | `status[2:0]`                 | 3 bits             | Output        | `scheduler_tiler`      | Scheduler status flags (e.g., `idle`, `busy`, `done`, or `error`)               |
-| `start`                       | 1 bit              | Input         | `scheduler_tiler`      | Start signal - triggers the Scheduler to begin operation sequence               |
-| `soft_reset`                  | 1 bit              | Input         | `scheduler_tiler`      | Soft reset control for internal FSMs                                            |
-| `irq_enable`                  | 1 bit              | Input         | `scheduler_tiler`      | Interrupt enable flag for completion/status interrupts                          |
-| `tile_cfg[31:0]`              | 32 bits            | Input         | `scheduler_tiler`      | Tile configuration word (defines tiling dimensions, size, etc.)                 |
-| `addr_a_base[31:0]`           | 32 bits            | Input         | `scheduler_tiler`      | Base DDR address for Matrix A                                                   |
-| `addr_b_base[31:0]`           | 32 bits            | Input         | `scheduler_tiler`      | Base DDR address for Matrix B                                                   |
-| `addr_c_base[31:0]`           | 32 bits            | Input         | `scheduler_tiler`      | Base DDR address for Matrix C (output buffer)                                   |
-| `requant_scale[31:0]`         | 32 bits            | Input         | `scheduler_tiler`      | Requantization multiplier (scaling factor for INT8 conversion)                  |
-| `requant_shift[31:0]`         | 32 bits            | Input         | `scheduler_tiler`      | Requantization right-shift value for scaling adjustment                         |
-| `layer_cfg[31:0]`             | 32 bits            | Input         | `scheduler_tiler`      | Layer configuration register (defines layer type, sequence, etc.)               |
+| `start`                       | 1 bit              | Output        | `scheduler_tiler`      | Start signal - triggers the Scheduler to begin operation sequence               |
+| `soft_reset`                  | 1 bit              | Output        | `scheduler_tiler`      | Soft reset control for internal FSMs                                            |
+| `irq_enable`                  | 1 bit              | Output        | `scheduler_tiler`      | Interrupt enable flag for completion/status interrupts                          |
+| `tile_cfg[31:0]`              | 32 bits            | Output        | `scheduler_tiler`      | Tile configuration word (defines tiling dimensions, size, etc.)                 |
+| `addr_a_base[31:0]`           | 32 bits            | Output        | `scheduler_tiler`      | Base DDR address for Matrix A                                                   |
+| `addr_b_base[31:0]`           | 32 bits            | Output        | `scheduler_tiler`      | Base DDR address for Matrix B                                                   |
+| `addr_c_base[31:0]`           | 32 bits            | Output        | `scheduler_tiler`      | Base DDR address for Matrix C (output buffer)                                   |
+| `requant_scale[31:0]`         | 32 bits            | Output        | `scheduler_tiler`      | Requantization multiplier (scaling factor for INT8 conversion)                  |
+| `requant_shift[31:0]`         | 32 bits            | Output        | `scheduler_tiler`      | Requantization right-shift value for scaling adjustment                         |
+| `layer_cfg[31:0]`             | 32 bits            | Output        | `scheduler_tiler`      | Layer configuration register (defines layer type, sequence, etc.)               |
 
 **Key Functionality:**
 
