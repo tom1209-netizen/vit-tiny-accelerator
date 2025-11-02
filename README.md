@@ -339,8 +339,8 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | `dma_direction`                      | 1 bit              | Input         | `axi_dma_shim`                 | Direction for DMA operation (0 = read, 1 = write).                        |
 | `dma_transfer_done`                  | 1 bit              | Output        | `axi_dma_shim`                 | Flag indicating DMA transfer completion.                                  |
 | **AXI DMA IP**                       |                    |               |                                |                                                                           |
-| `mm2s_introut`                       | 32 bits            | Input         | `axi_dma_ip`                   | Interrupt output for the memory-to-stream (MM2S) transfer completion.     |
-| `s2mm_introut`                       | 32 bits            | Input         | `axi_dma_ip`                   | Interrupt output for the stream-to-memory (S2MM) transfer completion.     |
+| `mm2s_introut`                       | 1 bit              | Input         | `axi_dma_ip`                   | Interrupt output for the memory-to-stream (MM2S) transfer completion.     |
+| `s2mm_introut`                       | 1 bit              | Input         | `axi_dma_ip`                   | Interrupt output for the stream-to-memory (S2MM) transfer completion.     |
 | **Attention & MLP**                  |                    |               |                                |                                                                           |
 | `compute_start_op`                   | 1 bit              | Input         | `attention_block`, `mlp_block` | Start signal for compute operations.                                      |
 | `compute_op_select[3:0]`             | 4 bits             | Input         | `attention_block`, `mlp_block` | Select operation type (e.g., Attention, MLP, GEMM, Requant).              |
