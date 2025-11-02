@@ -17,11 +17,6 @@
       - [1. Convolutional Stem (PatchEmbed)](#1-convolutional-stem-patchembed)
       - [2. Stage 1 – Convolutional Layer](#2-stage-1--convolutional-layer)
       - [3. Stages 2–4 – Transformer Layers](#3-stages-24--transformer-layers)
-        - [a. Windowed Multi-Head Self-Attention (MSA)](#a-windowed-multi-head-self-attention-msa)
-        - [b. Residual Connection 1](#b-residual-connection-1)
-        - [c. Local Convolution](#c-local-convolution)
-        - [d. MLP Block (Feed-Forward Network)](#d-mlp-block-feed-forward-network)
-        - [e. Residual Connection 2](#e-residual-connection-2)
       - [4. Downsampling (PatchMerging)](#4-downsampling-patchmerging)
       - [5. Classifier Head](#5-classifier-head)
     - [3.3 Hardware Relevance Summary](#33-hardware-relevance-summary)
@@ -32,21 +27,21 @@
   - [5. Accelerator Architecture (PL)](#5-accelerator-architecture-pl)
     - [5.1 Module Inventory](#51-module-inventory)
   - [6. Functional Block Descriptions](#6-functional-block-descriptions)
-    - [6.1 `axi_lite_regs`](#61-axi_lite_regs)
-    - [6.2 `scheduler_tiler`](#62-scheduler_tiler)
-    - [6.3 axi\_dma\_shim](#63-axi_dma_shim)
+    - [6.1 AXI Lite Register](#61-axi-lite-register)
+    - [6.2 Scheduler Tiler](#62-scheduler-tiler)
+    - [6.3 AXI DMA Shim](#63-axi-dma-shim)
     - [6.4 AXI DMA IP](#64-axi-dma-ip)
-    - [6.5 `gemm_core`](#65-gemm_core)
-    - [6.6 `residual`](#66-residual)
-    - [6.7 `requant_unit`](#67-requant_unit)
+    - [6.5 GEMM Core](#65-gemm-core)
+    - [6.6 Residual](#66-residual)
+    - [6.7 Requant Unit](#67-requant-unit)
   - [7. Attention Block](#7-attention-block)
     - [7.1 Interfaces](#71-interfaces)
     - [7.2 Phase map](#72-phase-map)
-    - [7.3 Control FSM (summary)](#73-control-fsm-summary)
+    - [7.3 Control FSM](#73-control-fsm)
   - [8. MLP Block](#8-mlp-block)
     - [8.1 Interfaces](#81-interfaces)
     - [8.2 Phase map](#82-phase-map)
-    - [8.3 Control FSM (summary)](#83-control-fsm-summary)
+    - [8.3 Control FSM](#83-control-fsm)
   - [9. Dataflow \& Pipeline](#9-dataflow--pipeline)
   - [10. Interfaces \& Register Map (AXI-Lite)](#10-interfaces--register-map-axi-lite)
   - [11. Verification Plan](#11-verification-plan)
@@ -151,7 +146,7 @@ Each stage is a stack of **TinyViTBlock** modules — the primary target of our 
 
 For an input token $X_{in}$, the computation proceeds as follows:
 
-##### a. Windowed Multi-Head Self-Attention (MSA)
+**a. Windowed Multi-Head Self-Attention (MSA):**
 
 Each block begins with normalization and a windowed attention operation:
 
@@ -170,7 +165,7 @@ $$
   - $\text{AttnMatrix} \times V$ multiplication  
   - $B$ represents the learned relative position bias.
 
-##### b. Residual Connection 1
+**b. Residual Connection 1:**
 
 A skip connection adds the attention output to its input:
 
@@ -180,7 +175,7 @@ $$
 
 Handled by the **Residual** module in hardware.
 
-##### c. Local Convolution
+**c. Local Convolution:**
 
 After the first residual, a **3×3 depthwise convolution** (LocalConv) refines local features:
 
@@ -188,7 +183,7 @@ $$
 X'' = \text{LocalConv}(X')
 $$
 
-##### d. MLP Block (Feed-Forward Network)
+**d. MLP Block (Feed-Forward Network):**
 
 This stage applies a two-layer MLP with GELU activation:
 
@@ -203,7 +198,7 @@ $$
   - `gemm_core` for both linear layers  
   - A lightweight LUT-based GELU approximation.
 
-##### e. Residual Connection 2
+**e. Residual Connection 2:**
 
 A second skip connection merges the MLP output with the LocalConv result:
 
@@ -276,7 +271,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 ## 6. Functional Block Descriptions
 
-### 6.1 `axi_lite_regs`
+### 6.1 AXI Lite Register
 
 **Purpose:** Serves as the single memory-mapped interface between the Processing System (PS) and the Programmable Logic (PL) accelerator.
 
@@ -477,7 +472,7 @@ y_int8 = scaled_32[7:0]
 - `[1] busy` (RO): This bit is 1 for the entire duration the accelerator is processing a task. The PS can poll this bit to know when it is safe to send a new job.
 - `[2] error_flag` (RW1C): The accelerator sets this bit to 1 if an error occurs. Similar to `done_tick`, the PS must write a 1 to clear this error flag.
 
-### 6.2 `scheduler_tiler`
+### 6.2 Scheduler Tiler
 
 **Purpose:** Acts as the global sequencer and master controller for the entire accelerator. It orchestrates the full computation of a Transformer layer, issuing commands to all other blocks.
 
@@ -536,7 +531,7 @@ y_int8 = scaled_32[7:0]
 - **Data Path Configuration:** Dynamically configures the accelerator's internal data path by driving the sel lines for all multiplexers (e.g., gemm_a_mux_sel, requant_in_sel, residual_b_mux_sel, dma_sel). This allows it to route data streams between the correct source and destination modules for each computational phase.
 - **Status Reporting:** Provides its current state (status[2:0]) back to the axi_lite_regs for the PS to read.
 
-### 6.3 axi_dma_shim
+### 6.3 AXI DMA Shim
 
 **Purpose:** Acts as a simplified hardware-friendly interface to the complex AXI DMA IP. It translates high-level commands from the scheduler_tiler into the necessary AXI protocol signals to manage data transfers between DDR and the PL's AXI-Streams.
 
@@ -556,7 +551,6 @@ y_int8 = scaled_32[7:0]
 | `m_axis_mm2s[38:0]`           | 39 bits            | Output        | `axi_dma_ip`             | Data stream from memory to accelerator (MM2S).                                  |
 | `s_axis_s2mm[38:0]`           | 39 bits            | Output        | `axi_dma_ip`             | Data stream from accelerator to memory (S2MM).                                  |
 | `axi_lite[146:0]`             | 147 bits           | Output        | `axi_dma_ip`             | AXI-Lite interface for control and status register communication.               |
-
 
 **Key Functionality:**
 
@@ -618,7 +612,7 @@ y_int8 = scaled_32[7:0]
   - Set Address: Write the DDR destination address to the S2MM_DA register.
   - Arm Receiver: Write the maximum size of the buffer allocated in memory to the S2MM_LENGTH register. This must be written last. This action arms the DMA, which will now wait for an AXI-Stream packet to arrive, write the data to the S2MM_DA, and assert an interrupt (if enabled) when the stream's TLAST signal is seen.
 
-### 6.5 `gemm_core`
+### 6.5 GEMM Core
 
 **Purpose:** The primary compute engine of the accelerator, performing high-throughput tiled General Matrix Multiplication (GEMM) with INT8 inputs and INT32 accumulation.
 
@@ -645,7 +639,7 @@ y_int8 = scaled_32[7:0]
 - **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
 - **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
 
-### 6.6 `residual`
+### 6.6 Residual
 
 **Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
 
@@ -666,7 +660,7 @@ y_int8 = scaled_32[7:0]
 - **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
 - **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
 
-### 6.7 `requant_unit`
+### 6.7 Requant Unit
 
 **Purpose:** Converts the 32-bit integer accumulator values from the gemm_core back into 8-bit integers.
 
@@ -706,7 +700,7 @@ y_int8 = scaled_32[7:0]
 
 > Implementation note: Q/K/V projection phases stream **tokens (A)** against **weights (B)**; intermediate Q & K are captured into tile buffers. QKᵀ result goes through `softmax_unit`; the softmax output tiles multiply **V** to produce the head output (then residual path).  
 
-### 7.3 Control FSM (summary)
+### 7.3 Control FSM
 
 1. **Normalize** tokens -> enable Q/K/V projections (three GEMM jobs).  
 2. **Sync** when Q/K buffers ready -> schedule **QKᵀ** matmul; gate to Softmax.  
@@ -732,7 +726,7 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 
 > **Implementation note:** The MLP block operates with two **GEMM** phases where the first GEMM computes the transformation of input data (`axis_1`) with the first weight matrix (`axis_wgt` for W1). The result goes through **GELU** activation. The second GEMM phase computes the transformation with the second weight matrix (`axis_wgt` for W2) and adds the optional residual. The result from **GEMM2** can optionally be passed to the residual add phase.
 
-### 8.3 Control FSM (summary)
+### 8.3 Control FSM
 
 1. **Normalize** input tokens -> enable **GEMM1** computation.
 2. **Schedule** **GEMM1** -> output result to **GELU** activation.
