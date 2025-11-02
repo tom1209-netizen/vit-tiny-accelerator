@@ -305,7 +305,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - PS-to-PL (Control): Provides control signals to the accelerator, most notably the start signal to begin computation, a soft_reset for the FSMs, and an irq_enable flag.
 - PL-to-PS (Status): Receives status flags (status[2:0]) from the scheduler_tiler, allowing the PS to poll for accelerator state (e.g., idle, busy, done). This register bank is the central point for all software control and monitoring
 
-**Register**
+**Register:**
 
 | Offset | Abbreviation  | Description                      |
 | ------ | ------------- | -------------------------------- |
@@ -321,7 +321,8 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | Others | Reserved      | Reserved Register                |
 
 `CONTROL (0x00)`
-Default value: 32'h0000_000
+
+**Default:** `32'h0000_0000`
 
 | Bit  | Name        | Type | Default value | Description                                                     |
 | ---- | ----------- | ---- | ------------- | --------------------------------------------------------------- |
@@ -331,7 +332,8 @@ Default value: 32'h0000_000
 | 0    | start       | RW   | 1'b0          | Task start. Write 1 to begin the operation.                     |
 
 `STATUS (0x04)`
-Default value: 32'h0000_000
+
+**Default:** `32'h0000_0000`
 
 | Bit  | Name       | Type | Default value | Description                                                       |
 | ---- | ---------- | ---- | ------------- | ----------------------------------------------------------------- |
@@ -340,8 +342,26 @@ Default value: 32'h0000_000
 | 1    | busy       | RO   | 1'b0          | Busy flag. 1 = Accelerator is running. 0 = IDLE state.            |
 | 0    | done_tick  | RW1C | 1'b0          | Completion flag. 1 = Task is done. Write 1 to clear this bit to 0.|
 
+`TILE_CFG (0x10)`
+
+**Default:** `32'h0000_0000`
+
+**Purpose:** Defines tiling dimensions, data layout, and compute phase for the current GEMM or sub-block operation.
+
+| Bits  | Name           | Type | Default   | Description                                                                                                                                                                                                                                    |
+| ----- | -------------- | ---- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 31    | LAST_TILE_HINT | RW   | 1’b0      | Marks the final tile of a layer or block. Triggers `done_tick` if `WRITE_POLICY` = `10`.                                                                                                                                                       |
+| 30:28 | OP_CLASS       | RW   | 3’b000    | High-level operation phase:<br>000 = Q/K/V projection<br>001 = Attention score (QKᵀ)<br>010 = Attention apply (softmax×V)<br>011 = MLP FC1<br>100 = MLP FC2<br>101 = Residual or writeback<br>110 = PatchMerging / Conv stem<br>111 = Reserved |
+| 27:26 | DATA_LAYOUT    | RW   | 2’b00     | Operand routing:<br>00 = tokens×weights<br>01 = Q×Kᵀ<br>10 = softmax×V<br>11 = reserved.                                                                                                                                                       |
+| 25:22 | STRIDE_B_LOG2  | RW   | 4’b0000   | log₂(bytes) stride for weight (B) tiles in DDR.                                                                                                                                                                                                |
+| 21:18 | STRIDE_A_LOG2  | RW   | 4’b0000   | log₂(bytes) stride for activation (A) tiles in DDR.                                                                                                                                                                                            |
+| 17:12 | TILE_K         | RW   | 6’b000000 | Depth of K dimension (elements).                                                                                                                                                                                                               |
+| 11:6  | TILE_N         | RW   | 6’b000000 | Width of N dimension (elements).                                                                                                                                                                                                               |
+| 5:0   | TILE_M         | RW   | 6’b000000 | Height of M dimension (elements). |
+
 `ADDR_A_BASE (0x20)`
-Default value: 32'h0000_000
+
+**Default:** `32'h0000_0000`
 
 | Bit  | Name        | Type | Default value | Description                             |
 | ---- | ----------- | ---- | ------------- | --------------------------------------- |
@@ -361,20 +381,83 @@ Default value: 32'h0000_000
 | ---- | ----------- | ---- | ------------- | ---------------------------------------- |
 | 31:0 | ADDR_C_BASE | RW   | 32'h0         | Base address in DDR for output matrix C. |
 
+`REQUANT_SCALE (0x40)`
+
+**Default:** `32'h0000_0000`
+
+**Purpose:** Fixed-point multiplier for converting INT32 accumulators to INT8 activations.
+
+| Bits | Name      | Type | Default      | Description                                                                                                |
+| ---- | --------- | ---- | ------------ | ---------------------------------------------------------------------------------------------------------- |
+| 31:0 | SCALE_Q31 | RW   | 32’h00000000 | Signed Q1.31 multiplier. Real multiplier = `SCALE_Q31 / 2³¹`. Applied to each accumulator before shifting. |
+
+**Hardware behavior:**
+
+```text
+product_64 = acc_32 * SCALE_Q31   // signed 32x32→64
+aligned_32 = product_64 >>> 31     // align back to integer domain
+```
+
+`REQUANT_SHIFT (0x44)`
+
+**Default:** `32'h0000_0000`
+
+**Purpose:** Configures right-shift amount, rounding, and saturation policy after `REQUANT_SCALE`.
+
+| Bits | Name         | Type | Default | Description                                        |
+| ---- | ------------ | ---- | ------- | -------------------------------------------------- |
+| 31:7 | RESERVED     | RW   | 25’b0   | Reserved.                                          |
+| 6    | SATURATE_EN  | RW   | 1’b1    | Clamp result to [–128, 127].                       |
+| 5    | ROUND_EN     | RW   | 1’b1    | Add rounding bias before shift (round-to-nearest). |
+| 4:0  | SHIFT_AMOUNT | RW   | 5’d0    | Arithmetic right-shift count (0–31).               |
+
+**Hardware behavior:**
+
+```text
+aligned_32 = product_64 >>> 31
+if (ROUND_EN) aligned_32 += (1 << (SHIFT_AMOUNT-1))
+scaled_32  = aligned_32 >>> SHIFT_AMOUNT
+if (SATURATE_EN) scaled_32 = clamp(scaled_32, -128, 127)
+y_int8 = scaled_32[7:0]
+```
+
+`LAYER_CFG (0x70)`
+
+**Default:** `32'h0000_0000`
+
+**Purpose:** Encodes high-level layer context for `scheduler_tiler` — including stage, block type, dimensions, window size, and writeback policy.
+
+| Bits  | Name         | Type | Default   | Description                                                                                                                                         |
+| ----- | ------------ | ---- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 31:30 | RESERVED     | RW   | 2’b00     | Reserved.                                                                                                                                           |
+| 29:28 | WRITE_POLICY | RW   | 2’b00     | Post-block output handling:<br>00 = Keep on-chip<br>01 = Write to DDR<br>10 = Write & signal completion<br>11 = Reserved                            |
+| 27:24 | STAGE_ID     | RW   | 4’b0000   | Which TinyViT stage / resolution level we’re in                                                           |
+| 23:20 | BLOCK_ROLE   | RW   | 4’b0000   | 0000 = PatchEmbed / Stem<br>0001 = Conv / Stage1<br>0010 = Attention<br>0011 = MLP<br>0100 = PatchMerging<br>0101 = Classifier<br>others = reserved |
+| 19:16 | WINDOW_SIZE  | RW   | 4’b0000   | `(window_len – 1)` for local self-attention (e.g. 6 for 7×7 windows).                                                                               |
+| 15:11 | HEAD_DIM     | RW   | 5’b00000  | `(dim_per_head – 1)` — per-head embedding dimension.                                                                                                |
+| 10:6  | HEAD_COUNT   | RW   | 5’b00000  | `(num_heads – 1)` — number of attention heads.                                                                                                      |
+| 5:0   | TOKEN_COUNT  | RW   | 6’b000000 | `(num_tokens – 1)` — token count at current stage.                                                                                                  |
+
 **Programming Sequences:**
-1. Provide task configuration: Before the accelerator can run, the PS must fill out a work order by writing to these register: 
-	- `ADDR_A/B/C_BASE` (0x20, 0x24, 0x28): Specifies the addresses in DDR. The DMA module uses these to know where to fetch the input matrix (A) and weights (B) from, and where to store the final result (C).
-	- `LAYER_CFG` (0x70): Provides parameters for the current layer, such as the number of heads, tokens (N), dimensions (d), etc. The `scheduler_tiler` reads this to determine the correct sequence of operations. 
-	- `TILE_CFG` (0x10): Defines the dimensions (M, N, K) of the data "tiles". Because the matrices are too large, the `scheduler_tiler` uses this to break the job into smaller pieces. 
-	- `REQUANT_SCALE/REQUANT_SHIFT` (0x40, 0x44): Provides the mathematical constants, integer multiplier (M) and post-scaling shift (s), that the `requant_unit` needs to convert the internal INT32 results back to the required INT8 format.
-2. Provide control commands: After the configuration is set, the PS commands the accelerator by writing to the `CONTROL` register (0x00): 
-	- `[0] start` : This is the "Go" button. Writing a 1 to this bit signals the `scheduler_tiler` to begin executing the task.
-	- `[1] soft_reset` : This is a "soft reset". Writing a 1 forces the `scheduler_tiler` and all child modules to abandon their current task and return to the IDLE state, without requiring a full PL reset. 
-	- `[2] irq_enable` : This bit enables (1) or disables (0) the interrupt mechanism. If enabled, the accelerator will send an interrupt signal to the PS upon completion (`done_tick`).
-3. Report accelerator status: While the accelerator is running or after it finishes, the PS can read the `STATUS` register (0x04) to monitor it:
-	- `[0] done_tick` (RW1C): The accelerator sets this bit to 1 when it is successfully completes a task. The PS reads this, processes the result, and must then write a 1 to this bit to clear it back to 0 as an acknowledgement, making it ready for the next run. 
-	- `[1] busy` (RO): This bit is 1 for the entire duration the accelerator is processing a task. The PS can poll this bit to know when it is safe to send a new job. 
-	- `[2] error_flag` (RW1C): The accelerator sets this bit to 1 if an error occurs. Similar to `done_tick`, the PS must write a 1 to clear this error flag.
+
+1.Provide task configuration: Before the accelerator can run, the PS must fill out a work order by writing to these register:
+
+- `ADDR_A/B/C_BASE` (0x20, 0x24, 0x28): Specifies the addresses in DDR. The DMA module uses these to know where to fetch the input matrix (A) and weights (B) from, and where to store the final result (C).
+- `LAYER_CFG` (0x70): Provides parameters for the current layer, such as the number of heads, tokens (N), dimensions (d), etc. The `scheduler_tiler` reads this to determine the correct sequence of operations.
+- `TILE_CFG` (0x10): Defines the dimensions (M, N, K) of the data "tiles". Because the matrices are too large, the `scheduler_tiler` uses this to break the job into smaller pieces.
+- `REQUANT_SCALE/REQUANT_SHIFT` (0x40, 0x44): Provides the mathematical constants, integer multiplier (M) and post-scaling shift (s), that the `requant_unit` needs to convert the internal INT32 results back to the required INT8 format.
+
+2.Provide control commands: After the configuration is set, the PS commands the accelerator by writing to the `CONTROL` register (0x00):
+
+- `[0] start` : This is the "Go" button. Writing a 1 to this bit signals the `scheduler_tiler` to begin executing the task.
+- `[1] soft_reset` : This is a "soft reset". Writing a 1 forces the `scheduler_tiler` and all child modules to abandon their current task and return to the IDLE state, without requiring a full PL reset.
+- `[2] irq_enable` : This bit enables (1) or disables (0) the interrupt mechanism. If enabled, the accelerator will send an interrupt signal to the PS upon completion (`done_tick`).
+
+3.Report accelerator status: While the accelerator is running or after it finishes, the PS can read the `STATUS` register (0x04) to monitor it:
+
+- `[0] done_tick` (RW1C): The accelerator sets this bit to 1 when it is successfully completes a task. The PS reads this, processes the result, and must then write a 1 to this bit to clear it back to 0 as an acknowledgement, making it ready for the next run.
+- `[1] busy` (RO): This bit is 1 for the entire duration the accelerator is processing a task. The PS can poll this bit to know when it is safe to send a new job.
+- `[2] error_flag` (RW1C): The accelerator sets this bit to 1 if an error occurs. Similar to `done_tick`, the PS must write a 1 to clear this error flag.
 
 ### 6.2 `scheduler_tiler`
 
