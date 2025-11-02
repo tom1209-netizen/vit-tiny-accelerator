@@ -324,6 +324,8 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Default:** `32'h0000_0000`
 
+![Control register](./register/ctrl.png)
+
 | Bit  | Name        | Type | Default value | Description                                                     |
 | ---- | ----------- | ---- | ------------- | --------------------------------------------------------------- |
 | 31:3 | Reserved    | RO   | 29'b0         | Reserved                                                        |
@@ -334,6 +336,8 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 `STATUS (0x04)`
 
 **Default:** `32'h0000_0000`
+
+![Status register](./register/status.png)
 
 | Bit  | Name       | Type | Default value | Description                                                       |
 | ---- | ---------- | ---- | ------------- | ----------------------------------------------------------------- |
@@ -347,6 +351,8 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 **Default:** `32'h0000_0000`
 
 **Purpose:** Defines tiling dimensions, data layout, and compute phase for the current GEMM or sub-block operation.
+
+![Tile configuration register](./register/tile.png)
 
 | Bits  | Name           | Type | Default   | Description                                                                                                                                                                                                                                    |
 | ----- | -------------- | ---- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -363,6 +369,8 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Default:** `32'h0000_0000`
 
+![ADDR_A_BASE register](./register/a.png)
+
 | Bit  | Name        | Type | Default value | Description                             |
 | ---- | ----------- | ---- | ------------- | --------------------------------------- |
 | 31:0 | ADDR_A_BASE | RW   | 32'h0         | Base address in DDR for input matrix A. |
@@ -370,12 +378,16 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 `ADDR_B_BASE (0x24)`
 Default value: 32'h0000_000
 
+![ADDR_B_BASE register](./register/b.png)
+
 | Bit  | Name        | Type | Default value | Description                              |
 | ---- | ----------- | ---- | ------------- | ---------------------------------------- |
 | 31:0 | ADDR_B_BASE | RW   | 32'h0         | Base address in DDR for weight matrix B. |
 
 `ADDR_C_BASE (0x28)`
 Default value: 32'h0000_000
+
+![ADDR_C_BASE register](./register/c.png)
 
 | Bit  | Name        | Type | Default value | Description                              |
 | ---- | ----------- | ---- | ------------- | ---------------------------------------- |
@@ -386,6 +398,8 @@ Default value: 32'h0000_000
 **Default:** `32'h0000_0000`
 
 **Purpose:** Fixed-point multiplier for converting INT32 accumulators to INT8 activations.
+
+![Requantization scale register](./register/scale.png)
 
 | Bits | Name      | Type | Default      | Description                                                                                                |
 | ---- | --------- | ---- | ------------ | ---------------------------------------------------------------------------------------------------------- |
@@ -403,6 +417,8 @@ aligned_32 = product_64 >>> 31     // align back to integer domain
 **Default:** `32'h0000_0000`
 
 **Purpose:** Configures right-shift amount, rounding, and saturation policy after `REQUANT_SCALE`.
+
+![Requantization shift register](./register/shift.png)
 
 | Bits | Name         | Type | Default | Description                                        |
 | ---- | ------------ | ---- | ------- | -------------------------------------------------- |
@@ -426,6 +442,8 @@ y_int8 = scaled_32[7:0]
 **Default:** `32'h0000_0000`
 
 **Purpose:** Encodes high-level layer context for `scheduler_tiler` — including stage, block type, dimensions, window size, and writeback policy.
+
+![Layer configuration register](./register/layer.png)
 
 | Bits  | Name         | Type | Default   | Description                                                                                                                                         |
 | ----- | ------------ | ---- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
