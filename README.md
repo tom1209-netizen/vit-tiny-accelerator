@@ -285,7 +285,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **AXI Stream**                |                    |               |                        |                                                                                 |
 | `axi_lite[146:0]`             | 147 bits           | Input         | `Processing System`    | This is the bus to control AXI Regs                                             |
 | **Scheduler**                 |                    |               |                        |                                                                                 |
-| `status[2:0]`                 | 3 bits             | Output        | `scheduler_tiler`      | Scheduler status flags (e.g., `idle`, `busy`, `done`, or `error`)               |
+| `status[2:0]`                 | 3 bits             | Input         | `axi_lite_regs`        | Scheduler status flags                                                          |
 | `start`                       | 1 bit              | Output        | `scheduler_tiler`      | Start signal - triggers the Scheduler to begin operation sequence               |
 | `soft_reset`                  | 1 bit              | Output        | `scheduler_tiler`      | Soft reset control for internal FSMs                                            |
 | `irq_enable`                  | 1 bit              | Output        | `scheduler_tiler`      | Interrupt enable flag for completion/status interrupts                          |
