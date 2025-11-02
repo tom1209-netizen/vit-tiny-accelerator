@@ -700,6 +700,18 @@ y_int8 = scaled_32[7:0]
 
 ### 7.1 Interfaces
 
+| **Signal Name**                       | **Signal Width** | **Direction** | **Destination**                   | **Description**                                                          |
+| ------------------------------------- | ---------------- | ------------- | --------------------------------- | ------------------------------------------------------------------------ |
+| `compute_start_op`                    | 1 bit            | Input         | `scheduler_tiler`                 | Start trigger for Attention block execution.                             |
+| `compute_op_select[3:0]`              | 4 bits           | Input         | `scheduler_tiler`                 | Operation selector defining sub-operation (Q, K, V, Softmax, etc.).      |
+| `axis_data_0[130:0]`                  | 131 bits         | Input         | `dma_demux`                       | Input token feature stream loaded from DDR via DMA.                      |
+| `axis_requant_a[130:0]`               | 131 bits         | Input         | `requant_out_demux`               | Requantized feature input (e.g., for Softmax or output normalization).   |
+| `done_out_0`                          | 1 bit            | Input         | `gemm_done_demux`                 | Completion signal from GEMM indicating that Attention GEMM tile is done. |
+| `attn_block_op_done`                  | 1 bit            | Output        | `scheduler_tiler`                 | Attention block operation completion flag.                               |
+| `axis_0[130:0]`                       | 131 bits         | Output        | `gemm_a_mux`, `residual_in_b_mux` | Output data stream (Q×Kᵀ or Attention-weighted values) for next GEMM.    |
+| `axis_1[130:0]`                       | 131 bits         | Output        | `gemm_b_mux`                      | Secondary output stream for V-matrix or attention value propagation.     |
+| `start_in_0`                          | 1 bit            | Output        | `gemm_start_mux`                  | Internal start signal routed to GEMM Start Mux.                          |
+
 ### 7.2 Phase map
 
 | Phase      | DMA mode (`dma_mode`) | A-side (`axis_0`) | B-side (`axis_1`) | Requant-A usage            |
@@ -726,6 +738,18 @@ y_int8 = scaled_32[7:0]
 Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses weight buffer and tile buffer; orchestrated by local FSM and `scheduler_tiler`.
 
 ### 8.1 Interfaces
+
+| **Signal Name**          | **Signal Width** | **Direction** | **Destination**                   | **Description**                                                                  |
+| ------------------------ | ---------------- | ------------- | --------------------------------- | -------------------------------------------------------------------------------- |
+| `compute_start_op`       | 1 bit            | Input         | `scheduler_tiler`                 | Start trigger for MLP computation sequence (activates linear layers and GELU).   |
+| `compute_op_select[3:0]` | 4 bits           | Input         | `scheduler_tiler`                 | Operation selector defining which sublayer is active: Linear1, GELU, or Linear2. |
+| `axis_data_1[130:0]`     | 131 bits         | Input         | `dma_demux`                       | Input feature stream for MLP (from previous layer normalization or attention).   |
+| `axis_requant_b[130:0]`  | 131 bits         | Input         | `requant_out_demux`               | Requantized feature input stream for MLP layer.                                  |
+| `done_out_1`             | 1 bit            | Input         | `gemm_done_demux`                 | Completion signal from GEMM indicating that MLP GEMM tile is done.               |
+| `mlp_block_op_done`      | 1 bit            | Output        | `scheduler_tiler`                 | MLP block operation completion flag (end of feedforward computation).            |
+| `axis_0[130:0]`          | 131 bits         | Output        | `gemm_a_mux`                      | Primary output stream (e.g., Linear1 or GELU output) routed to GEMM A input.     |
+| `axis_1[130:0]`          | 131 bits         | Output        | `gemm_b_mux`, `residual_in_b_mux` | Secondary output stream (e.g., Linear2 output) routed to GEMM or Residual path.  |
+| `start_in_0`             | 1 bit            | Output        | `gemm_start_mux`                  | Internal start signal routed to GEMM Start Mux (initiates GEMM operation).       |
 
 ### 8.2 Phase map
 
