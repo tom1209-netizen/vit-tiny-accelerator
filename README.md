@@ -414,14 +414,14 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 - **Programming Sequence:** The axi_dma_shim follows this standard sequence to manage the AXI DMA IP:
 
-  📤 MM2S (Read from DDR to Accelerator)
+  MM2S (Read from DDR to Accelerator)
   - Start Channel: Set the Run/Stop bit: MM2S_DMACR.RS = 1.
   - Check Halted: Wait for the status register's Halted bit to deassert (go to 0).
   - Enable Interrupts (Optional): Set MM2S_DMACR.IOC_IrqEn = 1 to enable an interrupt upon completion.
   - Set Address: Write the DDR source address to the MM2S_SA register.
   - Start Transfer: Write the total number of bytes to transfer to the MM2S_LENGTH register. This final write triggers the DMA to begin fetching data.
 
-  📥 S2MM (Write from Accelerator to DDR)
+  S2MM (Write from Accelerator to DDR)
   - Start Channel: Set the Run/Stop bit: S2MM_DMACR.RS = 1.
   - Check Halted: Wait for the status register's Halted bit to deassert (go to 0).
   - Enable Interrupts (Optional): Set S2MM_DMACR.IOC_IrqEn = 1.
