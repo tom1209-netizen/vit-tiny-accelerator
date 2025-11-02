@@ -43,13 +43,12 @@
     - [8.2 Phase map](#82-phase-map)
     - [8.3 Control FSM](#83-control-fsm)
   - [9. Dataflow \& Pipeline](#9-dataflow--pipeline)
-  - [10. Interfaces \& Register Map (AXI-Lite)](#10-interfaces--register-map-axi-lite)
-  - [11. Verification Plan](#11-verification-plan)
-    - [11.1 Unit Tests](#111-unit-tests)
-    - [11.2 Integration Tests](#112-integration-tests)
-    - [11.3 System Tests](#113-system-tests)
-  - [12. Risks \& Mitigations](#12-risks--mitigations)
-  - [13. Tools \& Environment](#13-tools--environment)
+  - [10. Verification Plan](#10-verification-plan)
+    - [10.1 Unit Tests](#101-unit-tests)
+    - [10.2 Integration Tests](#102-integration-tests)
+    - [10.3 System Tests](#103-system-tests)
+  - [11. Risks \& Mitigations](#11-risks--mitigations)
+  - [12. Tools \& Environment](#12-tools--environment)
   - [Appendix A. Requantization Details](#appendix-a-requantization-details)
   - [Appendix B. Signal Dictionary (excerpt)](#appendix-b-signal-dictionary-excerpt)
 
@@ -360,6 +359,13 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | 11:6  | TILE_N         | RW   | 6’b000000 | Width of N dimension (elements).                                                                                                                                                                                                               |
 | 5:0   | TILE_M         | RW   | 6’b000000 | Height of M dimension (elements). |
 
+**Behavioral notes:**
+
+- `(TILE_M, TILE_N, TILE_K)` are interpreted in elements, not bytes. The hardware knows elements are INT8 on input and INT32 internally. Data mover computes byte counts as `elements * 1 byte (INT8)` or `elements * 4 bytes (INT32)` depending on which stream it is moving.
+- `STRIDE_A_LOG2 / STRIDE_B_LOG2` let us define packed vs strided layouts without needing extra stride registers.
+- `OP_CLASS + DATA_LAYOUT` let firmware tell the scheduler_tiler “which subroutine to run” and “which mux topology to use” without having to hand-toggle internal select lines like gemm_a_mux_sel, requant_out_sel, etc.
+- `LAST_TILE_HINT` is optional for production but useful for bring-up and unit test modes, to line up with STATUS.done_tick and PS polling.
+
 `ADDR_A_BASE (0x20)`
 
 **Default:** `32'h0000_0000`
@@ -436,7 +442,7 @@ y_int8 = scaled_32[7:0]
 
 **Default:** `32'h0000_0000`
 
-**Purpose:** Encodes high-level layer context for `scheduler_tiler` — including stage, block type, dimensions, window size, and writeback policy.
+**Purpose:** Describes the semantic layer context of the current block of work: where in TinyViT we are (stage), what block we’re running (Attention vs MLP vs PatchMerging), how many tokens/heads/head_dim to iterate, and what to do with the output (keep on-chip or commit to DDR). scheduler_tiler uses this to pick which FSM to run (attention_block vs mlp_block, etc.), how many loops to execute, and whether to arm the DMA S2MM writeback at the end.
 
 ![Layer configuration register](./register/layer.png)
 
@@ -444,12 +450,18 @@ y_int8 = scaled_32[7:0]
 | ----- | ------------ | ---- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 31:30 | RESERVED     | RW   | 2’b00     | Reserved.                                                                                                                                           |
 | 29:28 | WRITE_POLICY | RW   | 2’b00     | Post-block output handling:<br>00 = Keep on-chip<br>01 = Write to DDR<br>10 = Write & signal completion<br>11 = Reserved                            |
-| 27:24 | STAGE_ID     | RW   | 4’b0000   | Which TinyViT stage / resolution level we’re in                                                           |
+| 27:24 | STAGE_ID     | RW   | 4’b0000   | TinyViT stage / resolution level:<br>0 = Stem / PatchEmbed<br>1 = Stage 1 (MBConv / conv-only)<br>2 = Stage 2 (Transformer)<br>3 = Stage 3 (Transformer)<br>4 = Stage 4 (Transformer)<br>5 = Classifier head<br>others reserved. Used by scheduler to select per-stage embedding dims, quant scales, and attention window parameters.                                                          |
 | 23:20 | BLOCK_ROLE   | RW   | 4’b0000   | 0000 = PatchEmbed / Stem<br>0001 = Conv / Stage1<br>0010 = Attention<br>0011 = MLP<br>0100 = PatchMerging<br>0101 = Classifier<br>others = reserved |
 | 19:16 | WINDOW_SIZE  | RW   | 4’b0000   | `(window_len – 1)` for local self-attention (e.g. 6 for 7×7 windows).                                                                               |
 | 15:11 | HEAD_DIM     | RW   | 5’b00000  | `(dim_per_head – 1)` — per-head embedding dimension.                                                                                                |
 | 10:6  | HEAD_COUNT   | RW   | 5’b00000  | `(num_heads – 1)` — number of attention heads.                                                                                                      |
 | 5:0   | TOKEN_COUNT  | RW   | 6’b000000 | `(num_tokens – 1)` — token count at current stage.                                                                                                  |
+
+**Behavioral notes:**
+
+- `BLOCK_ROLE` and `STAGE_ID` together describe what part of TinyViT we're running (e.g. “Stage 3 attention vs Stage 3 MLP vs PatchMerging between Stage 3->4”). That directly selects which sub-block FSM to kick (attention_block or mlp_block) and which fixed function units (softmax, GELU, residual add, etc.) to activate.
+- `TOKEN_COUNT`, `HEAD_COUNT`, `HEAD_DIM`, and `WINDOW_SIZE` tell that FSM how many loops to run for each of those structures (tokens per window, heads per block, etc.) so the scheduler_tiler can autonomously drive all phases (Q-proj -> K-proj -> V-proj -> QKᵀ -> softmax -> Attn×V, then MLP FC1 -> GELU -> FC2 -> residual) without firmware micromanaging every step.
+- `WRITE_POLICY` controls whether the result of this block is immediately pushed back to DDR via S2MM and whether we notify the PS (STATUS.done_tick + optional IRQ), matching the flow where after attention we keep data on-chip for MLP, but after MLP we commit and let PS read logits / continue the network
 
 **Programming Sequences:**
 
@@ -741,44 +753,30 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 4. **Residual add** and write-back via **DMA (S2MM)** to DDR.  
 5. **PS** reads logits, computes argmax.
 
-## 10. Interfaces & Register Map (AXI-Lite)
+## 10. Verification Plan
 
-| Offset | Register      | Dir | Description                                 |
-| ------ | ------------- | --- | ------------------------------------------- |
-| 0x00   | CONTROL       | R/W | `[0]=start, [1]=soft_reset, [2]=irq_enable` |
-| 0x04   | STATUS        | R   | `[0]=done_tick, [1]=busy, [2]=error_flag`   |
-| 0x10   | TILE_CFG      | R/W | M/N/K, strides                              |
-| 0x20   | ADDR_A_BASE   | R/W | DDR base for A                              |
-| 0x24   | ADDR_B_BASE   | R/W | DDR base for B                              |
-| 0x28   | ADDR_C_BASE   | R/W | DDR base for C                              |
-| 0x40   | REQUANT_SCALE | R/W | integer `M`                                 |
-| 0x44   | REQUANT_SHIFT | R/W | shift `s`                                   |
-| 0x70   | LAYER_CFG     | R/W | layer index, heads, d, tokens N             |
-
-## 11. Verification Plan
-
-### 11.1 Unit Tests
+### 10.1 Unit Tests
 
 - **gemm_core:** vector tests vs NumPy golden; stall + back-pressure.  
 - **requant_unit:** exhaustive sweep for rounding/saturation edges.  
 - **softmax_unit:** L1 error <=1.5% vs FP target; sum≈1.0 (quantized).  
 - **elementwise_ops:** GELU <=2 LSB; Norm cosine sim >=0.995.
 
-### 11.2 Integration Tests
+### 10.2 Integration Tests
 
 - **attention_block / mlp_block:** end-to-end match vs PyTorch INT8 tensors within MSE tolerance.
 
-### 11.3 System Tests
+### 10.3 System Tests
 
 - DMA loopback; GEMM microbenchmark; PS<->PL regression.
 
-## 12. Risks & Mitigations
+## 11. Risks & Mitigations
 
 - **DDR bandwidth bottleneck:** double-buffering, larger bursts, on-chip reuse.  
 - **Timing closure @ 180–200 MHz:** extra pipelining, floorplanning, temp smaller PE array.  
 - **Quantization accuracy:** per-channel scales, larger LUTs, post-quant calibration.
 
-## 13. Tools & Environment
+## 12. Tools & Environment
 
 Vivado/Vitis 2024.x, Verilator/xsim, Python 3.10 reference model; Arty Z7-20 board; XDC constraints.
 
