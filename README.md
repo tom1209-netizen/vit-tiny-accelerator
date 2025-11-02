@@ -114,7 +114,7 @@ The model is organized into a **convolutional stem**, **four sequential stages**
 
 The target variant is `tiny_vit_5m_224`, which determines the compute and memory footprint of the accelerator.
 
-| Parameter              | Description                           | Value               |
+| **Parameter**          | **Description**                       | **Value**           |
 | ---------------------- | ------------------------------------- | ------------------- |
 | **Input Resolution**   | Image size                            | 224 × 224           |
 | **Stages (Layers)**    | Sequential depth                      | 4                   |
@@ -226,7 +226,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 ### 3.3 Hardware Relevance Summary
 
-| Model Component           | Hardware Module               | Operation Type                   |
+| **Model Component**       | **Hardware Module**           | **Operation Type**               |
 | ------------------------- | ----------------------------- | -------------------------------- |
 | PatchEmbed / PatchMerging | Scheduler + AXI DMA           | Convolution / Data Movement      |
 | Attention (Q, K, V, MSA)  | Attention Block + GEMM Core   | Matrix Multiply + Softmax        |
@@ -276,7 +276,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Interface:**
 
-| **Signal Name**               | **Signal Width**   | **Direction** | **Destination**        | **Description**                                                                 |
+| **Signal Name**               | **Signal Width**   | **Direction** | **Source/Destination** | **Description**                                                                 |
 | ----------------------------- | ------------------ | ------------- | ---------------------- | ------------------------------------------------------------------------------- |
 | **AXI Stream**                |                    |               |                        |                                                                                 |
 | `axi_lite[146:0]`             | 147 bits           | Input         | `Processing System`    | This is the bus to control AXI Regs                                             |
@@ -301,18 +301,18 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Register:**
 
-| Offset | Abbreviation  | Description                      |
-| ------ | ------------- | -------------------------------- |
-|   0x00 | CONTROL       | Control Register                 |
-|   0x04 | STATUS        | Status Register                  |
-|   0x10 | TILE_CFG      | Tile Configuration Register      |
-|   0x20 | ADDR_A_BASE   | Base Address Register A (Input)  |
-|   0x24 | ADDR_B_BASE   | Base Address Register B (Weight) |
-|   0x28 | ADDR_C_BASE   | Base Address Register C (Output) |
-|   0x40 | REQUANT_SCALE | Requantization Scale Register    |
-|   0x44 | REQUANT_SHIFT | Requantization Shift Register    |
-|   0x70 | LAYER_CFG     | Layer Configuration Register     |
-| Others | Reserved      | Reserved Register                |
+| **Offset** | **Abbreviation**  | **Description**                      |
+| ---------- | ----------------- | -------------------------------- |
+| 0x00       | CONTROL           | Control Register                 |
+| 0x04       | STATUS            | Status Register                  |
+| 0x10       | TILE_CFG          | Tile Configuration Register      |
+| 0x20       | ADDR_A_BASE       | Base Address Register A (Input)  |
+| 0x24       | ADDR_B_BASE       | Base Address Register B (Weight) |
+| 0x28       | ADDR_C_BASE       | Base Address Register C (Output) |
+| 0x40       | REQUANT_SCALE     | Requantization Scale Register    |
+| 0x44       | REQUANT_SHIFT     | Requantization Shift Register    |
+| 0x70       | LAYER_CFG         | Layer Configuration Register     |
+| Others     | Reserved          | Reserved Register                |
 
 `CONTROL (0x00)`
 
@@ -320,12 +320,12 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 ![Control register](./register/ctrl.png)
 
-| Bit  | Name        | Type | Default value | Description                                                     |
-| ---- | ----------- | ---- | ------------- | --------------------------------------------------------------- |
-| 31:3 | Reserved    | RO   | 29'b0         | Reserved                                                        |
-| 2    | irq_enabled | RW   | 1'b0          | Interrupt enable. 1 = Enabled, 0 = Disabled.                    |
-| 1    | soft_reset  | RW   | 1'b0          | Soft reset. Write 1 to reset the accelerator to its IDLE state. |
-| 0    | start       | RW   | 1'b0          | Task start. Write 1 to begin the operation.                     |
+| **Bit**  | **Name**        | **Type** | **Default value** | **Description**                                                     |
+| -------- | --------------- | -------- | ----------------- | ------------------------------------------------------------------- |
+| 31:3     | Reserved        | RO       | 29'b0             | Reserved                                                            |
+| 2        | irq_enabled     | RW       | 1'b0              | Interrupt enable. 1 = Enabled, 0 = Disabled.                        |
+| 1        | soft_reset      | RW       | 1'b0              | Soft reset. Write 1 to reset the accelerator to its IDLE state.     |
+| 0        | start           | RW       | 1'b0              | Task start. Write 1 to begin the operation.                         |
 
 `STATUS (0x04)`
 
@@ -333,12 +333,12 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 ![Status register](./register/status.png)
 
-| Bit  | Name       | Type | Default value | Description                                                       |
-| ---- | ---------- | ---- | ------------- | ----------------------------------------------------------------- |
-| 31:3 | Reserved   | RO   | 29'b0         | Reserved                                                          |
-| 2    | error_flag | RW1C | 1'b0          | Error flag. 1 = Error occurred. Write 1 to clear this bit to 0.   |
-| 1    | busy       | RO   | 1'b0          | Busy flag. 1 = Accelerator is running. 0 = IDLE state.            |
-| 0    | done_tick  | RW1C | 1'b0          | Completion flag. 1 = Task is done. Write 1 to clear this bit to 0.|
+| **Bit**  | **Name**       | **Type** | **Default value** | **Description**                                                       |
+| -------- | -------------- | -------- | ----------------- | --------------------------------------------------------------------- |
+| 31:3     | Reserved       | RO       | 29'b0             | Reserved                                                              |
+| 2        | error_flag     | RW1C     | 1'b0              | Error flag. 1 = Error occurred. Write 1 to clear this bit to 0.       |
+| 1        | busy           | RO       | 1'b0              | Busy flag. 1 = Accelerator is running. 0 = IDLE state.                |
+| 0        | done_tick      | RW1C     | 1'b0              | Completion flag. 1 = Task is done. Write 1 to clear this bit to 0.    |
 
 `TILE_CFG (0x10)`
 
@@ -348,16 +348,16 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 ![Tile configuration register](./register/tile.png)
 
-| Bits  | Name           | Type | Default   | Description                                                                                                                                                                                                                                    |
-| ----- | -------------- | ---- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 31    | LAST_TILE_HINT | RW   | 1’b0      | Marks the final tile of a layer or block. Triggers `done_tick` if `WRITE_POLICY` = `10`.                                                                                                                                                       |
-| 30:28 | OP_CLASS       | RW   | 3’b000    | High-level operation phase:<br>000 = Q/K/V projection<br>001 = Attention score (QKᵀ)<br>010 = Attention apply (softmax×V)<br>011 = MLP FC1<br>100 = MLP FC2<br>101 = Residual or writeback<br>110 = PatchMerging / Conv stem<br>111 = Reserved |
-| 27:26 | DATA_LAYOUT    | RW   | 2’b00     | Operand routing:<br>00 = tokens×weights<br>01 = Q×Kᵀ<br>10 = softmax×V<br>11 = reserved.                                                                                                                                                       |
-| 25:22 | STRIDE_B_LOG2  | RW   | 4’b0000   | log₂(bytes) stride for weight (B) tiles in DDR.                                                                                                                                                                                                |
-| 21:18 | STRIDE_A_LOG2  | RW   | 4’b0000   | log₂(bytes) stride for activation (A) tiles in DDR.                                                                                                                                                                                            |
-| 17:12 | TILE_K         | RW   | 6’b000000 | Depth of K dimension (elements).                                                                                                                                                                                                               |
-| 11:6  | TILE_N         | RW   | 6’b000000 | Width of N dimension (elements).                                                                                                                                                                                                               |
-| 5:0   | TILE_M         | RW   | 6’b000000 | Height of M dimension (elements). |
+| **Bits**  | **Name**           | **Type** | **Default**   | **Description**                                                                                                                                                                                                                                    |
+| --------- | ------------------ | -------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 31        | LAST_TILE_HINT     | RW       | 1’b0          | Marks the final tile of a layer or block. Triggers `done_tick` if `WRITE_POLICY` = `10`.                                                                                                                                                           |
+| 30:28     | OP_CLASS           | RW       | 3’b000        | High-level operation phase:<br>000 = Q/K/V projection<br>001 = Attention score (QKᵀ)<br>010 = Attention apply (softmax×V)<br>011 = MLP FC1<br>100 = MLP FC2<br>101 = Residual or writeback<br>110 = PatchMerging / Conv stem<br>111 = Reserved     |
+| 27:26     | DATA_LAYOUT        | RW       | 2’b00         | Operand routing:<br>00 = tokens×weights<br>01 = Q×Kᵀ<br>10 = softmax×V<br>11 = reserved.                                                                                                                                                           |
+| 25:22     | STRIDE_B_LOG2      | RW       | 4’b0000       | log₂(bytes) stride for weight (B) tiles in DDR.                                                                                                                                                                                                    |
+| 21:18     | STRIDE_A_LOG2      | RW       | 4’b0000       | log₂(bytes) stride for activation (A) tiles in DDR.                                                                                                                                                                                                |
+| 17:12     | TILE_K             | RW       | 6’b000000     | Depth of K dimension (elements).                                                                                                                                                                                                                   |
+| 11:6      | TILE_N             | RW       | 6’b000000     | Width of N dimension (elements).                                                                                                                                                                                                                   |
+| 5:0       | TILE_M             | RW       | 6’b000000     | Height of M dimension (elements).                                                                                                                                                                                                                  |
 
 **Behavioral notes:**
 
@@ -372,27 +372,27 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 ![ADDR_A_BASE register](./register/a.png)
 
-| Bit  | Name        | Type | Default value | Description                             |
-| ---- | ----------- | ---- | ------------- | --------------------------------------- |
-| 31:0 | ADDR_A_BASE | RW   | 32'h0         | Base address in DDR for input matrix A. |
+| **Bit**  | **Name**        | **Type** | **Default value** | **Description**                             |
+| -------- | --------------- | -------- | ----------------- | ------------------------------------------- |
+| 31:0     | ADDR_A_BASE     | RW       | 32'h0             | Base address in DDR for input matrix A.     |
 
 `ADDR_B_BASE (0x24)`
 Default value: 32'h0000_000
 
 ![ADDR_B_BASE register](./register/b.png)
 
-| Bit  | Name        | Type | Default value | Description                              |
-| ---- | ----------- | ---- | ------------- | ---------------------------------------- |
-| 31:0 | ADDR_B_BASE | RW   | 32'h0         | Base address in DDR for weight matrix B. |
+| **Bit**  | **Name**        | **Type** | **Default value** | **Description**                              |
+| -------- | --------------- | -------- | ----------------- | -------------------------------------------- |
+| 31:0     | ADDR_B_BASE     | RW       | 32'h0             | Base address in DDR for weight matrix B.     |
 
 `ADDR_C_BASE (0x28)`
 Default value: 32'h0000_000
 
 ![ADDR_C_BASE register](./register/c.png)
 
-| Bit  | Name        | Type | Default value | Description                              |
-| ---- | ----------- | ---- | ------------- | ---------------------------------------- |
-| 31:0 | ADDR_C_BASE | RW   | 32'h0         | Base address in DDR for output matrix C. |
+| **Bit**  | **Name**        | **Type** | **Default value** | **Description**                              |
+| -------- | --------------- | -------- | ----------------- | -------------------------------------------- |
+| 31:0     | ADDR_C_BASE     | RW       | 32'h0             | Base address in DDR for output matrix C.     |
 
 `REQUANT_SCALE (0x40)`
 
@@ -402,9 +402,9 @@ Default value: 32'h0000_000
 
 ![Requantization scale register](./register/scale.png)
 
-| Bits | Name      | Type | Default      | Description                                                                                                |
-| ---- | --------- | ---- | ------------ | ---------------------------------------------------------------------------------------------------------- |
-| 31:0 | SCALE_Q31 | RW   | 32’h00000000 | Signed Q1.31 multiplier. Real multiplier = `SCALE_Q31 / 2³¹`. Applied to each accumulator before shifting. |
+| **Bits** | **Name**      | **Type** | **Default**      | **Description**                                                                                                |
+| -------- | ------------- | -------- | ---------------- | -------------------------------------------------------------------------------------------------------------- |
+| 31:0     | SCALE_Q31     | RW       | 32’h00000000     | Signed Q1.31 multiplier. Real multiplier = `SCALE_Q31 / 2³¹`. Applied to each accumulator before shifting.     |
 
 **Hardware behavior:**
 
@@ -421,12 +421,12 @@ aligned_32 = product_64 >>> 31     // align back to integer domain
 
 ![Requantization shift register](./register/shift.png)
 
-| Bits | Name         | Type | Default | Description                                        |
-| ---- | ------------ | ---- | ------- | -------------------------------------------------- |
-| 31:7 | RESERVED     | RW   | 25’b0   | Reserved.                                          |
-| 6    | SATURATE_EN  | RW   | 1’b1    | Clamp result to [–128, 127].                       |
-| 5    | ROUND_EN     | RW   | 1’b1    | Add rounding bias before shift (round-to-nearest). |
-| 4:0  | SHIFT_AMOUNT | RW   | 5’d0    | Arithmetic right-shift count (0–31).               |
+| **Bits** | **Name**         | **Type** | **Default** | **Description**                                        |
+| -------- | ---------------- | -------- | ----------- | ------------------------------------------------------ |
+| 31:7     | RESERVED         | RW       | 25’b0       | Reserved.                                              |
+| 6        | SATURATE_EN      | RW       | 1’b1        | Clamp result to [–128, 127].                           |
+| 5        | ROUND_EN         | RW       | 1’b1        | Add rounding bias before shift (round-to-nearest).     |
+| 4:0      | SHIFT_AMOUNT     | RW       | 5’d0        | Arithmetic right-shift count (0–31).                   |
 
 **Hardware behavior:**
 
@@ -446,16 +446,16 @@ y_int8 = scaled_32[7:0]
 
 ![Layer configuration register](./register/layer.png)
 
-| Bits  | Name         | Type | Default   | Description                                                                                                                                         |
-| ----- | ------------ | ---- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 31:30 | RESERVED     | RW   | 2’b00     | Reserved.                                                                                                                                           |
-| 29:28 | WRITE_POLICY | RW   | 2’b00     | Post-block output handling:<br>00 = Keep on-chip<br>01 = Write to DDR<br>10 = Write & signal completion<br>11 = Reserved                            |
-| 27:24 | STAGE_ID     | RW   | 4’b0000   | TinyViT stage / resolution level:<br>0 = Stem / PatchEmbed<br>1 = Stage 1 (MBConv / conv-only)<br>2 = Stage 2 (Transformer)<br>3 = Stage 3 (Transformer)<br>4 = Stage 4 (Transformer)<br>5 = Classifier head<br>others reserved. Used by scheduler to select per-stage embedding dims, quant scales, and attention window parameters.                                                          |
-| 23:20 | BLOCK_ROLE   | RW   | 4’b0000   | 0000 = PatchEmbed / Stem<br>0001 = Conv / Stage1<br>0010 = Attention<br>0011 = MLP<br>0100 = PatchMerging<br>0101 = Classifier<br>others = reserved |
-| 19:16 | WINDOW_SIZE  | RW   | 4’b0000   | `(window_len – 1)` for local self-attention (e.g. 6 for 7×7 windows).                                                                               |
-| 15:11 | HEAD_DIM     | RW   | 5’b00000  | `(dim_per_head – 1)` — per-head embedding dimension.                                                                                                |
-| 10:6  | HEAD_COUNT   | RW   | 5’b00000  | `(num_heads – 1)` — number of attention heads.                                                                                                      |
-| 5:0   | TOKEN_COUNT  | RW   | 6’b000000 | `(num_tokens – 1)` — token count at current stage.                                                                                                  |
+| **Bits**  | **Name**         | **Type** | **Default**   | **Description**                                                                                                                                         |
+| --------- | ---------------- | -------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 31:30     | RESERVED         | RW       | 2’b00         | Reserved.                                                                                                                                               |
+| 29:28     | WRITE_POLICY     | RW       | 2’b00         | Post-block output handling:<br>00 = Keep on-chip<br>01 = Write to DDR<br>10 = Write & signal completion<br>11 = Reserved                                |
+| 27:24     | STAGE_ID         | RW       | 4’b0000       | TinyViT stage / resolution level:<br>0 = Stem / PatchEmbed<br>1 = Stage 1 (MBConv / conv-only)<br>2 = Stage 2 (Transformer)<br>3 = Stage 3 (Transformer)<br>4 = Stage 4 (Transformer)<br>5 = Classifier head<br>others reserved. Used by scheduler to select per-stage embedding dims, quant scales, and attention window parameters.                                                          |
+| 23:20     | BLOCK_ROLE       | RW       | 4’b0000       | 0000 = PatchEmbed / Stem<br>0001 = Conv / Stage1<br>0010 = Attention<br>0011 = MLP<br>0100 = PatchMerging<br>0101 = Classifier<br>others = reserved     |
+| 19:16     | WINDOW_SIZE      | RW       | 4’b0000       | `(window_len – 1)` for local self-attention (e.g. 6 for 7×7 windows).                                                                                   |
+| 15:11     | HEAD_DIM         | RW       | 5’b00000      | `(dim_per_head – 1)` — per-head embedding dimension.                                                                                                    |
+| 10:6      | HEAD_COUNT       | RW       | 5’b00000      | `(num_heads – 1)` — number of attention heads.                                                                                                          |
+| 5:0       | TOKEN_COUNT      | RW       | 6’b000000     | `(num_tokens – 1)` — token count at current stage.                                                                                                      |
 
 **Behavioral notes:**
 
@@ -490,7 +490,7 @@ y_int8 = scaled_32[7:0]
 
 **Interface:**
 
-| **Signal Name**                      | **Signal Width**   | **Direction** | **Destination**                     | **Description**                                                           |
+| **Signal Name**                      | **Signal Width**   | **Direction** | **Source/Destination**              | **Description**                                                           |
 | ------------------------------------ | ------------------ | ------------- | ----------------------------------- | ------------------------------------------------------------------------- |
 | **AXI Lite Regs**                    |                    |               |                                     |                                                                           |
 | `status[2:0]`                        | 3 bits             | Output        | `axi_lite_regs`                     | Scheduler status flags (e.g., idle, busy, done).                          |
@@ -549,7 +549,7 @@ y_int8 = scaled_32[7:0]
 
 **Interface:**
 
-| **Signal Name**               | **Signal Width**   | **Direction** | **Destination**          | **Description**                                                                 |
+| **Signal Name**               | **Signal Width**   | **Direction** | **Source/Destination**   | **Description**                                                                 |
 | ----------------------------- | ------------------ | ------------- | ------------------------ | ------------------------------------------------------------------------------- |
 | **Scheduler tiler**           |                    |               |                          |                                                                                 |
 | `dma_start_transfer`          | 1 bit              | Input         | `scheduler_tiler`        | Trigger to start a DMA read/write operation.                                    |
@@ -577,7 +577,7 @@ y_int8 = scaled_32[7:0]
 
 **Interface:**
 
-| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
+| **Signal Name**            | **Signal Width**   | **Direction** | **Source/Destination**    | **Description**                                                                 |
 | -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
 | **AXI DMA Shim**           |                    |               |                           |                                                                                 |
 | `m_axis_mm2s[38:0]`        | 39 bits            | Input         | `axi_dma_shim`            | Data stream from memory to accelerator (MM2S).                                  |
@@ -597,16 +597,16 @@ y_int8 = scaled_32[7:0]
 
 - **Key Register:** This project uses the AXI DMA in **Direct Register Mode** (also known as Simple DMA), which uses registers to define a single transfer rather than complex descriptor chains. The key registers used for this mode are:
 
-  | Register (Offset) | Channel      | Purpose                                          |
-  | ----------------- | ------------ | ------------------------------------------------ |
-  | `0x00`            | MM2S_DMACR   | Control (start, reset, interrupt enable).        |
-  | `0x04`            | MM2S_DMASR   | Status (halted, idle, errors, interrupt flags).  |
-  | `0x18`            | MM2S_SA      | Source address in DDR for reads.                 |
-  | `0x28`            | MM2S_LENGTH  | Number of bytes to transfer.                     |
-  | `0x30`            | S2MM_DMACR   | Control register for write channel.              |
-  | `0x34`            | S2MM_DMASR   | Status for write channel.                        |
-  | `0x48`            | S2MM_DA      | Destination address in DDR.                      |
-  | `0x58`            | S2MM_LENGTH  | Number of bytes to write.                        |
+  | **Register (Offset)** | **Channel**      | **Purpose**                                          |
+  | --------------------- | ---------------- | ---------------------------------------------------- |
+  | `0x00`                | MM2S_DMACR       | Control (start, reset, interrupt enable).            |
+  | `0x04`                | MM2S_DMASR       | Status (halted, idle, errors, interrupt flags).      |
+  | `0x18`                | MM2S_SA          | Source address in DDR for reads.                     |
+  | `0x28`                | MM2S_LENGTH      | Number of bytes to transfer.                         |
+  | `0x30`                | S2MM_DMACR       | Control register for write channel.                  |
+  | `0x34`                | S2MM_DMASR       | Status for write channel.                            |
+  | `0x48`                | S2MM_DA          | Destination address in DDR.                          |
+  | `0x58`                | S2MM_LENGTH      | Number of bytes to write.                            |
 
 - **Programming Sequence:** The axi_dma_shim follows this standard sequence to manage the AXI DMA IP:
 
@@ -630,7 +630,7 @@ y_int8 = scaled_32[7:0]
 
 **Interface:**
 
-| **Signal Name**             | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
+| **Signal Name**             | **Signal Width**   | **Direction** | **Source/Destination**    | **Description**                                                                 |
 | --------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
 | **GEMM start mux**          |                    |               |                           |                                                                                 |
 | `start_tile`                | 1 bit              | Input         | `gemm_start_mux`          | Start signal for the current tile computation.                                  |
@@ -657,7 +657,7 @@ y_int8 = scaled_32[7:0]
 
 **Interface;**
 
-| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                  |
+| **Signal Name**            | **Signal Width**   | **Direction** | **Source/Destination**    | **Description**                                                                  |
 | -------------------------- | ------------------ | ------------- | ------------------------- | -------------------------------------------------------------------------------- |
 | **Requant In Mux**         |                    |               |                           |                                                                                  |
 | `axis_1[130:0]`            | 131 bits           | Output        | `requant_in_mux`          | Output data stream (sum of input A and B, element-wise INT8 addition result).    |
@@ -678,7 +678,7 @@ y_int8 = scaled_32[7:0]
 
 **Interface:**
 
-| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
+| **Signal Name**            | **Signal Width**   | **Direction** | **Source/Destination**    | **Description**                                                                 |
 | -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
 | **Requant in mux**         |                    |               |                           |                                                                                 |
 | `axis_in[130:0]`           | 131 bits           | Input         | `requant_in_mux`          | Input activation data stream (INT32 or INT8, 128-bit per beat).                 |
@@ -702,13 +702,13 @@ y_int8 = scaled_32[7:0]
 
 ### 7.2 Phase map
 
-| Phase      | DMA mode (`dma_mode`) | A-side (`axis_0`) | B-side (`axis_1`) | Requant-A usage            |
-| ---------- | --------------------- | ----------------- | ----------------- | -------------------------- |
-| **Q-proj** | 0 = tokens            | `norm_out`        | `axis_wgt` (Wq)   | `cap_en=1, cap=Q`          |
-| **K-proj** | 0 = tokens            | `norm_out`        | `axis_wgt` (Wk)   | `cap_en=1, cap=K`          |
-| **V-proj** | 0 = tokens            | `norm_out`        | `axis_wgt` (Wv)   | `cap_en=1, cap=V`          |
-| **QKᵀ**    | (no DMA)              | `Q_buf`           | `Kᵀ` (from buf)   | `sfm_en=1` -> **Softmax**  |
-| **Attn×V** | (no DMA)              | `softmax_out`     | `V` (from buf)    | normal requant -> residual |
+| **Phase**      | **DMA mode (`dma_mode`)** | **A-side (`axis_0`)** | **B-side (`axis_1`)** | **Requant-A usage**            |
+| -------------- | ------------------------- | --------------------- | --------------------- | ------------------------------ |
+| **Q-proj**     | 0 = tokens                | `norm_out`            | `axis_wgt` (Wq)       | `cap_en=1, cap=Q`              |
+| **K-proj**     | 0 = tokens                | `norm_out`            | `axis_wgt` (Wk)       | `cap_en=1, cap=K`              |
+| **V-proj**     | 0 = tokens                | `norm_out`            | `axis_wgt` (Wv)       | `cap_en=1, cap=V`              |
+| **QKᵀ**        | (no DMA)                  | `Q_buf`               | `Kᵀ` (from buf)       | `sfm_en=1` -> **Softmax**      |
+| **Attn×V**     | (no DMA)                  | `softmax_out`         | `V` (from buf)        | normal requant -> residual     |
 
 > Implementation note: Q/K/V projection phases stream **tokens (A)** against **weights (B)**; intermediate Q & K are captured into tile buffers. QKᵀ result goes through `softmax_unit`; the softmax output tiles multiply **V** to produce the head output (then residual path).  
 
@@ -729,12 +729,12 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 
 ### 8.2 Phase map
 
-| Phase         | DMA mode (`dma_mode`) | A-side (`axis_0`)        | B-side (`axis_1`)         | Requant-A usage              |
-| ------------- | --------------------- | ------------------------ | ------------------------- | ---------------------------- |
-| **GEMM1**     | 0 = tokens            | `axis_wgt` (W1)          | `axis_1` (input data)     | `cap_en=1, cap=GEMM1`        |
-| **GELU**      | (no DMA)              | `gemm1_out`              | (N/A)                     | `sfm_en=0`                   |
-| **GEMM2**     | 0 = tokens            | `axis_wgt` (W2)          | `gemm1_out`               | `cap_en=1, cap=GEMM2`        |
-| **Residual**  | (no DMA)              | `gemm2_out`              | (Residual data)           | normal requant -> residual   |
+| **Phase**         | **DMA mode (`dma_mode`)** | **A-side (`axis_0`)**        | **B-side (`axis_1`)**         | **Requant-A usage**              |
+| ----------------- | ------------------------- | ---------------------------- | ----------------------------- | -------------------------------- |
+| **GEMM1**         | 0 = tokens                | `axis_wgt` (W1)              | `axis_1` (input data)         | `cap_en=1, cap=GEMM1`            |
+| **GELU**          | (no DMA)                  | `gemm1_out`                  | (N/A)                         | `sfm_en=0`                       |
+| **GEMM2**         | 0 = tokens                | `axis_wgt` (W2)              | `gemm1_out`                   | `cap_en=1, cap=GEMM2`            |
+| **Residual**      | (no DMA)                  | `gemm2_out`                  | (Residual data)               | normal requant -> residual       |
 
 > **Implementation note:** The MLP block operates with two **GEMM** phases where the first GEMM computes the transformation of input data (`axis_1`) with the first weight matrix (`axis_wgt` for W1). The result goes through **GELU** activation. The second GEMM phase computes the transformation with the second weight matrix (`axis_wgt` for W2) and adds the optional residual. The result from **GEMM2** can optionally be passed to the residual add phase.
 
