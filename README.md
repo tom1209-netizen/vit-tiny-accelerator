@@ -56,7 +56,6 @@
 - [Appendix A. Requantization Details](#appendix-a-requantization-details)
 - [Appendix B. Signal Dictionary (excerpt)](#appendix-b-signal-dictionary-excerpt)
 
-
 ## 1. Abstract
 
 We implement a TinyViT-5M accelerator on Xilinx Zynq-7000 (Arty Z7) in pure Verilog. Target: **>=1 FPS** on 224×224 input with **INT8** weights/activations and **INT32** accumulation; accuracy within **1–2%** of an INT8 software baseline. Data moves via **AXI-HP + AXI DMA**; control via **AXI-Lite**.
@@ -277,14 +276,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Purpose:** Serves as the single memory-mapped interface between the Processing System (PS) and the Programmable Logic (PL) accelerator.
 
-**Key Functionality:**
-
-- PS-to-PL (Configuration): Receives configuration data from the ARM core via the AXI-Lite bus. It holds registers for base addresses (addr_a_base, addr_b_base, addr_c_base), layer parameters (tile_cfg, layer_cfg), and quantization values (requant_scale, requant_shift).
-- PS-to-PL (Control): Provides control signals to the accelerator, most notably the start signal to begin computation, a soft_reset for the FSMs, and an irq_enable flag.
-- PL-to-PS (Status): Receives status flags (status[2:0]) from the scheduler_tiler, allowing the PS to poll for accelerator state (e.g., idle, busy, done). This register bank is the central point for all software control and monitoring
-
-**Interface**
-<!-- # Module axi_lite_regs (AXI4-Lite Slave Interface) -->
+**Interface:**
 
 | **Signal Name**               | **Signal Width**   | **Direction** | **Destination**        | **Description**                                                                 |
 | ----------------------------- | ------------------ | ------------- | ---------------------- | ------------------------------------------------------------------------------- |
@@ -303,20 +295,17 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | `requant_shift[31:0]`         | 32 bits            | Input         | `scheduler_tiler`      | Requantization right-shift value for scaling adjustment                         |
 | `layer_cfg[31:0]`             | 32 bits            | Input         | `scheduler_tiler`      | Layer configuration register (defines layer type, sequence, etc.)               |
 
+**Key Functionality:**
+
+- PS-to-PL (Configuration): Receives configuration data from the ARM core via the AXI-Lite bus. It holds registers for base addresses (addr_a_base, addr_b_base, addr_c_base), layer parameters (tile_cfg, layer_cfg), and quantization values (requant_scale, requant_shift).
+- PS-to-PL (Control): Provides control signals to the accelerator, most notably the start signal to begin computation, a soft_reset for the FSMs, and an irq_enable flag.
+- PL-to-PS (Status): Receives status flags (status[2:0]) from the scheduler_tiler, allowing the PS to poll for accelerator state (e.g., idle, busy, done). This register bank is the central point for all software control and monitoring
+
 ### 6.2 `scheduler_tiler`
 
 **Purpose:** Acts as the global sequencer and master controller for the entire accelerator. It orchestrates the full computation of a Transformer layer, issuing commands to all other blocks.
 
-**Key Functionality:**
-
-- **Top-Level Control:** Responds to the start signal from axi_lite_regs to begin its main FSM. It manages the overall operation sequence (e.g., Attention block, then MLP block).
-- **DMA Coordination:** Issues high-level commands to the axi_dma_shim (e.g., dma_start_transfer, dma_ddr_addr, dma_length_bytes, dma_direction) to move data tiles from DDR into the PL or write results back. It waits for the dma_transfer_done signal before proceeding.
-- **Compute Block Orchestration:** Controls the attention_block and mlp_block by asserting compute_start_op and setting the compute_op_select signal. It waits for their respective attn_block_op_done or mlp_block_op_done flags to synchronize operations.
-- **Data Path Configuration:** Dynamically configures the accelerator's internal data path by driving the sel lines for all multiplexers (e.g., gemm_a_mux_sel, requant_in_sel, residual_b_mux_sel, dma_sel). This allows it to route data streams between the correct source and destination modules for each computational phase.
-- **Status Reporting:** Provides its current state (status[2:0]) back to the axi_lite_regs for the PS to read.
-
-**Interface**
-<!-- # Module scheduler_tiler -->
+**Interface:**
 
 | **Signal Name**                      | **Signal Width**   | **Direction** | **Destination**                | **Description**                                                           |
 | ------------------------------------ | ------------------ | ------------- | ------------------------------ | ------------------------------------------------------------------------- |
@@ -363,19 +352,19 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **DMA Demux**                        |                    |               |                                |                                                                           |
 | `dma_sel`                            | 1 bit              | Input         | `dma_demux`                    | Select data path or buffer for DMA read/write.                            |
 
+**Key Functionality:**
+
+- **Top-Level Control:** Responds to the start signal from axi_lite_regs to begin its main FSM. It manages the overall operation sequence (e.g., Attention block, then MLP block).
+- **DMA Coordination:** Issues high-level commands to the axi_dma_shim (e.g., dma_start_transfer, dma_ddr_addr, dma_length_bytes, dma_direction) to move data tiles from DDR into the PL or write results back. It waits for the dma_transfer_done signal before proceeding.
+- **Compute Block Orchestration:** Controls the attention_block and mlp_block by asserting compute_start_op and setting the compute_op_select signal. It waits for their respective attn_block_op_done or mlp_block_op_done flags to synchronize operations.
+- **Data Path Configuration:** Dynamically configures the accelerator's internal data path by driving the sel lines for all multiplexers (e.g., gemm_a_mux_sel, requant_in_sel, residual_b_mux_sel, dma_sel). This allows it to route data streams between the correct source and destination modules for each computational phase.
+- **Status Reporting:** Provides its current state (status[2:0]) back to the axi_lite_regs for the PS to read.
+
 ### 6.3 axi_dma_shim
 
 **Purpose:** Acts as a simplified hardware-friendly interface to the complex AXI DMA IP. It translates high-level commands from the scheduler_tiler into the necessary AXI protocol signals to manage data transfers between DDR and the PL's AXI-Streams.
 
-**Key Functionality:**
-
-- **Command Interface:** Receives simple commands (dma_start_transfer, dma_ddr_addr, dma_length_bytes, dma_direction) from the scheduler_tiler.
-- **Stream Interface (MM2S):** When dma_direction is 0 (DDR to PL), it fetches data from the specified dma_ddr_addr and streams it out as an AXI-Stream (axis_in) to the dma_demux.
-- **Stream Interface (S2MM):** When dma_direction is 1 (PL to DDR), it consumes an AXI-Stream and writes the data to the target DDR address.
-- **Synchronization:** Asserts dma_transfer_done back to the scheduler_tiler upon completion of the requested byte transfer, allowing the main FSM to proceed.
-
-**Interface**
-<!-- # Module axi_dma_shim -->
+**Interface:**
 
 | **Signal Name**               | **Signal Width**   | **Direction** | **Destination**          | **Description**                                                                 |
 | ----------------------------- | ------------------ | ------------- | ------------------------ | ------------------------------------------------------------------------------- |
@@ -388,16 +377,38 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **DMA Demux**                 |                    |               |                          |                                                                                 |
 | `axis_in[130:0]`              | 131 bits           | Output        | `dma_demux`              | AXI4-Stream data output for DMA Demux.                                          |
 
+**Key Functionality:**
+
+- **Command Interface:** Receives simple commands (dma_start_transfer, dma_ddr_addr, dma_length_bytes, dma_direction) from the scheduler_tiler.
+- **Stream Interface (MM2S):** When dma_direction is 0 (DDR to PL), it fetches data from the specified dma_ddr_addr and streams it out as an AXI-Stream (axis_in) to the dma_demux.
+- **Stream Interface (S2MM):** When dma_direction is 1 (PL to DDR), it consumes an AXI-Stream and writes the data to the target DDR address.
+- **Synchronization:** Asserts dma_transfer_done back to the scheduler_tiler upon completion of the requested byte transfer, allowing the main FSM to proceed.
+
 ### 6.4 AXI DMA IP
 
 **Purpose:** The Xilinx AXI DMA IP is a high-performance IP block from AMD/Xilinx, responsible for high-bandwidth data movement between external DDR memory and the Programmable Logic (PL) via AXI4-Stream interfaces.
 
+**Interface:**
+
+| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
+| -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
+| **AXI Stream MM2S**        |                    |               |                           |                                                                                 |
+| `m_axis_mm2s[130:0]`       | 131 bits           | Input         | `axi_dma_shim`            | Data stream from memory to accelerator (MM2S).                                  |
+| **AXI Stream S2MM**        |                    |               |                           |                                                                                 |
+| `s_axis_s2mm[130:0]`       | 131 bits           | Input         | `axi_dma_shim`            | Data stream from accelerator to memory (S2MM).                                  |
+| **AXI DMA Lite Interface** |                    |               |                           |                                                                                 |
+| `axi_lite[146:0]`          | 147 bits           | Input         | `axi_dma_shim`            | AXI-Lite interface for control and status register communication.               |
+| **Scheduler Tiler**        |                    |               |                           |                                                                                 |
+| `mm2s_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
+| `s2mm_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
+
 **Key Functionality:**
+
 - **Control Flow**: The AXI DMA IP itself is controlled by its own AXI4-Lite slave interface. However,  in this specific accelerator design, this AXI-Lite interface is not exposed directly to the Processing System (PS). Instead, it is managed by the custom axi_dma_shim module. This provides a hardware-friendly interface for the accelerator's main controller (scheduler_tiler). Here is the specific data flow:
-	+ The PS (ARM Core) writes high-level parameters (like DDR base addresses) to the axi_lite_regs.
-	+ The scheduler_tiler (the master FSM) reads these parameters and decides when a data transfer is needed.
-	+ The scheduler_tiler issues simple commands (e.g., dma_start_transfer, dma_ddr_addr, dma_length_bytes) to the axi_dma_shim.
-	+ The axi_dma_shim translates these simple commands into the specific, low-level AXI-Lite register writes required by the Xilinx AXI DMA IP to execute the transfer.
+  - The PS (ARM Core) writes high-level parameters (like DDR base addresses) to the axi_lite_regs.
+  - The scheduler_tiler (the master FSM) reads these parameters and decides when a data transfer is needed.
+  - The scheduler_tiler issues simple commands (e.g., dma_start_transfer, dma_ddr_addr, dma_length_bytes) to the axi_dma_shim.
+  - The axi_dma_shim translates these simple commands into the specific, low-level AXI-Lite register writes required by the Xilinx AXI DMA IP to execute the transfer.
 
 - **Key Register:** This project uses the AXI DMA in **Direct Register Mode** (also known as Simple DMA), which uses registers to define a single transfer rather than complex descriptor chains. The key registers used for this mode are:
 
@@ -428,35 +439,11 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
   - Set Address: Write the DDR destination address to the S2MM_DA register.
   - Arm Receiver: Write the maximum size of the buffer allocated in memory to the S2MM_LENGTH register. This must be written last. This action arms the DMA, which will now wait for an AXI-Stream packet to arrive, write the data to the S2MM_DA, and assert an interrupt (if enabled) when the stream's TLAST signal is seen.
 
-**Interface**
-<!-- # Module AXI DMA IP -->
-
-| **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
-| -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
-| **AXI Stream MM2S**        |                    |               |                           |                                                                                 |
-| `m_axis_mm2s[130:0]`       | 131 bits           | Input         | `axi_dma_shim`            | Data stream from memory to accelerator (MM2S).                                  |
-| **AXI Stream S2MM**        |                    |               |                           |                                                                                 |
-| `s_axis_s2mm[130:0]`       | 131 bits           | Input         | `axi_dma_shim`            | Data stream from accelerator to memory (S2MM).                                  |
-| **AXI DMA Lite Interface** |                    |               |                           |                                                                                 |
-| `axi_lite[146:0]`          | 147 bits           | Input         | `axi_dma_shim`            | AXI-Lite interface for control and status register communication.               |
-| **Scheduler Tiler**        |                    |               |                           |                                                                                 |
-| `mm2s_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
-| `s2mm_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
-
 ### 6.5 `gemm_core`
 
 **Purpose:** The primary compute engine of the accelerator, performing high-throughput tiled General Matrix Multiplication (GEMM) with INT8 inputs and INT32 accumulation.
 
-**Key Functionality:**
-
-- **Compute Kernel:** Implements the core $C_{int32} = A_{int8} \times B_{int8}$ operation as an 8x8 systolic array.
-- **Handshake:** Receives a start_tile pulse from the gemm_start_mux to begin computation on a new tile.
-- **Data Inputs:** Consumes two parallel AXI-Streams: axis_gemm_a (from gemm_a_mux) and axis_gemm_b (from gemm_b_mux). These streams carry the packed INT8 data for the A and B matrices.
-- **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
-- **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
-
-**Interface**
-<!-- # Module gemm_core -->
+**Interface:**
 
 | **Signal Name**             | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
 | --------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
@@ -471,18 +458,19 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **Requant in mux**          |                    |               |                           |                                                                                 |
 | `axis_0[130:0]`             | 131 bits           | Output        | `requant_in_mux`          | Output data stream of GEMM result (INT32 partial sums or accumulated INT8).     |
 
+**Key Functionality:**
+
+- **Compute Kernel:** Implements the core $C_{int32} = A_{int8} \times B_{int8}$ operation as an 8x8 systolic array.
+- **Handshake:** Receives a start_tile pulse from the gemm_start_mux to begin computation on a new tile.
+- **Data Inputs:** Consumes two parallel AXI-Streams: axis_gemm_a (from gemm_a_mux) and axis_gemm_b (from gemm_b_mux). These streams carry the packed INT8 data for the A and B matrices.
+- **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
+- **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
+
 ### 6.6 `residual`
 
 **Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
 
-**Key Functionality:**
-
-- **Data Inputs:** Receives two AXI-Streams, axis_residual_a and axis_residual_b, from their respective input multiplexers. These represent the two tensors to be added.
-- **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
-- **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
-
-**Interface**
-<!-- # Module residual (Skip Connection) -->
+**Interface;**
 
 | **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                  |
 | -------------------------- | ------------------ | ------------- | ------------------------- | -------------------------------------------------------------------------------- |
@@ -493,19 +481,17 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | **Residual in b mux**      |                    |               |                           |                                                                                  |
 | `axis_residual_b[130:0]`   | 131 bits           | Input         | `residual`                | Second input tensor (current sublayer output or activation).                     |
 
+**Key Functionality:**
+
+- **Data Inputs:** Receives two AXI-Streams, axis_residual_a and axis_residual_b, from their respective input multiplexers. These represent the two tensors to be added.
+- **Element-wise Add:** Performs INT8 addition on the incoming streams. As noted in the report, this operation must handle potential mismatches in quantization scales between the two inputs before saturating the final result.
+- **Data Output:** Produces an AXI-Stream (axis_1) containing the INT8 sum, which is routed to the requant_in_mux. This allows the result of the residual add to be passed through the requant_unit for a final normalization or scaling step before being written to DDR.
+
 ### 6.7 `requant_unit`
 
 **Purpose:** Converts the 32-bit integer accumulator values from the gemm_core back into 8-bit integers.
 
-**Key Functionality:**
-
-- **Data Input:** Receives an AXI-Stream (axis_in) from the requant_in_mux. This stream can be either INT32 data from the gemm_core or INT8 data from the residual block.
-- **Quantization:** When processing INT32 data, it applies the per-tensor or per-channel requantization formula (acc * M >> s) + zp using the scale (M) and shift (s) values provided by the scheduler_tiler (via axi_lite_regs).
-- **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
-- **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
-
-**Interface**
-<!-- # Module requant_unit -->
+**Interface:**
 
 | **Signal Name**            | **Signal Width**   | **Direction** | **Destination**           | **Description**                                                                 |
 | -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
@@ -513,6 +499,13 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | `axis_in[130:0]`           | 131 bits           | Input         | `requant_unit`            | Input activation data stream (INT32 or INT8, 128-bit per beat).                 |
 | **Requant out demux**      |                    |               |                           |                                                                                 |
 | `axis_out[130:0]`          | 131 bits           | Output        | `requant_out_demux`       | Requantized output data stream (INT8, 128-bit per beat, packed tensor output).  |
+
+**Key Functionality:**
+
+- **Data Input:** Receives an AXI-Stream (axis_in) from the requant_in_mux. This stream can be either INT32 data from the gemm_core or INT8 data from the residual block.
+- **Quantization:** When processing INT32 data, it applies the per-tensor or per-channel requantization formula (acc * M >> s) + zp using the scale (M) and shift (s) values provided by the scheduler_tiler (via axi_lite_regs).
+- **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
+- **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
 
 ## 7. Attention Block
 
@@ -540,8 +533,6 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 2. **Sync** when Q/K buffers ready -> schedule **QKᵀ** matmul; gate to Softmax.  
 3. **Schedule** **Softmax×V** GEMM; write tiles to output/residual mux.  
 4. **Assert** `attn_block_op_done`.
-
----
 
 ## 8. MLP Block
 
