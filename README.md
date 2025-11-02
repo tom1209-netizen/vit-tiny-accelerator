@@ -2,59 +2,61 @@
 
 ## Table of Contents
 
-- [1. Abstract](#1-abstract)
-- [2. System Overview](#2-system-overview)
-  - [2.1. Goals & Metrics](#21-goals--metrics)
-  - [2.2. Hardware/Software Partition](#22-hardwaresoftware-partition)
-  - [2.3. Top-Level Architecture](#23-top-level-architecture)
-    - [2.3.1. Processing System (PS)](#231-processing-system-ps)
-    - [2.3.2. Programmable Logic (PL)](#232-programmable-logic-pl)
-- [3. TinyViT-5M Model Architecture](#3-tinyvit-5m-model-architecture)
-  - [3.1. Model Parameters (TinyViT-5M)](#31-model-parameters-tinyvit-5m)
-  - [3.2. Architectural Stages](#32-architectural-stages)
-    - [1. Convolutional Stem (PatchEmbed)](#1-convolutional-stem-patchembed)
-    - [2. Stage 1 – Convolutional Layer](#2-stage-1--convolutional-layer)
-    - [3. Stages 2–4 – Transformer Layers](#3-stages-24--transformer-layers)
-      - [a. Windowed Multi-Head Self-Attention (MSA)](#a-windowed-multi-head-self-attention-msa)
-      - [b. Residual Connection 1](#b-residual-connection-1)
-      - [c. Local Convolution](#c-local-convolution)
-      - [d. MLP Block (Feed-Forward Network)](#d-mlp-block-feed-forward-network)
-      - [e. Residual Connection 2](#e-residual-connection-2)
-    - [4. Downsampling (PatchMerging)](#4-downsampling-patchmerging)
-    - [5. Classifier Head](#5-classifier-head)
-  - [3.3. Hardware Relevance Summary](#33-hardware-relevance-summary)
-- [4. Global Design Constraints](#4-global-design-constraints)
-  - [4.1. Clocking & Reset](#41-clocking--reset)
-  - [4.2. Numerics & Data Representation](#42-numerics--data-representation)
-  - [4.3. Interface Standards](#43-interface-standards)
-- [5. Accelerator Architecture (PL)](#5-accelerator-architecture-pl)
-  - [5.1. Module Inventory](#51-module-inventory)
-- [6. Functional Block Descriptions](#6-functional-block-descriptions)
-  - [6.1. axi_lite_regs](#61-axi_lite_regs)
-  - [6.2. scheduler_tiler](#62-scheduler_tiler)
-  - [6.3. axi_dma_shim](#63-axi_dma_shim)
-  - [6.4. axi_dma_ip](#64-axi-dma-ip)
-  - [6.5. gemm_core](#65-gemm_core)
-  - [6.6. residual](#66-residual)
-  - [6.7. requant_unit](#67-requant_unit)
-- [7. Attention Block](#7-attention-block)
-  - [7.1. Interfaces](#71-interfaces)
-  - [7.2. Phase Map](#72-phase-map)
-  - [7.3. Control FSM (summary)](#73-control-fsm-summary)
-- [8. MLP Block](#8-mlp-block)
-  - [8.1. Interfaces](#81-interfaces)
-  - [8.2. Phase Map](#82-phase-map)
-  - [8.3. Control FSM (summary)](#83-control-fsm-summary)
-- [9. Dataflow & Pipeline](#9-dataflow--pipeline)
-- [10. Interfaces & Register Map (AXI-Lite)](#10-interfaces--register-map-axi-lite)
-- [11. Verification Plan](#11-verification-plan)
-  - [11.1. Unit Tests](#111-unit-tests)
-  - [11.2. Integration Tests](#112-integration-tests)
-  - [11.3. System Tests](#113-system-tests)
-- [12. Risks & Mitigations](#12-risks--mitigations)
-- [13. Tools & Environment](#13-tools--environment)
-- [Appendix A. Requantization Details](#appendix-a-requantization-details)
-- [Appendix B. Signal Dictionary (excerpt)](#appendix-b-signal-dictionary-excerpt)
+- [Vision Transformer (Tiny-ViT) Accelerator on Zynq-7000](#vision-transformer-tiny-vit-accelerator-on-zynq-7000)
+  - [Table of Contents](#table-of-contents)
+  - [1. Abstract](#1-abstract)
+  - [2. System Overview](#2-system-overview)
+    - [2.1 Goals \& Metrics](#21-goals--metrics)
+    - [2.2 Hardware/Software Partition](#22-hardwaresoftware-partition)
+    - [2.3 Top-Level Architecture](#23-top-level-architecture)
+      - [2.3.1 Processing System (PS)](#231-processing-system-ps)
+      - [2.3.2 Programmable Logic (PL)](#232-programmable-logic-pl)
+  - [3. TinyViT-5M Model Architecture](#3-tinyvit-5m-model-architecture)
+    - [3.1 Model Parameters (TinyViT-5M)](#31-model-parameters-tinyvit-5m)
+    - [3.2 Architectural Stages](#32-architectural-stages)
+      - [1. Convolutional Stem (PatchEmbed)](#1-convolutional-stem-patchembed)
+      - [2. Stage 1 – Convolutional Layer](#2-stage-1--convolutional-layer)
+      - [3. Stages 2–4 – Transformer Layers](#3-stages-24--transformer-layers)
+        - [a. Windowed Multi-Head Self-Attention (MSA)](#a-windowed-multi-head-self-attention-msa)
+        - [b. Residual Connection 1](#b-residual-connection-1)
+        - [c. Local Convolution](#c-local-convolution)
+        - [d. MLP Block (Feed-Forward Network)](#d-mlp-block-feed-forward-network)
+        - [e. Residual Connection 2](#e-residual-connection-2)
+      - [4. Downsampling (PatchMerging)](#4-downsampling-patchmerging)
+      - [5. Classifier Head](#5-classifier-head)
+    - [3.3 Hardware Relevance Summary](#33-hardware-relevance-summary)
+  - [4. Global Design Constraints](#4-global-design-constraints)
+    - [4.1 Clocking \& Reset](#41-clocking--reset)
+    - [4.2 Numerics \& Data Representation](#42-numerics--data-representation)
+    - [4.3 Interface Standards](#43-interface-standards)
+  - [5. Accelerator Architecture (PL)](#5-accelerator-architecture-pl)
+    - [5.1 Module Inventory](#51-module-inventory)
+  - [6. Functional Block Descriptions](#6-functional-block-descriptions)
+    - [6.1 `axi_lite_regs`](#61-axi_lite_regs)
+    - [6.2 `scheduler_tiler`](#62-scheduler_tiler)
+    - [6.3 axi\_dma\_shim](#63-axi_dma_shim)
+    - [6.4 AXI DMA IP](#64-axi-dma-ip)
+    - [6.5 `gemm_core`](#65-gemm_core)
+    - [6.6 `residual`](#66-residual)
+    - [6.7 `requant_unit`](#67-requant_unit)
+  - [7. Attention Block](#7-attention-block)
+    - [7.1 Interfaces](#71-interfaces)
+    - [7.2 Phase map](#72-phase-map)
+    - [7.3 Control FSM (summary)](#73-control-fsm-summary)
+  - [8. MLP Block](#8-mlp-block)
+    - [8.1 Interfaces](#81-interfaces)
+    - [8.2 Phase map](#82-phase-map)
+    - [8.3 Control FSM (summary)](#83-control-fsm-summary)
+  - [9. Dataflow \& Pipeline](#9-dataflow--pipeline)
+  - [10. Interfaces \& Register Map (AXI-Lite)](#10-interfaces--register-map-axi-lite)
+  - [11. Verification Plan](#11-verification-plan)
+    - [11.1 Unit Tests](#111-unit-tests)
+    - [11.2 Integration Tests](#112-integration-tests)
+    - [11.3 System Tests](#113-system-tests)
+  - [12. Risks \& Mitigations](#12-risks--mitigations)
+  - [13. Tools \& Environment](#13-tools--environment)
+  - [Appendix A. Requantization Details](#appendix-a-requantization-details)
+  - [Appendix B. Signal Dictionary (excerpt)](#appendix-b-signal-dictionary-excerpt)
 
 ## 1. Abstract
 
@@ -302,6 +304,77 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 - PS-to-PL (Configuration): Receives configuration data from the ARM core via the AXI-Lite bus. It holds registers for base addresses (addr_a_base, addr_b_base, addr_c_base), layer parameters (tile_cfg, layer_cfg), and quantization values (requant_scale, requant_shift).
 - PS-to-PL (Control): Provides control signals to the accelerator, most notably the start signal to begin computation, a soft_reset for the FSMs, and an irq_enable flag.
 - PL-to-PS (Status): Receives status flags (status[2:0]) from the scheduler_tiler, allowing the PS to poll for accelerator state (e.g., idle, busy, done). This register bank is the central point for all software control and monitoring
+
+**Register**
+
+| Offset | Abbreviation  | Description                      |
+| -----: | ------------- | -------------------------------- |
+|   0x00 | CONTROL       | Control Register                 |
+|   0x04 | STATUS        | Status Register                  |
+|   0x10 | TILE_CFG      | Tile Configuration Register      |
+|   0x20 | ADDR_A_BASE   | Base Address Register A (Input)  |
+|   0x24 | ADDR_B_BASE   | Base Address Register B (Weight) |
+|   0x28 | ADDR_C_BASE   | Base Address Register C (Output) |
+|   0x40 | REQUANT_SCALE | Requantization Scale Register    |
+|   0x44 | REQUANT_SHIFT | Requantization Shift Register    |
+|   0x70 | LAYER_CFG     | Layer Configuration Register     |
+| Others | Reserved      | Reserved Register                |
+
+`CONTROL (0x00)`
+Default value: 32'h0000_000
+
+| Bit  | Name        | Type | Default value | Description                                                     |
+| ---- | ----------- | ---- | ------------- | --------------------------------------------------------------- |
+| 31:3 | Reserved    | RO   | 29'b0         | Reserved                                                        |
+| 2    | irq_enabled | RW   | 1'b0          | Interrupt enable. 1 = Enabled, 0 = Disabled.                    |
+| 1    | soft_reset  | RW   | 1'b0          | Soft reset. Write 1 to reset the accelerator to its IDLE state. |
+| 0    | start       | RW   | 1'b0          | Task start. Write 1 to begin the operation.                     |
+
+`STATUS (0x04)`
+Default value: 32'h0000_000
+
+| Bit  | Name       | Type | Default value | Description                                                       |
+| ---- | ---------- | ---- | ------------- | ----------------------------------------------------------------- |
+| 31:3 | Reserved   | RO   | 29'b0         | Reserved                                                          |
+| 2    | error_flag | RW1C | 1'b0          | Error flag. 1 = Error occurred. Write 1 to clear this bit to 0.   |
+| 1    | busy       | RO   | 1'b0          | Busy flag. 1 = Accelerator is running. 0 = IDLE state.            |
+| 0    | done_tick  | RW1C | 1'b0          | Completion flag. 1 = Task is done. Write 1 to clear this bit to 0.|
+
+`ADDR_A_BASE (0x20)`
+Default value: 32'h0000_000
+
+| Bit  | Name        | Type | Default value | Description                             |
+| ---- | ----------- | ---- | ------------- | --------------------------------------- |
+| 31:0 | ADDR_A_BASE | RW   | 32'h0         | Base address in DDR for input matrix A. |
+
+`ADDR_B_BASE (0x24)`
+Default value: 32'h0000_000
+
+| Bit  | Name        | Type | Default value | Description                              |
+| ---- | ----------- | ---- | ------------- | ---------------------------------------- |
+| 31:0 | ADDR_B_BASE | RW   | 32'h0         | Base address in DDR for weight matrix B. |
+
+`ADDR_C_BASE (0x28)`
+Default value: 32'h0000_000
+
+| Bit  | Name        | Type | Default value | Description                              |
+| ---- | ----------- | ---- | ------------- | ---------------------------------------- |
+| 31:0 | ADDR_C_BASE | RW   | 32'h0         | Base address in DDR for output matrix C. |
+
+**Programming Sequences:**
+1. Provide task configuration: Before the accelerator can run, the PS must fill out a work order by writing to these register: 
+	- `ADDR_A/B/C_BASE` (0x20, 0x24, 0x28): Specifies the addresses in DDR. The DMA module uses these to know where to fetch the input matrix (A) and weights (B) from, and where to store the final result (C).
+	- `LAYER_CFG` (0x70): Provides parameters for the current layer, such as the number of heads, tokens (N), dimensions (d), etc. The `scheduler_tiler` reads this to determine the correct sequence of operations. 
+	- `TILE_CFG` (0x10): Defines the dimensions (M, N, K) of the data "tiles". Because the matrices are too large, the `scheduler_tiler` uses this to break the job into smaller pieces. 
+	- `REQUANT_SCALE/REQUANT_SHIFT` (0x40, 0x44): Provides the mathematical constants, integer multiplier (M) and post-scaling shift (s), that the `requant_unit` needs to convert the internal INT32 results back to the required INT8 format.
+2. Provide control commands: After the configuration is set, the PS commands the accelerator by writing to the `CONTROL` register (0x00): 
+	- `[0] start` : This is the "Go" button. Writing a 1 to this bit signals the `scheduler_tiler` to begin executing the task.
+	- `[1] soft_reset` : This is a "soft reset". Writing a 1 forces the `scheduler_tiler` and all child modules to abandon their current task and return to the IDLE state, without requiring a full PL reset. 
+	- `[2] irq_enable` : This bit enables (1) or disables (0) the interrupt mechanism. If enabled, the accelerator will send an interrupt signal to the PS upon completion (`done_tick`).
+3. Report accelerator status: While the accelerator is running or after it finishes, the PS can read the `STATUS` register (0x04) to monitor it:
+	- `[0] done_tick` (RW1C): The accelerator sets this bit to 1 when it is successfully completes a task. The PS reads this, processes the result, and must then write a 1 to this bit to clear it back to 0 as an acknowledgement, making it ready for the next run. 
+	- `[1] busy` (RO): This bit is 1 for the entire duration the accelerator is processing a task. The PS can poll this bit to know when it is safe to send a new job. 
+	- `[2] error_flag` (RW1C): The accelerator sets this bit to 1 if an error occurs. Similar to `done_tick`, the PS must write a 1 to clear this error flag.
 
 ### 6.2 `scheduler_tiler`
 
