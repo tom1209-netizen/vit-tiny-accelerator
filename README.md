@@ -58,7 +58,9 @@
 
 ## 1. Abstract
 
-We implement a TinyViT-5M accelerator on Xilinx Zynq-7000 (Arty Z7) in pure Verilog. Target: **>=1 FPS** on 224×224 input with **INT8** weights/activations and **INT32** accumulation; accuracy within **1–2%** of an INT8 software baseline. Data moves via **AXI-HP + AXI DMA**; control via **AXI-Lite**.
+Recent advances in Vision Transformers (ViTs) have established them as a powerful architecture for visual recognition tasks; however, their quadratic computational complexity and high memory demand pose significant challenges for deployment on embedded hardware. TinyViT, a hybrid transformer model that integrates convolutional feature extraction with windowed self-attention, offers a more efficient alternative but still requires careful optimization to achieve practical inference performance on resource-constrained platforms.
+
+This work presents a hardware accelerator design for TinyViT-5M inference, implemented entirely in Verilog RTL on the Xilinx Zynq-7000 SoC. The proposed system restructures TinyViT’s hierarchical architecture into a quantized and tiled dataflow tailored for FPGA execution. Core computational components—including patch embedding, windowed multi-head self-attention, and MLP feed-forward layers—are mapped to a unified integer pipeline employing INT8 arithmetic with INT32 accumulation. A centralized scheduling finite state machine coordinates computation, data movement, and quantization across stages via AXI4 streaming interfaces and on-chip tiling buffers, minimizing off-chip bandwidth usage.
 
 ## 2. System Overview
 
