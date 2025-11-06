@@ -583,46 +583,83 @@ y_int8 = scaled_32[7:0]
 | `m_axis_mm2s[38:0]`        | 39 bits            | Input         | `axi_dma_shim`            | Data stream from memory to accelerator (MM2S).                                  |
 | `s_axis_s2mm[38:0]`        | 39 bits            | Input         | `axi_dma_shim`            | Data stream from accelerator to memory (S2MM).                                  |
 | `axi_lite[146:0]`          | 147 bits           | Input         | `axi_dma_shim`            | AXI-Lite interface for control and status register communication.               |
+| **Scatter Gather**         |                    |               |                           |                                                                                 |
+| `m_axi_sg_*`               | 188 bits           | Input/Output  | `DDR`                     | AXI4 master interface for autonomous descriptor management.                     |
 | **Scheduler Tiler**        |                    |               |                           |                                                                                 |
 | `mm2s_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
 | `s2mm_introut`             | 1 bit              | Output        | `scheduler_tiler`         | Indicates DMA transaction completion.                                           |
 
 **Key Functionality:**
 
-- **Control Flow**: The AXI DMA IP itself is controlled by its own AXI4-Lite slave interface. However,  in this specific accelerator design, this AXI-Lite interface is not exposed directly to the Processing System (PS). Instead, it is managed by the custom axi_dma_shim module. This provides a hardware-friendly interface for the accelerator's main controller (scheduler_tiler). Here is the specific data flow:
-  - The PS (ARM Core) writes high-level parameters (like DDR base addresses) to the axi_lite_regs.
-  - The scheduler_tiler (the master FSM) reads these parameters and decides when a data transfer is needed.
-  - The scheduler_tiler issues simple commands (e.g., dma_start_transfer, dma_ddr_addr, dma_length_bytes) to the axi_dma_shim.
-  - The axi_dma_shim translates these simple commands into the specific, low-level AXI-Lite register writes required by the Xilinx AXI DMA IP to execute the transfer.
+- **Control Flow**: The AXI DMA IP in **Scatter Gather Mode** is controlled through descriptor chains in memory. In this accelerator design, the AXI-Lite interface is managed by the custom `axi_dma_shim` module, which provides a hardware-friendly interface for the accelerator's main controller (`scheduler_tiler`). The specific data flow is:
+  - The PS (ARM Core) writes high-level parameters to the `axi_lite_regs` and sets up descriptor chains in DDR memory.
+  - The `scheduler_tiler` (the master FSM) reads these parameters and decides when data transfers are needed.
+  - The `scheduler_tiler` issues commands to the `axi_dma_shim` to manage descriptor chains.
+  - The `axi_dma_shim` handles descriptor allocation, initialization, and DMA register programming for Scatter Gather operations.
 
-- **Key Register:** This project uses the AXI DMA in **Direct Register Mode** (also known as Simple DMA), which uses registers to define a single transfer rather than complex descriptor chains. The key registers used for this mode are:
+- **Scatter Gather Architecture**: This project uses the AXI DMA in **Scatter Gather Mode**, which enables:
+  - **Autonomous Operation**: Once started, the DMA manages complex transfer sequences without CPU intervention
+  - **Descriptor Chains**: Multiple buffers can be processed with a single DMA command
+  - **Packet Management**: Support for Start-of-Frame (SOF) and End-of-Frame (EOF) flags for packet delineation
+  - **Interrupt Coalescing**: Reduced CPU overhead through intelligent interrupt generation
+  - **Parallel Processing**: Descriptor fetching/updating occurs in parallel with data transfers
 
-  | **Register (Offset)** | **Channel**      | **Purpose**                                          |
-  | --------------------- | ---------------- | ---------------------------------------------------- |
-  | `0x00`                | MM2S_DMACR       | Control (start, reset, interrupt enable).            |
-  | `0x04`                | MM2S_DMASR       | Status (halted, idle, errors, interrupt flags).      |
-  | `0x18`                | MM2S_SA          | Source address in DDR for reads.                     |
-  | `0x28`                | MM2S_LENGTH      | Number of bytes to transfer.                         |
-  | `0x30`                | S2MM_DMACR       | Control register for write channel.                  |
-  | `0x34`                | S2MM_DMASR       | Status for write channel.                            |
-  | `0x48`                | S2MM_DA          | Destination address in DDR.                          |
-  | `0x58`                | S2MM_LENGTH      | Number of bytes to write.                            |
+**Scatter Gather Descriptor Structure:**
 
-- **Programming Sequence:** The axi_dma_shim follows this standard sequence to manage the AXI DMA IP:
+Each descriptor is 64-byte aligned and contains the following fields:
 
-  MM2S (Read from DDR to Accelerator)
-  - Start Channel: Set the Run/Stop bit: MM2S_DMACR.RS = 1.
-  - Check Halted: Wait for the status register's Halted bit to deassert (go to 0).
-  - Enable Interrupts (Optional): Set MM2S_DMACR.IOC_IrqEn = 1 to enable an interrupt upon completion.
-  - Set Address: Write the DDR source address to the MM2S_SA register.
-  - Start Transfer: Write the total number of bytes to transfer to the MM2S_LENGTH register. This final write triggers the DMA to begin fetching data.
+| **Field**             | **Offset** | **Size** | **Description**                               |
+| --------------------- | ---------- | -------- | --------------------------------------------- |
+| `NXTDESC_PTR`         | 0x00       | 8 bytes  | Address of next descriptor in chain           |
+| `BUFFER_ADDRESS`      | 0x08       | 8 bytes  | Physical address of data buffer               |
+| `RESERVED`            | 0x10       | 8 bytes  | Reserved for future use                       |
+| `CONTROL`             | 0x18       | 8 bytes  | Buffer length, SOF/EOF flags, control bits    |
+| `STATUS`              | 0x20       | 8 bytes  | Completion status, error flags, bytes transferred |
+| `APP0-APP4`           | 0x28-0x38  | 20 bytes | User application data (optional)              |
 
-  S2MM (Write from Accelerator to DDR)
-  - Start Channel: Set the Run/Stop bit: S2MM_DMACR.RS = 1.
-  - Check Halted: Wait for the status register's Halted bit to deassert (go to 0).
-  - Enable Interrupts (Optional): Set S2MM_DMACR.IOC_IrqEn = 1.
-  - Set Address: Write the DDR destination address to the S2MM_DA register.
-  - Arm Receiver: Write the maximum size of the buffer allocated in memory to the S2MM_LENGTH register. This must be written last. This action arms the DMA, which will now wait for an AXI-Stream packet to arrive, write the data to the S2MM_DA, and assert an interrupt (if enabled) when the stream's TLAST signal is seen.
+**Key Registers for Scatter Gather Mode:**
+
+| **Register (Offset)** | **Channel**      | **Purpose**                                          |
+| --------------------- | ---------------- | ---------------------------------------------------- |
+| `0x00`                | MM2S_DMACR       | Control (start, interrupt enables, cyclic mode).     |
+| `0x04`                | MM2S_DMASR       | Status (halted, idle, errors, interrupt flags).      |
+| `0x08`                | MM2S_CURDESC     | Current descriptor pointer (lower 32 bits).          |
+| `0x0C`                | MM2S_CURDESC_MSB | Current descriptor pointer (upper 32 bits).          |
+| `0x10`                | MM2S_TAILDESC    | Tail descriptor pointer (lower 32 bits).             |
+| `0x14`                | MM2S_TAILDESC_MSB| Tail descriptor pointer (upper 32 bits).             |
+| `0x30`                | S2MM_DMACR       | Control register for write channel.                  |
+| `0x34`                | S2MM_DMASR       | Status for write channel.                            |
+| `0x38`                | S2MM_CURDESC     | Current descriptor pointer (lower 32 bits).          |
+| `0x3C`                | S2MM_CURDESC_MSB | Current descriptor pointer (upper 32 bits).          |
+| `0x40`                | S2MM_TAILDESC    | Tail descriptor pointer (lower 32 bits).             |
+| `0x44`                | S2MM_TAILDESC_MSB| Tail descriptor pointer (upper 32 bits).             |
+
+**Programming Sequence for Scatter Gather Mode:**
+
+**Prerequisite**: Build descriptor chain in DDR memory (64-byte aligned addresses)
+
+**MM2S (Read from DDR to Accelerator)**
+1. **Set Current Descriptor**: Write address of first descriptor to `MM2S_CURDESC` (and `MSB` if using >32-bit addressing)
+2. **Start Channel**: Set Run/Stop bit: `MM2S_DMACR.RS = 1`
+3. **Enable Interrupts**: Configure `MM2S_DMACR.IOC_IrqEn`, `Err_IrqEn` as needed
+4. **Trigger Processing**: Write tail descriptor address to `MM2S_TAILDESC` - **this triggers SG Engine to start processing**
+
+**S2MM (Write from Accelerator to DDR)**
+1. **Set Current Descriptor**: Write address of first descriptor to `S2MM_CURDESC` (and `MSB` if using >32-bit addressing)
+2. **Start Channel**: Set Run/Stop bit: `S2MM_DMACR.RS = 1`
+3. **Enable Interrupts**: Configure `S2MM_DMACR.IOC_IrqEn`, `Err_IrqEn` as needed
+4. **Trigger Processing**: Write tail descriptor address to `S2MM_TAILDESC` - **this triggers SG Engine to start processing**
+
+**Autonomous DMA Operation:**
+
+Once triggered, the AXI DMA autonomously manages the entire transfer:
+
+1. **Descriptor Fetching**: Uses `M_AXI_SG` interface to read descriptors from DDR memory
+2. **Data Transfer**: Processes each descriptor to transfer data via `M_AXI_MM2S` (read) or `M_AXI_S2MM` (write)
+3. **Descriptor Updating**: Writes back status information (completion flags, error status, actual bytes transferred)
+4. **Chain Traversal**: Automatically follows the descriptor chain using `NXTDESC_PTR` values
+5. **Completion**: Stops when reaching the tail descriptor or on error condition
+
 
 ### 6.5 GEMM Core
 
