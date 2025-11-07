@@ -1,3 +1,11 @@
 .DS_Store
 README.pdf
 .obsidian/
+
+# Quartus sim junk
+*.wlf
+*.dbg
+modelsim.ini
+compile.log
+work/
+*.log
