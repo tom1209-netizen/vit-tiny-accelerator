@@ -74,7 +74,7 @@ This work presents a hardware accelerator design for TinyViT-5M inference, imple
 
 ### 2.3 Top-Level Architecture
 
-![Top level diagram](./block_diagram/top.png)
+![Top level diagram](./figure/block_diagram/top.png)
 *Figure 1: Top level diagram*
 
 #### 2.3.1 Processing System (PS)
@@ -255,7 +255,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 ## 5. Accelerator Architecture (PL)
 
-![ViT PL Block Diagram](./block_diagram/vit_pl.png)
+![ViT PL Block Diagram](./figure/block_diagram/vit_pl.png)
 *Figure 2: ViT PL Block Diagram, you can look at more detailed version at [google drive](https://drive.google.com/file/d/162GrEpLs2getctECauzURsrsy7bRrSK8/view?usp=sharing)*
 
 ### 5.1 Module Inventory
@@ -318,7 +318,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Default:** `32'h0000_0000`
 
-![Control register](./register/ctrl.png)
+![Control register](./figure/register/ctrl.png)
 
 | **Bit**  | **Name**        | **Type** | **Default value** | **Description**                                                     |
 | -------- | --------------- | -------- | ----------------- | ------------------------------------------------------------------- |
@@ -331,7 +331,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Default:** `32'h0000_0000`
 
-![Status register](./register/status.png)
+![Status register](./figure/register/status.png)
 
 | **Bit**  | **Name**       | **Type** | **Default value** | **Description**                                                       |
 | -------- | -------------- | -------- | ----------------- | --------------------------------------------------------------------- |
@@ -346,7 +346,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Purpose:** Defines tiling dimensions, data layout, and compute phase for the current GEMM or sub-block operation.
 
-![Tile configuration register](./register/tile.png)
+![Tile configuration register](./figure/register/tile.png)
 
 | **Bits**  | **Name**           | **Type** | **Default**   | **Description**                                                                                                                                                                                                                                    |
 | --------- | ------------------ | -------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -370,7 +370,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 
 **Default:** `32'h0000_0000`
 
-![ADDR_A_BASE register](./register/a.png)
+![ADDR_A_BASE register](./figure/register/a.png)
 
 | **Bit**  | **Name**        | **Type** | **Default value** | **Description**                             |
 | -------- | --------------- | -------- | ----------------- | ------------------------------------------- |
@@ -379,7 +379,7 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 `ADDR_B_BASE (0x24)`
 Default value: 32'h0000_000
 
-![ADDR_B_BASE register](./register/b.png)
+![ADDR_B_BASE register](./figure/register/b.png)
 
 | **Bit**  | **Name**        | **Type** | **Default value** | **Description**                              |
 | -------- | --------------- | -------- | ----------------- | -------------------------------------------- |
@@ -388,7 +388,7 @@ Default value: 32'h0000_000
 `ADDR_C_BASE (0x28)`
 Default value: 32'h0000_000
 
-![ADDR_C_BASE register](./register/c.png)
+![ADDR_C_BASE register](./figure/register/c.png)
 
 | **Bit**  | **Name**        | **Type** | **Default value** | **Description**                              |
 | -------- | --------------- | -------- | ----------------- | -------------------------------------------- |
@@ -400,7 +400,7 @@ Default value: 32'h0000_000
 
 **Purpose:** Fixed-point multiplier for converting INT32 accumulators to INT8 activations.
 
-![Requantization scale register](./register/scale.png)
+![Requantization scale register](./figure/register/scale.png)
 
 | **Bits** | **Name**      | **Type** | **Default**      | **Description**                                                                                                |
 | -------- | ------------- | -------- | ---------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -419,7 +419,7 @@ aligned_32 = product_64 >>> 31     // align back to integer domain
 
 **Purpose:** Configures right-shift amount, rounding, and saturation policy after `REQUANT_SCALE`.
 
-![Requantization shift register](./register/shift.png)
+![Requantization shift register](./figure/register/shift.png)
 
 | **Bits** | **Name**         | **Type** | **Default** | **Description**                                        |
 | -------- | ---------------- | -------- | ----------- | ------------------------------------------------------ |
@@ -444,7 +444,7 @@ y_int8 = scaled_32[7:0]
 
 **Purpose:** Describes the semantic layer context of the current block of work: where in TinyViT we are (stage), what block we’re running (Attention vs MLP vs PatchMerging), how many tokens/heads/head_dim to iterate, and what to do with the output (keep on-chip or commit to DDR). scheduler_tiler uses this to pick which FSM to run (attention_block vs mlp_block, etc.), how many loops to execute, and whether to arm the DMA S2MM writeback at the end.
 
-![Layer configuration register](./register/layer.png)
+![Layer configuration register](./figure/register/layer.png)
 
 | **Bits**  | **Name**         | **Type** | **Default**   | **Description**                                                                                                                                         |
 | --------- | ---------------- | -------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -731,7 +731,7 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 
 ## 7. Attention Block
 
-![Attention Block](./block_diagram/attention_block.png)
+![Attention Block](./figure/block_diagram/attention_block.png)
 
 **Role:** orchestrates Q/K/V projections on shared `gemm_core`, computes QKᵀ -> Softmax -> Attn×V; owns tile buffers for Q/K/V and uses `norm_unit`, `softmax_unit`.
 
@@ -770,7 +770,7 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 
 ## 8. MLP Block
 
-![MLP Block](./block_diagram/mlp_block.png)
+![MLP Block](./figure/block_diagram/mlp_block.png)
 
 Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses weight buffer and tile buffer; orchestrated by local FSM and `scheduler_tiler`.
 

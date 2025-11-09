@@ -19,7 +19,7 @@ module tb_processing_element;
     wire                         b_valid_out;
 
     reg                          clear_acc;
-    wire signed [ ACC_WIDTH-1:0] acc_out;
+    wire signed  [ACC_WIDTH-1:0] acc_out;
 
     integer                      errors;
     integer                      test_num;

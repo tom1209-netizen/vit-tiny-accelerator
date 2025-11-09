@@ -22,14 +22,14 @@ module tb_input_buffer_controller;
     wire                              s_axis_tready;
 
     // DUT Outputs
-    wire signed [     DATA_WIDTH-1:0] data_out_0;
-    wire signed [     DATA_WIDTH-1:0] data_out_1;
-    wire signed [     DATA_WIDTH-1:0] data_out_2;
-    wire signed [     DATA_WIDTH-1:0] data_out_3;
-    wire signed [     DATA_WIDTH-1:0] data_out_4;
-    wire signed [     DATA_WIDTH-1:0] data_out_5;
-    wire signed [     DATA_WIDTH-1:0] data_out_6;
-    wire signed [     DATA_WIDTH-1:0] data_out_7;
+    wire signed      [DATA_WIDTH-1:0] data_out_0;
+    wire signed      [DATA_WIDTH-1:0] data_out_1;
+    wire signed      [DATA_WIDTH-1:0] data_out_2;
+    wire signed      [DATA_WIDTH-1:0] data_out_3;
+    wire signed      [DATA_WIDTH-1:0] data_out_4;
+    wire signed      [DATA_WIDTH-1:0] data_out_5;
+    wire signed      [DATA_WIDTH-1:0] data_out_6;
+    wire signed      [DATA_WIDTH-1:0] data_out_7;
     wire                              data_valid;
 
     // Sent data capture for checking
