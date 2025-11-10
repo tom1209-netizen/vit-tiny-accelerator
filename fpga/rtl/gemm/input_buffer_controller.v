@@ -1,6 +1,6 @@
 module input_buffer_controller #(
-    parameter DATA_WIDTH = 8,
-    parameter ARRAY_SIZE = 8,
+    parameter DATA_WIDTH      = 8,
+    parameter ARRAY_SIZE      = 8,
     parameter AXIS_DATA_WIDTH = 64
 ) (
     input wire clk,
@@ -26,41 +26,57 @@ module input_buffer_controller #(
     // Control
     input wire enable
 );
+    // One-beat holding register (skid) with safe simultaneous accept+present
+    reg [AXIS_DATA_WIDTH-1:0] hold_data;
+    reg hold_valid;
+
+    // Combinational control from current state
+    wire present = enable && hold_valid;  // will present this cycle
+    wire ready_next = enable && (!hold_valid || present);  // ready if empty or presenting
+    wire accept = s_axis_tvalid && ready_next;  // handshake this cycle
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            data_out_0 <= {DATA_WIDTH{1'b0}};
-            data_out_1 <= {DATA_WIDTH{1'b0}};
-            data_out_2 <= {DATA_WIDTH{1'b0}};
-            data_out_3 <= {DATA_WIDTH{1'b0}};
-            data_out_4 <= {DATA_WIDTH{1'b0}};
-            data_out_5 <= {DATA_WIDTH{1'b0}};
-            data_out_6 <= {DATA_WIDTH{1'b0}};
-            data_out_7 <= {DATA_WIDTH{1'b0}};
-            data_valid <= 1'b0;
             s_axis_tready <= 1'b0;
-        end else begin
-            if (enable) begin
-                s_axis_tready <= 1'b1;
+            hold_valid    <= 1'b0;
+            hold_data     <= {AXIS_DATA_WIDTH{1'b0}};
 
-                if (s_axis_tvalid && s_axis_tready) begin
-                    // Unpack 8 INT8 values from 64-bit stream
-                    data_out_0 <= s_axis_tdata[0*DATA_WIDTH+:DATA_WIDTH];
-                    data_out_1 <= s_axis_tdata[1*DATA_WIDTH+:DATA_WIDTH];
-                    data_out_2 <= s_axis_tdata[2*DATA_WIDTH+:DATA_WIDTH];
-                    data_out_3 <= s_axis_tdata[3*DATA_WIDTH+:DATA_WIDTH];
-                    data_out_4 <= s_axis_tdata[4*DATA_WIDTH+:DATA_WIDTH];
-                    data_out_5 <= s_axis_tdata[5*DATA_WIDTH+:DATA_WIDTH];
-                    data_out_6 <= s_axis_tdata[6*DATA_WIDTH+:DATA_WIDTH];
-                    data_out_7 <= s_axis_tdata[7*DATA_WIDTH+:DATA_WIDTH];
-                    data_valid <= 1'b1;
-                end else begin
-                    data_valid <= 1'b0;
-                end
-            end else begin
-                s_axis_tready <= 1'b0;
-                data_valid <= 1'b0;
+            data_out_0    <= {DATA_WIDTH{1'b0}};
+            data_out_1    <= {DATA_WIDTH{1'b0}};
+            data_out_2    <= {DATA_WIDTH{1'b0}};
+            data_out_3    <= {DATA_WIDTH{1'b0}};
+            data_out_4    <= {DATA_WIDTH{1'b0}};
+            data_out_5    <= {DATA_WIDTH{1'b0}};
+            data_out_6    <= {DATA_WIDTH{1'b0}};
+            data_out_7    <= {DATA_WIDTH{1'b0}};
+            data_valid    <= 1'b0;
+        end else begin
+            // Drive READY for the next cycle
+            s_axis_tready <= ready_next;
+
+            // Default
+            data_valid <= 1'b0;
+
+            // Present currently held beat
+            if (present) begin
+                data_out_0 <= hold_data[0*DATA_WIDTH+:DATA_WIDTH];
+                data_out_1 <= hold_data[1*DATA_WIDTH+:DATA_WIDTH];
+                data_out_2 <= hold_data[2*DATA_WIDTH+:DATA_WIDTH];
+                data_out_3 <= hold_data[3*DATA_WIDTH+:DATA_WIDTH];
+                data_out_4 <= hold_data[4*DATA_WIDTH+:DATA_WIDTH];
+                data_out_5 <= hold_data[5*DATA_WIDTH+:DATA_WIDTH];
+                data_out_6 <= hold_data[6*DATA_WIDTH+:DATA_WIDTH];
+                data_out_7 <= hold_data[7*DATA_WIDTH+:DATA_WIDTH];
+                data_valid <= 1'b1;
             end
+
+            // Capture new beat on handshake (can coincide with present)
+            if (accept) begin
+                hold_data <= s_axis_tdata;
+            end
+
+            // Update valid flag safely (no loss on accept+present)
+            hold_valid <= (hold_valid && !present) || accept;
         end
     end
 

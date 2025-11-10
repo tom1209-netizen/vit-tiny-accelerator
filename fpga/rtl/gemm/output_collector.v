@@ -1,4 +1,3 @@
-// output_collector.v (Verilog-2001, 64-bit AXIS)
 module output_collector #(
     parameter ACC_WIDTH       = 32,
     parameter ARRAY_SIZE      = 8,
