@@ -2,17 +2,17 @@
 
 module tb_gemm_core_top;
     // Parameters
-    parameter DATA_WIDTH      = 8;
-    parameter ACC_WIDTH       = 32;
-    parameter ARRAY_SIZE      = 8;
+    parameter DATA_WIDTH = 8;
+    parameter ACC_WIDTH = 32;
+    parameter ARRAY_SIZE = 8;
     parameter AXIS_DATA_WIDTH = 64;
-    parameter CLK_PERIOD      = 10;  // 100 MHz
+    parameter CLK_PERIOD = 10;  // 100 MHz
 
-    localparam TOTAL_RESULTS  = ARRAY_SIZE * ARRAY_SIZE;
+    localparam TOTAL_RESULTS = ARRAY_SIZE * ARRAY_SIZE;
     localparam VALUES_PER_BEAT = AXIS_DATA_WIDTH / ACC_WIDTH;  // 2
-    localparam TOTAL_BEATS    = TOTAL_RESULTS / VALUES_PER_BEAT;  // 32
+    localparam TOTAL_BEATS = TOTAL_RESULTS / VALUES_PER_BEAT;  // 32
+    localparam MAX_CYCLES = 10000;
 
-    
     // Signals
     // Clock / reset
     reg                              aclk;
@@ -41,15 +41,15 @@ module tb_gemm_core_top;
     reg                              m_axis_out_tready;
 
     // Matrices
-    reg signed [DATA_WIDTH-1:0] A     [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
-    reg signed [DATA_WIDTH-1:0] B     [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
-    reg signed [ACC_WIDTH-1:0]  C_exp [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
-    reg signed [ACC_WIDTH-1:0]  C_act [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    reg signed [     DATA_WIDTH-1:0] A                 [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    reg signed [     DATA_WIDTH-1:0] B                 [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    reg signed [      ACC_WIDTH-1:0] C_exp             [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    reg signed [      ACC_WIDTH-1:0] C_act             [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
 
     integer ii, jj, kk;
     integer errors;
+    integer cycles;
 
-    
     // DUT Instantiation
     gemm_core_top #(
         .DATA_WIDTH     (DATA_WIDTH),
@@ -78,54 +78,22 @@ module tb_gemm_core_top;
         .m_axis_out_tready(m_axis_out_tready)
     );
 
-    
     // Clock Generator
     initial begin
         aclk = 1'b0;
         forever #(CLK_PERIOD / 2) aclk = ~aclk;
     end
 
-    
-    // Functions: Build wavefront-scheduled beats
-    // Build A beat for given cycle: lane i = A[i][k_a] with k_a = cyc - i
-    function [AXIS_DATA_WIDTH-1:0] build_A_beat;
-        input integer cyc;
-        integer i;
-        integer k_a;
-        reg [AXIS_DATA_WIDTH-1:0] beat;
-        begin
-            beat = {AXIS_DATA_WIDTH{1'b0}};
-            for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
-                k_a = cyc - i;
-                if (k_a >= 0 && k_a < ARRAY_SIZE) 
-                    beat[i*DATA_WIDTH+:DATA_WIDTH] = A[i][k_a];
-                else 
-                    beat[i*DATA_WIDTH+:DATA_WIDTH] = {DATA_WIDTH{1'b0}};
-            end
-            build_A_beat = beat;
+    // Watchdog timer
+    initial cycles = 0;
+    always @(posedge aclk) cycles = cycles + 1;
+    always @(posedge aclk) begin
+        if (cycles == MAX_CYCLES) begin
+            $display("TIMEOUT at cycle %0d", cycles);
+            $finish;
         end
-    endfunction
+    end
 
-    // Build B beat for given cycle: lane j = B[k_b][j] with k_b = cyc - j
-    function [AXIS_DATA_WIDTH-1:0] build_B_beat;
-        input integer cyc;
-        integer j;
-        integer k_b;
-        reg [AXIS_DATA_WIDTH-1:0] beat;
-        begin
-            beat = {AXIS_DATA_WIDTH{1'b0}};
-            for (j = 0; j < ARRAY_SIZE; j = j + 1) begin
-                k_b = cyc - j;
-                if (k_b >= 0 && k_b < ARRAY_SIZE) 
-                    beat[j*DATA_WIDTH+:DATA_WIDTH] = B[k_b][j];
-                else 
-                    beat[j*DATA_WIDTH+:DATA_WIDTH] = {DATA_WIDTH{1'b0}};
-            end
-            build_B_beat = beat;
-        end
-    endfunction
-
-    
     // Tasks
     task initialize_sim;
         begin
@@ -139,6 +107,7 @@ module tb_gemm_core_top;
             s_axis_a_tlast    = 1'b0;
             s_axis_b_tlast    = 1'b0;
             m_axis_out_tready = 1'b0;
+            cycles            = 0;
         end
     endtask
 
@@ -175,54 +144,109 @@ module tb_gemm_core_top;
         end
     endtask
 
-    // Stream A and B with wavefront timing
-    task stream_inputs;
-        integer cyc;
-        localparam NUM_CYCLES = ARRAY_SIZE * 3 + 10;
+    // Stream complete matrices using TLAST with wavefront scheduling
+    task stream_matrices_with_tlast;
+        integer cycle;
+        integer handshakes_a, handshakes_b;
+        integer i, j;
+        reg [AXIS_DATA_WIDTH-1:0] a_beat, b_beat;
         begin
             s_axis_a_tvalid <= 1'b0;
             s_axis_b_tvalid <= 1'b0;
             s_axis_a_tlast  <= 1'b0;
             s_axis_b_tlast  <= 1'b0;
+            handshakes_a = 0;
+            handshakes_b = 0;
 
             @(posedge aclk);
 
-            for (cyc = 0; cyc < NUM_CYCLES; cyc = cyc + 1) begin
-                @(posedge aclk);
-                s_axis_a_tdata  <= build_A_beat(cyc);
-                s_axis_b_tdata  <= build_B_beat(cyc);
+            // Wait for initial ready signals
+            while (!(s_axis_a_tready && s_axis_b_tready)) @(posedge aclk);
+            @(posedge aclk);
+
+            // Stream using wavefront scheduling - total cycles needed: 2*ARRAY_SIZE-1
+            for (cycle = 0; cycle < (2 * ARRAY_SIZE - 1); cycle = cycle + 1) begin
+                // Build A beat for this cycle
+                a_beat = {AXIS_DATA_WIDTH{1'b0}};
+                for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
+                    j = cycle - i;
+                    if (j >= 0 && j < ARRAY_SIZE) begin
+                        a_beat[i*DATA_WIDTH+:DATA_WIDTH] = A[i][j];
+                    end
+                end
+
+                // Build B beat for this cycle  
+                b_beat = {AXIS_DATA_WIDTH{1'b0}};
+                for (j = 0; j < ARRAY_SIZE; j = j + 1) begin
+                    i = cycle - j;
+                    if (i >= 0 && i < ARRAY_SIZE) begin
+                        b_beat[j*DATA_WIDTH+:DATA_WIDTH] = B[i][j];
+                    end
+                end
+
+                // Set TLAST on final cycle
+                s_axis_a_tlast  <= (cycle == (2 * ARRAY_SIZE - 2));
+                s_axis_b_tlast  <= (cycle == (2 * ARRAY_SIZE - 2));
+                s_axis_a_tdata  <= a_beat;
+                s_axis_b_tdata  <= b_beat;
                 s_axis_a_tvalid <= 1'b1;
                 s_axis_b_tvalid <= 1'b1;
-                s_axis_a_tlast  <= (cyc == NUM_CYCLES - 1);
-                s_axis_b_tlast  <= (cyc == NUM_CYCLES - 1);
+
+                @(posedge aclk);
+
+                // Count handshakes
+                if (s_axis_a_tvalid && s_axis_a_tready) begin
+                    handshakes_a = handshakes_a + 1;
+                    $display("  A handshake #%0d (cycle %0d) TLAST=%0b", handshakes_a, cycle,
+                             s_axis_a_tlast);
+                end
+                if (s_axis_b_tvalid && s_axis_b_tready) begin
+                    handshakes_b = handshakes_b + 1;
+                    $display("  B handshake #%0d (cycle %0d) TLAST=%0b", handshakes_b, cycle,
+                             s_axis_b_tlast);
+                end
+
+                // If not ready, wait until ready
+                while (!(s_axis_a_tready && s_axis_b_tready)) @(posedge aclk);
             end
 
-            // Deassert after final beat
-            @(posedge aclk);
+            // Deassert after final beat (the extra @(posedge aclk) is removed from here)
             s_axis_a_tvalid <= 1'b0;
             s_axis_b_tvalid <= 1'b0;
             s_axis_a_tlast  <= 1'b0;
             s_axis_b_tlast  <= 1'b0;
+
+            $display("  Total A handshakes: %0d", handshakes_a);
+            $display("  Total B handshakes: %0d", handshakes_b);
         end
     endtask
 
-    // Drain all output beats into C_act
+    // Drain all output beats into C_act with proper handshake
     task drain_results;
         integer beats;
         integer r, c;
+        integer output_handshakes;
         begin
             beats = 0;
             r = 0;
             c = 0;
+            output_handshakes = 0;
             m_axis_out_tready <= 1'b1;
+
+            $display("  Starting output collection...");
 
             while (beats < TOTAL_BEATS) begin
                 @(posedge aclk);
                 if (m_axis_out_tvalid && m_axis_out_tready) begin
+                    output_handshakes = output_handshakes + 1;
+
                     // Unpack 2 results per beat
-                    C_act[r][c] <= m_axis_out_tdata[31:0];
-                    if (c + 1 < ARRAY_SIZE) 
-                        C_act[r][c+1] <= m_axis_out_tdata[63:32];
+                    C_act[r][c] = m_axis_out_tdata[31:0];
+                    if (c + 1 < ARRAY_SIZE) C_act[r][c+1] = m_axis_out_tdata[63:32];
+
+                    $display("  Output handshake #%0d: row=%0d, col=%0d, data=%0d,%0d, TLAST=%0b",
+                             output_handshakes, r, c, m_axis_out_tdata[31:0],
+                             m_axis_out_tdata[63:32], m_axis_out_tlast);
 
                     // Advance indices
                     c = c + VALUES_PER_BEAT;
@@ -232,10 +256,17 @@ module tb_gemm_core_top;
                     end
 
                     beats = beats + 1;
+
+                    // Check TLAST on final beat
+                    if (beats == TOTAL_BEATS && !m_axis_out_tlast) begin
+                        $display("ERROR: TLAST not asserted on final output beat");
+                        errors = errors + 1;
+                    end
                 end
             end
 
             m_axis_out_tready <= 1'b0;
+            $display("  Collected %0d output beats", output_handshakes);
         end
     endtask
 
@@ -244,30 +275,29 @@ module tb_gemm_core_top;
         integer mismatches;
         begin
             mismatches = 0;
-            
+
             print_expected_c;
             print_actual_c;
-            
+
             for (ii = 0; ii < ARRAY_SIZE; ii = ii + 1) begin
                 for (jj = 0; jj < ARRAY_SIZE; jj = jj + 1) begin
                     if (C_act[ii][jj] !== C_exp[ii][jj]) begin
-                        $display("ERROR at C[%0d][%0d]: Expected=%0d, Got=%0d", 
-                                 ii, jj, C_exp[ii][jj], C_act[ii][jj]);
+                        $display("ERROR at C[%0d][%0d]: Expected=%0d, Got=%0d", ii, jj,
+                                 C_exp[ii][jj], C_act[ii][jj]);
                         mismatches = mismatches + 1;
                     end
                 end
             end
 
             if (mismatches == 0) begin
-                $display("PASS");
+                $display("PASS: All results matched");
             end else begin
-                $display("FAIL (%0d errors)", mismatches);
+                $display("FAIL: %0d errors", mismatches);
                 errors = errors + mismatches;
             end
         end
     endtask
 
-    
     // Display Tasks 
     task print_matrix_a;
         integer i, j;
@@ -337,8 +367,7 @@ module tb_gemm_core_top;
         end
     endtask
 
-    
-    // Main Test
+    // Main Test Sequence
     initial begin : main_test
         $display("========================================");
         $display("GEMM Core Top-Level Testbench");
@@ -352,42 +381,33 @@ module tb_gemm_core_top;
         print_matrix_a;
         print_matrix_b;
 
-        $write("\nTest: GEMM %0dx%0d (A * 2I)", ARRAY_SIZE, ARRAY_SIZE);
+        $display("\nTest: GEMM %0dx%0d (A * 2I)", ARRAY_SIZE, ARRAY_SIZE);
+
+        // Test: Continuous streaming with TLAST
+        $display("\n=== Test: Continuous Streaming with TLAST ===");
 
         // Start tile
         @(posedge aclk);
         start_tile <= 1'b1;
         @(posedge aclk);
         start_tile <= 1'b0;
+        // Stream matrices using TLAST with wavefront scheduling
+        stream_matrices_with_tlast;
 
-        // Stream A and B
-        stream_inputs;
-
-        // Wait for computation to propagate
-        repeat (20) @(posedge aclk);
-
-        // Drain outputs
+        // Start output collection
         drain_results;
 
-        // Give tile_done a few cycles
-        repeat (10) @(posedge aclk);
+        // Wait for tile_done
+        while (!tile_done && cycles < 500) @(posedge aclk);
 
         if (!tile_done) begin
-            $display("WARNING: tile_done not asserted");
+            $display("WARNING: tile_done not asserted after 500 cycles");
         end
 
         check_results;
         print_summary;
 
         repeat (10) @(posedge aclk);
-        $finish;
-    end
-
-    
-    // Safety Timeout
-    initial begin
-        #(CLK_PERIOD * 100000);
-        $display("TIMEOUT");
         $finish;
     end
 
