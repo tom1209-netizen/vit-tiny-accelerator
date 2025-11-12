@@ -9,3 +9,5 @@ modelsim.ini
 compile.log
 work/
 *.log
+
+test/
