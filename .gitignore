@@ -1,8 +1,7 @@
+# Mac junk files
 .DS_Store
-README.pdf
-.obsidian/
 
-# Quartus sim junk
+# FPGA synthesis files
 *.wlf
 *.dbg
 modelsim.ini
@@ -10,4 +9,7 @@ compile.log
 work/
 *.log
 
-test/
+# Models folder
+checkpoints/  
+sample_image/
+__pycache__/
