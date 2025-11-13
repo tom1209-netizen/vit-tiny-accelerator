@@ -13,3 +13,4 @@ work/
 tiny_vit_5m_1k.pth
 sample_image/
 __pycache__/
+golden/
