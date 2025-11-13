@@ -47,10 +47,12 @@ The `make ptq …` target mirrors the CLI flags if you prefer reusable command t
 
 Every `Conv2d`, `Conv2d_BN`, `Linear`, `GELU`, `BatchNorm2d`, and `LayerNorm` registers a `PercentileObserver(p=99.9)`.
 Observers collect absolute activations (NaNs/Infs filtered out) and convert the 99.9th percentile into a symmetric INT8 scale
-  $$
-  s_a = \frac{\text{percentile}_{99.9}(|y|)}{127},
-  $$
-  which is more robust than max-based statistics.
+
+$$
+s_a = \frac{\text{percentile}_{99.9}(|y|)}{127},
+$$
+
+which is more robust than max-based statistics.
 For `Conv2d_BN`, BatchNorm parameters are folded into the convolution weight/bias before quantization so FPGA firmware only handles fused conv nodes.
 
 ### Exported Artifacts
@@ -97,35 +99,35 @@ All metrics operate in activation units so they stay comparable across layers. L
 
 **Mean Absolute Percentage Error (MAPE).**
 
-   $$
-   \text{MAPE}(y_{\text{qdq}}, y) = 100 \cdot \operatorname{mean}\!\left(\frac{\lvert y_{\text{qdq}} - y \rvert}{\lvert y \rvert + \epsilon}\right)
-   $$
+$$
+\text{MAPE}(y_{\text{qdq}}, y) = 100 \cdot \operatorname{mean}\!\left(\frac{\lvert y_{\text{qdq}} - y \rvert}{\lvert y \rvert + \epsilon}\right)
+$$
 
-   Highlights average elementwise distortion relative to the true magnitude.
+Highlights average elementwise distortion relative to the true magnitude.
 
 **Symmetric MAPE (sMAPE).**
 
-   $$
-   \text{sMAPE}(y_{\text{qdq}}, y) = 100 \cdot \operatorname{mean}\!\left(\frac{\lvert y_{\text{qdq}} - y \rvert}{\frac{\lvert y_{\text{qdq}} \rvert + \lvert y \rvert}{2} + \epsilon}\right)
-   $$
+$$
+\text{sMAPE}(y_{\text{qdq}}, y) = 100 \cdot \operatorname{mean}\!\left(\frac{\lvert y_{\text{qdq}} - y \rvert}{\frac{\lvert y_{\text{qdq}} \rvert + \lvert y \rvert}{2} + \epsilon}\right)
+$$
 
-   Dampens spikes near zero by scaling against the mean magnitude of both tensors.
+Dampens spikes near zero by scaling against the mean magnitude of both tensors.
 
 **Relative $L_2$ Error.**
 
-   $$
-   \text{RelL2}(y_{\text{qdq}}, y) = 100 \cdot \frac{\lVert y_{\text{qdq}} - y \rVert_2}{\lVert y \rVert_2 + \epsilon}
-   $$
+$$
+\text{RelL2}(y_{\text{qdq}}, y) = 100 \cdot \frac{\lVert y_{\text{qdq}} - y \rVert_2}{\lVert y \rVert_2 + \epsilon}
+$$
 
-   Summarizes the energy lost to quantization in a single percentage.
+Summarizes the energy lost to quantization in a single percentage.
 
 **Max Absolute Error (Steps).**
 
-   $$
-   \text{MaxSteps}(y_{\text{qdq}}, y; s_a) = \max_k \frac{\lvert y_{\text{qdq},k} - y_k \rvert}{s_a}
-   $$
+$$
+\text{MaxSteps}(y_{\text{qdq}}, y; s_a) = \max_k \frac{\lvert y_{\text{qdq},k} - y_k \rvert}{s_a}
+$$
 
-   where $s_a$ is the activation scale for that layer (from `scales.json`). Values $ \gg 1$ imply multi-step drift relative to the INT8 quantizer’s least significant bit.
+where $s_a$ is the activation scale for that layer (from `scales.json`). Values $ \gg 1$ imply multi-step drift relative to the INT8 quantizer’s least significant bit.
 
 Standard absolute metrics (mean, RMSE, max) remain in the report for completeness.
 
@@ -159,32 +161,39 @@ Report summaries (overall MAPE, sMAPE, relative (L_2), worst MaxSteps) provide a
 `weight_offset`, `weight_nbytes` – Byte offset and size of the INT8 weights inside `weights.bin`, enabling precise DMA slicing.
 
 `weight_scale` – Per-channel or per-tensor scale array, following
-  $$
-  q_w \approx \operatorname{round}!\left(\frac{w}{s_{w,c}}\right).
-  $$
+
+$$
+q_w \approx \operatorname{round}!\left(\frac{w}{s_{w,c}}\right).
+$$
 
 `activation_scale` – Per-tensor activation scale (s_a) derived from calibration observers, used together with `weight_scale` to recover real values from INT32 accumulators.
 
 `bias`, `bias_dtype` – INT32 bias values computed as
-  $$
-  b_{\text{int32}} \approx \frac{b}{s_a \cdot s_{w,c}},
-  $$
-  so they can be added directly in the integer domain before requantization.
+  
+$$
+b_{\text{int32}} \approx \frac{b}{s_a \cdot s_{w,c}},
+$$
+
+so they can be added directly in the integer domain before requantization.
 
 `stride`, `padding`, `dilation`, `groups` – Present for convolution-style entries; help PS program layer configuration registers accurately.
 
 ### Using Scales on Hardware
 
 During INT8 compute, the accelerator builds INT32 sums that approximate
-  $$
-  y_{\text{real},c} \approx (s_a \cdot s_{w,c}) \cdot y_{\text{int32},c}
-  $$
-  per output channel (c).
+  
+$$
+y_{\text{real},c} \approx (s_a \cdot s_{w,c}) \cdot y_{\text{int32},c}
+$$
+  
+per output channel (c).
 Requantization multiplies by
-  $$
-  M_c \approx \frac{s_{\text{out}}}{s_a \cdot s_{w,c}}
-  $$
-  and applies a power-of-two shift to land back in INT8; those multipliers/shifts are programmed directly from `scales.json`.
+  
+$$
+M_c \approx \frac{s_{\text{out}}}{s_a \cdot s_{w,c}}
+$$
+  
+and applies a power-of-two shift to land back in INT8; those multipliers/shifts are programmed directly from `scales.json`.
 
 Because BatchNorm is folded offline, every conv entry already has fused weights and biases, shrinking the PL pipeline to `conv → requant` without extra normalization passes.
 
