@@ -100,7 +100,9 @@ All metrics operate in activation units so they stay comparable across layers. L
 **Mean Absolute Percentage Error (MAPE).**
 
 $$
-\text{MAPE}(y_{\text{qdq}}, y) = 100 \cdot \operatorname{mean}\!\left(\frac{\lvert y_{\text{qdq}} - y \rvert}{\lvert y \rvert + \epsilon}\right)
+\text{MAPE}(y_{\text{qdq}}, y)
+= \frac{100}{n} \sum_{k=1}^n
+\frac{\lvert y_{\text{qdq},k} - y_k \rvert}{\lvert y_k \rvert + \epsilon}
 $$
 
 Highlights average elementwise distortion relative to the true magnitude.
@@ -108,7 +110,10 @@ Highlights average elementwise distortion relative to the true magnitude.
 **Symmetric MAPE (sMAPE).**
 
 $$
-\text{sMAPE}(y_{\text{qdq}}, y) = 100 \cdot \operatorname{mean}\!\left(\frac{\lvert y_{\text{qdq}} - y \rvert}{\frac{\lvert y_{\text{qdq}} \rvert + \lvert y \rvert}{2} + \epsilon}\right)
+\text{sMAPE}(y_{\text{qdq}}, y)
+= \frac{100}{n} \sum_{k=1}^n
+\frac{\lvert y_{\text{qdq},k} - y_k \rvert}
+     {\dfrac{\lvert y_{\text{qdq},k} \rvert + \lvert y_k \rvert}{2} + \epsilon}
 $$
 
 Dampens spikes near zero by scaling against the mean magnitude of both tensors.
@@ -163,7 +168,7 @@ Report summaries (overall MAPE, sMAPE, relative (L_2), worst MaxSteps) provide a
 `weight_scale` – Per-channel or per-tensor scale array, following
 
 $$
-q_w \approx \operatorname{round}!\left(\frac{w}{s_{w,c}}\right).
+q_w \approx \mathrm{round}\!\left(\frac{w}{s_{w,c}}\right).
 $$
 
 `activation_scale` – Per-tensor activation scale (s_a) derived from calibration observers, used together with `weight_scale` to recover real values from INT32 accumulators.
