@@ -10,6 +10,6 @@ work/
 *.log
 
 # Models folder
-checkpoints/  
+tiny_vit_5m_1k.pth
 sample_image/
 __pycache__/
