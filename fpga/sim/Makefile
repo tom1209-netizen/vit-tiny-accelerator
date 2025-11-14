@@ -1,10 +1,34 @@
 #Define variables
-TESTNAME 	?= tb_gemm_core_top
-TB_NAME 	?= tb_gemm_core_top
+TESTNAME 	?= tb_norm_unit
+TB_NAME 	?= tb_norm_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
 
 #==============================
+
+ARGS := $(MAKECMDGOALS)
+
+# Insert new commands here if you want to add more make targets, use "\" to break lines
+COMMANDS := all all_wave all_cov \
+			build build_cov \
+			run run_cov \
+			wave \
+			gen_cov gen_html \
+			clean \
+			help
+
+TEST_ARG := $(filter-out $(COMMANDS),$(ARGS))
+
+ifneq ($(TEST_ARG),)
+    TESTNAME := $(firstword $(TEST_ARG))
+    TB_NAME  := $(firstword $(TEST_ARG))
+
+    $(TEST_ARG):
+		@:
+endif
+
+#==============================
+
 all: build run
 
 all_wave: build run wave
@@ -14,7 +38,7 @@ all_cov: build_cov run_cov
 build:
 	vlib work
 	vmap work work
-	vlog  -f compile.f | tee compile.log
+	vlog -f compile.f | tee compile.log
 
 build_cov:
 	vlib work
