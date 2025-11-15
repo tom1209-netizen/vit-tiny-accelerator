@@ -49,6 +49,7 @@ module tb_gemm_core_top;
     integer ii, jj, kk;
     integer errors;
     integer cycles;
+    integer start_cycle, end_cycle, latency_cycles;
 
     // DUT Instantiation
     gemm_core_top #(
@@ -119,28 +120,63 @@ module tb_gemm_core_top;
         end
     endtask
 
-    // Initialize matrices and compute expected C
-    task init_matrices;
+    // Recompute expected matrix given current A and B contents
+    task compute_expected;
         begin
-            // Initialize A, B, C_exp, C_act
             for (ii = 0; ii < ARRAY_SIZE; ii = ii + 1) begin
                 for (jj = 0; jj < ARRAY_SIZE; jj = jj + 1) begin
-                    A[ii][jj]     = ii + jj;
-                    B[ii][jj]     = (ii == jj) ? 2 : 0;  // 2 * I
                     C_exp[ii][jj] = 0;
                     C_act[ii][jj] = 0;
-                end
-            end
-
-            // Expected C = A * B
-            for (ii = 0; ii < ARRAY_SIZE; ii = ii + 1) begin
-                for (jj = 0; jj < ARRAY_SIZE; jj = jj + 1) begin
-                    C_exp[ii][jj] = 0;
                     for (kk = 0; kk < ARRAY_SIZE; kk = kk + 1) begin
                         C_exp[ii][jj] = C_exp[ii][jj] + A[ii][kk] * B[kk][jj];
                     end
                 end
             end
+        end
+    endtask
+
+    // Program A/B contents for a given test case
+    task prepare_case;
+        input integer case_id;
+        begin
+            for (ii = 0; ii < ARRAY_SIZE; ii = ii + 1) begin
+                for (jj = 0; jj < ARRAY_SIZE; jj = jj + 1) begin
+                    case (case_id)
+                        0: begin
+                            // Baseline: additive ramp multiplied by 2*I
+                            A[ii][jj] = ii + jj;
+                            B[ii][jj] = (ii == jj) ? 2 : 0;
+                        end
+                        1: begin
+                            // Identity A with distinct diagonal scaling, B is a ramp matrix
+                            A[ii][jj] = (ii == jj) ? (jj + 1) : 0;
+                            B[ii][jj] = jj + (ii * 2);
+                        end
+                        2: begin
+                            // Alternating sign rows multiplied by a checkerboard B
+                            A[ii][jj] = ((ii % 2) == 0) ? (jj + 1) : -(jj + 1);
+                            B[ii][jj] = ((jj % 2) == 0) ? (ii - jj) : (jj - ii);
+                        end
+                        3: begin
+                            // Pseudo-random but deterministic content stressing negatives
+                            A[ii][jj] = ((ii * 5 + jj * 3) % 13) - 6;
+                            B[ii][jj] = ((ii * 7 - jj * 4) % 11) - 5;
+                        end
+                        4: begin
+                            // Lower-triangular A times upper-triangular B
+                            A[ii][jj] = (ii >= jj) ? (ii - jj + 1) : 0;
+                            B[ii][jj] = (ii <= jj) ? (jj - ii + 2) : 0;
+                        end
+                        default: begin
+                            // Fallback: lower-triangular emphasis
+                            A[ii][jj] = (ii <= jj) ? (ii + jj) : -(ii + jj);
+                            B[ii][jj] = (ii >= jj) ? (ii - jj + 1) : 0;
+                        end
+                    endcase
+                end
+            end
+
+            compute_expected;
         end
     endtask
 
@@ -360,11 +396,50 @@ module tb_gemm_core_top;
             $display("\n========================================");
             if (errors == 0) begin
                 $display("*** ALL TESTS PASSED! ***");
-                $display("Total cycles: %0d", cycles);
             end else begin
                 $display("*** FAILED: %0d errors ***", errors);
             end
             $display("========================================");
+        end
+    endtask
+
+    // Execute a full tile for the selected scenario
+    task run_test_case;
+        input integer case_id;
+        input [8*64-1:0] test_name;
+        integer wait_cycles;
+        begin
+            $display("\n=== Test %0d: %0s ===", case_id, test_name);
+            prepare_case(case_id);
+            print_matrix_a;
+            print_matrix_b;
+
+            // Launch tile
+            start_cycle = cycles;
+            @(posedge aclk);
+            start_tile <= 1'b1;
+            @(posedge aclk);
+            start_tile <= 1'b0;
+
+            stream_matrices_with_tlast;
+            drain_results;
+
+            // Allow collector to finish
+            wait_cycles = 0;
+            while (!tile_done && wait_cycles < 1000) begin
+                wait_cycles = wait_cycles + 1;
+                @(posedge aclk);
+            end
+
+            if (!tile_done) begin
+                $display("WARNING: tile_done not asserted after waiting %0d cycles", wait_cycles);
+            end
+            end_cycle = cycles;
+            latency_cycles = end_cycle - start_cycle;
+            $display("  Tile latency: %0d cycles (start=%0d -> end=%0d)", latency_cycles,
+                     start_cycle, end_cycle);
+
+            check_results;
         end
     endtask
 
@@ -377,35 +452,12 @@ module tb_gemm_core_top;
         initialize_sim;
         reset_dut;
 
-        // Initialize matrices and expected C
-        init_matrices;
-        print_matrix_a;
-        print_matrix_b;
-
-        $display("\nTest: GEMM %0dx%0d (A * 2I)", ARRAY_SIZE, ARRAY_SIZE);
-
-        // Test: Continuous streaming with TLAST
-        $display("\n=== Test: Continuous Streaming with TLAST ===");
-
-        // Start tile
-        @(posedge aclk);
-        start_tile <= 1'b1;
-        @(posedge aclk);
-        start_tile <= 1'b0;
-        // Stream matrices using TLAST with wavefront scheduling
-        stream_matrices_with_tlast;
-
-        // Start output collection
-        drain_results;
-
-        // Wait for tile_done
-        while (!tile_done && cycles < 500) @(posedge aclk);
-
-        if (!tile_done) begin
-            $display("WARNING: tile_done not asserted after 500 cycles");
-        end
-
-        check_results;
+        run_test_case(0, "Baseline: (ii+jj) * 2I");
+        run_test_case(1, "Identity A times ramp B");
+        run_test_case(2, "Alternating signs * checkerboard");
+        run_test_case(3, "Pseudo-random signed matrices");
+        run_test_case(4, "Lower-triangular vs upper-triangular");
+        run_test_case(5, "Fallback stress pattern");
         print_summary;
 
         $finish;

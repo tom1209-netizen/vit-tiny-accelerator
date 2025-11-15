@@ -31,8 +31,6 @@ module gemm_core_top #(
     output wire                       m_axis_out_tlast,
     input  wire                       m_axis_out_tready
 );
-
-
     // A and B lanes from input buffer controllers
     wire signed [DATA_WIDTH-1:0] a0, a1, a2, a3, a4, a5, a6, a7;
     wire a_valid_beat;
@@ -89,45 +87,9 @@ module gemm_core_top #(
     );
 
 
-    // Control: detect last beats and wait for systolic flush
-    wire a_last_handshake = s_axis_a_tvalid && s_axis_a_tready && s_axis_a_tlast;
-    wire b_last_handshake = s_axis_b_tvalid && s_axis_b_tready && s_axis_b_tlast;
-
-    reg a_last_seen, b_last_seen;
-    reg  start_output_pending;
-    reg  output_started;
-
+    // Output collector starts waiting immediately; it only emits beats when cells finish
+    wire start_output_collector = start_tile;
     wire array_active;
-    wire both_inputs_complete = a_last_seen && b_last_seen;
-    wire ready_to_start_output = start_output_pending && !array_active;
-
-    always @(posedge aclk or negedge aresetn) begin
-        if (!aresetn) begin
-            a_last_seen    <= 1'b0;
-            b_last_seen    <= 1'b0;
-            start_output_pending <= 1'b0;
-            output_started <= 1'b0;
-        end else begin
-            if (start_tile) begin
-                a_last_seen    <= 1'b0;
-                b_last_seen    <= 1'b0;
-                start_output_pending <= 1'b0;
-                output_started <= 1'b0;
-            end else begin
-                if (a_last_handshake) a_last_seen <= 1'b1;
-                if (b_last_handshake) b_last_seen <= 1'b1;
-
-                if (ready_to_start_output) begin
-                    start_output_pending <= 1'b0;
-                    output_started <= 1'b1;
-                end else if (both_inputs_complete && !output_started) begin
-                    start_output_pending <= 1'b1;
-                end
-            end
-        end
-    end
-
-    wire start_output_collector = ready_to_start_output;
 
     // Clear accumulators at tile start
     wire clear_acc = start_tile;
@@ -151,6 +113,24 @@ module gemm_core_top #(
         acc_out_6_4, acc_out_6_5, acc_out_6_6, acc_out_6_7,
         acc_out_7_0, acc_out_7_1, acc_out_7_2, acc_out_7_3,
         acc_out_7_4, acc_out_7_5, acc_out_7_6, acc_out_7_7;
+
+    wire
+        acc_done_0_0, acc_done_0_1, acc_done_0_2, acc_done_0_3,
+        acc_done_0_4, acc_done_0_5, acc_done_0_6, acc_done_0_7,
+        acc_done_1_0, acc_done_1_1, acc_done_1_2, acc_done_1_3,
+        acc_done_1_4, acc_done_1_5, acc_done_1_6, acc_done_1_7,
+        acc_done_2_0, acc_done_2_1, acc_done_2_2, acc_done_2_3,
+        acc_done_2_4, acc_done_2_5, acc_done_2_6, acc_done_2_7,
+        acc_done_3_0, acc_done_3_1, acc_done_3_2, acc_done_3_3,
+        acc_done_3_4, acc_done_3_5, acc_done_3_6, acc_done_3_7,
+        acc_done_4_0, acc_done_4_1, acc_done_4_2, acc_done_4_3,
+        acc_done_4_4, acc_done_4_5, acc_done_4_6, acc_done_4_7,
+        acc_done_5_0, acc_done_5_1, acc_done_5_2, acc_done_5_3,
+        acc_done_5_4, acc_done_5_5, acc_done_5_6, acc_done_5_7,
+        acc_done_6_0, acc_done_6_1, acc_done_6_2, acc_done_6_3,
+        acc_done_6_4, acc_done_6_5, acc_done_6_6, acc_done_6_7,
+        acc_done_7_0, acc_done_7_1, acc_done_7_2, acc_done_7_3,
+        acc_done_7_4, acc_done_7_5, acc_done_7_6, acc_done_7_7;
 
     systolic_array #(
         .DATA_WIDTH(DATA_WIDTH),
@@ -270,6 +250,78 @@ module gemm_core_top #(
         .acc_out_7_6(acc_out_7_6),
         .acc_out_7_7(acc_out_7_7),
 
+        .acc_done_0_0(acc_done_0_0),
+        .acc_done_0_1(acc_done_0_1),
+        .acc_done_0_2(acc_done_0_2),
+        .acc_done_0_3(acc_done_0_3),
+        .acc_done_0_4(acc_done_0_4),
+        .acc_done_0_5(acc_done_0_5),
+        .acc_done_0_6(acc_done_0_6),
+        .acc_done_0_7(acc_done_0_7),
+
+        .acc_done_1_0(acc_done_1_0),
+        .acc_done_1_1(acc_done_1_1),
+        .acc_done_1_2(acc_done_1_2),
+        .acc_done_1_3(acc_done_1_3),
+        .acc_done_1_4(acc_done_1_4),
+        .acc_done_1_5(acc_done_1_5),
+        .acc_done_1_6(acc_done_1_6),
+        .acc_done_1_7(acc_done_1_7),
+
+        .acc_done_2_0(acc_done_2_0),
+        .acc_done_2_1(acc_done_2_1),
+        .acc_done_2_2(acc_done_2_2),
+        .acc_done_2_3(acc_done_2_3),
+        .acc_done_2_4(acc_done_2_4),
+        .acc_done_2_5(acc_done_2_5),
+        .acc_done_2_6(acc_done_2_6),
+        .acc_done_2_7(acc_done_2_7),
+
+        .acc_done_3_0(acc_done_3_0),
+        .acc_done_3_1(acc_done_3_1),
+        .acc_done_3_2(acc_done_3_2),
+        .acc_done_3_3(acc_done_3_3),
+        .acc_done_3_4(acc_done_3_4),
+        .acc_done_3_5(acc_done_3_5),
+        .acc_done_3_6(acc_done_3_6),
+        .acc_done_3_7(acc_done_3_7),
+
+        .acc_done_4_0(acc_done_4_0),
+        .acc_done_4_1(acc_done_4_1),
+        .acc_done_4_2(acc_done_4_2),
+        .acc_done_4_3(acc_done_4_3),
+        .acc_done_4_4(acc_done_4_4),
+        .acc_done_4_5(acc_done_4_5),
+        .acc_done_4_6(acc_done_4_6),
+        .acc_done_4_7(acc_done_4_7),
+
+        .acc_done_5_0(acc_done_5_0),
+        .acc_done_5_1(acc_done_5_1),
+        .acc_done_5_2(acc_done_5_2),
+        .acc_done_5_3(acc_done_5_3),
+        .acc_done_5_4(acc_done_5_4),
+        .acc_done_5_5(acc_done_5_5),
+        .acc_done_5_6(acc_done_5_6),
+        .acc_done_5_7(acc_done_5_7),
+
+        .acc_done_6_0(acc_done_6_0),
+        .acc_done_6_1(acc_done_6_1),
+        .acc_done_6_2(acc_done_6_2),
+        .acc_done_6_3(acc_done_6_3),
+        .acc_done_6_4(acc_done_6_4),
+        .acc_done_6_5(acc_done_6_5),
+        .acc_done_6_6(acc_done_6_6),
+        .acc_done_6_7(acc_done_6_7),
+
+        .acc_done_7_0(acc_done_7_0),
+        .acc_done_7_1(acc_done_7_1),
+        .acc_done_7_2(acc_done_7_2),
+        .acc_done_7_3(acc_done_7_3),
+        .acc_done_7_4(acc_done_7_4),
+        .acc_done_7_5(acc_done_7_5),
+        .acc_done_7_6(acc_done_7_6),
+        .acc_done_7_7(acc_done_7_7),
+
         .array_active(array_active)
     );
 
@@ -355,6 +407,78 @@ module gemm_core_top #(
         .acc_in_7_5(acc_out_7_5),
         .acc_in_7_6(acc_out_7_6),
         .acc_in_7_7(acc_out_7_7),
+
+        .acc_done_0_0(acc_done_0_0),
+        .acc_done_0_1(acc_done_0_1),
+        .acc_done_0_2(acc_done_0_2),
+        .acc_done_0_3(acc_done_0_3),
+        .acc_done_0_4(acc_done_0_4),
+        .acc_done_0_5(acc_done_0_5),
+        .acc_done_0_6(acc_done_0_6),
+        .acc_done_0_7(acc_done_0_7),
+
+        .acc_done_1_0(acc_done_1_0),
+        .acc_done_1_1(acc_done_1_1),
+        .acc_done_1_2(acc_done_1_2),
+        .acc_done_1_3(acc_done_1_3),
+        .acc_done_1_4(acc_done_1_4),
+        .acc_done_1_5(acc_done_1_5),
+        .acc_done_1_6(acc_done_1_6),
+        .acc_done_1_7(acc_done_1_7),
+
+        .acc_done_2_0(acc_done_2_0),
+        .acc_done_2_1(acc_done_2_1),
+        .acc_done_2_2(acc_done_2_2),
+        .acc_done_2_3(acc_done_2_3),
+        .acc_done_2_4(acc_done_2_4),
+        .acc_done_2_5(acc_done_2_5),
+        .acc_done_2_6(acc_done_2_6),
+        .acc_done_2_7(acc_done_2_7),
+
+        .acc_done_3_0(acc_done_3_0),
+        .acc_done_3_1(acc_done_3_1),
+        .acc_done_3_2(acc_done_3_2),
+        .acc_done_3_3(acc_done_3_3),
+        .acc_done_3_4(acc_done_3_4),
+        .acc_done_3_5(acc_done_3_5),
+        .acc_done_3_6(acc_done_3_6),
+        .acc_done_3_7(acc_done_3_7),
+
+        .acc_done_4_0(acc_done_4_0),
+        .acc_done_4_1(acc_done_4_1),
+        .acc_done_4_2(acc_done_4_2),
+        .acc_done_4_3(acc_done_4_3),
+        .acc_done_4_4(acc_done_4_4),
+        .acc_done_4_5(acc_done_4_5),
+        .acc_done_4_6(acc_done_4_6),
+        .acc_done_4_7(acc_done_4_7),
+
+        .acc_done_5_0(acc_done_5_0),
+        .acc_done_5_1(acc_done_5_1),
+        .acc_done_5_2(acc_done_5_2),
+        .acc_done_5_3(acc_done_5_3),
+        .acc_done_5_4(acc_done_5_4),
+        .acc_done_5_5(acc_done_5_5),
+        .acc_done_5_6(acc_done_5_6),
+        .acc_done_5_7(acc_done_5_7),
+
+        .acc_done_6_0(acc_done_6_0),
+        .acc_done_6_1(acc_done_6_1),
+        .acc_done_6_2(acc_done_6_2),
+        .acc_done_6_3(acc_done_6_3),
+        .acc_done_6_4(acc_done_6_4),
+        .acc_done_6_5(acc_done_6_5),
+        .acc_done_6_6(acc_done_6_6),
+        .acc_done_6_7(acc_done_6_7),
+
+        .acc_done_7_0(acc_done_7_0),
+        .acc_done_7_1(acc_done_7_1),
+        .acc_done_7_2(acc_done_7_2),
+        .acc_done_7_3(acc_done_7_3),
+        .acc_done_7_4(acc_done_7_4),
+        .acc_done_7_5(acc_done_7_5),
+        .acc_done_7_6(acc_done_7_6),
+        .acc_done_7_7(acc_done_7_7),
 
         .start_output(start_output_collector),
 

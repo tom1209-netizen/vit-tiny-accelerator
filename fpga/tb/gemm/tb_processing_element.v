@@ -3,6 +3,7 @@
 module tb_processing_element;
     parameter DATA_WIDTH = 8;
     parameter ACC_WIDTH = 32;
+    parameter ARRAY_SIZE = 8;
     parameter CLK_PERIOD = 10;
 
     reg                          clk;
@@ -19,7 +20,8 @@ module tb_processing_element;
     wire                         b_valid_out;
 
     reg                          clear_acc;
-    wire signed  [ACC_WIDTH-1:0] acc_out;
+    wire signed [ ACC_WIDTH-1:0] acc_out;
+    wire                         acc_done;
 
     integer                      errors;
     integer                      test_num;
@@ -33,7 +35,8 @@ module tb_processing_element;
     // Instantiation
     processing_element #(
         .DATA_WIDTH(DATA_WIDTH),
-        .ACC_WIDTH (ACC_WIDTH)
+        .ACC_WIDTH (ACC_WIDTH),
+        .ARRAY_SIZE(ARRAY_SIZE)
     ) dut (
         .clk  (clk),
         .rst_n(rst_n),
@@ -49,7 +52,8 @@ module tb_processing_element;
         .b_valid_out(b_valid_out),
 
         .clear_acc(clear_acc),
-        .acc_out  (acc_out)
+        .acc_out  (acc_out),
+        .acc_done (acc_done)
     );
 
     initial begin

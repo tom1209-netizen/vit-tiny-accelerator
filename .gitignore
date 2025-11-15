@@ -19,3 +19,6 @@ golden/
 
 # Vscode
 .vscode/
+
+# Vivado report
+build

@@ -119,16 +119,89 @@ module systolic_array #(
     output wire signed [ACC_WIDTH-1:0] acc_out_7_6,
     output wire signed [ACC_WIDTH-1:0] acc_out_7_7,
 
+    // Per-PE completion flags
+    output wire acc_done_0_0,
+    output wire acc_done_0_1,
+    output wire acc_done_0_2,
+    output wire acc_done_0_3,
+    output wire acc_done_0_4,
+    output wire acc_done_0_5,
+    output wire acc_done_0_6,
+    output wire acc_done_0_7,
+
+    output wire acc_done_1_0,
+    output wire acc_done_1_1,
+    output wire acc_done_1_2,
+    output wire acc_done_1_3,
+    output wire acc_done_1_4,
+    output wire acc_done_1_5,
+    output wire acc_done_1_6,
+    output wire acc_done_1_7,
+
+    output wire acc_done_2_0,
+    output wire acc_done_2_1,
+    output wire acc_done_2_2,
+    output wire acc_done_2_3,
+    output wire acc_done_2_4,
+    output wire acc_done_2_5,
+    output wire acc_done_2_6,
+    output wire acc_done_2_7,
+
+    output wire acc_done_3_0,
+    output wire acc_done_3_1,
+    output wire acc_done_3_2,
+    output wire acc_done_3_3,
+    output wire acc_done_3_4,
+    output wire acc_done_3_5,
+    output wire acc_done_3_6,
+    output wire acc_done_3_7,
+
+    output wire acc_done_4_0,
+    output wire acc_done_4_1,
+    output wire acc_done_4_2,
+    output wire acc_done_4_3,
+    output wire acc_done_4_4,
+    output wire acc_done_4_5,
+    output wire acc_done_4_6,
+    output wire acc_done_4_7,
+
+    output wire acc_done_5_0,
+    output wire acc_done_5_1,
+    output wire acc_done_5_2,
+    output wire acc_done_5_3,
+    output wire acc_done_5_4,
+    output wire acc_done_5_5,
+    output wire acc_done_5_6,
+    output wire acc_done_5_7,
+
+    output wire acc_done_6_0,
+    output wire acc_done_6_1,
+    output wire acc_done_6_2,
+    output wire acc_done_6_3,
+    output wire acc_done_6_4,
+    output wire acc_done_6_5,
+    output wire acc_done_6_6,
+    output wire acc_done_6_7,
+
+    output wire acc_done_7_0,
+    output wire acc_done_7_1,
+    output wire acc_done_7_2,
+    output wire acc_done_7_3,
+    output wire acc_done_7_4,
+    output wire acc_done_7_5,
+    output wire acc_done_7_6,
+    output wire acc_done_7_7,
+
     output wire array_active
 );
-
     // Internal wires - using arrays internally is OK
-    wire signed [DATA_WIDTH-1:0] a_wire      [0:ARRAY_SIZE-1][  0:ARRAY_SIZE];
-    wire                         a_valid_wire[0:ARRAY_SIZE-1][  0:ARRAY_SIZE];
-    wire signed [DATA_WIDTH-1:0] b_wire      [  0:ARRAY_SIZE][0:ARRAY_SIZE-1];
-    wire                         b_valid_wire[  0:ARRAY_SIZE][0:ARRAY_SIZE-1];
-    wire signed [ ACC_WIDTH-1:0] acc_wire    [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
-    wire                         mac_active  [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    wire signed [DATA_WIDTH-1:0] a_wire       [0:ARRAY_SIZE-1][  0:ARRAY_SIZE];
+    wire                         a_valid_wire [0:ARRAY_SIZE-1][  0:ARRAY_SIZE];
+    wire signed [DATA_WIDTH-1:0] b_wire       [  0:ARRAY_SIZE][0:ARRAY_SIZE-1];
+    wire                         b_valid_wire [  0:ARRAY_SIZE][0:ARRAY_SIZE-1];
+    wire signed [ ACC_WIDTH-1:0] acc_wire     [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    wire                         acc_done_wire[0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    wire                         mac_active   [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
 
     // Connect inputs to internal wires
     assign a_wire[0][0] = a_in_0;
@@ -238,6 +311,78 @@ module systolic_array #(
     assign acc_out_7_6 = acc_wire[7][6];
     assign acc_out_7_7 = acc_wire[7][7];
 
+    assign acc_done_0_0 = acc_done_wire[0][0];
+    assign acc_done_0_1 = acc_done_wire[0][1];
+    assign acc_done_0_2 = acc_done_wire[0][2];
+    assign acc_done_0_3 = acc_done_wire[0][3];
+    assign acc_done_0_4 = acc_done_wire[0][4];
+    assign acc_done_0_5 = acc_done_wire[0][5];
+    assign acc_done_0_6 = acc_done_wire[0][6];
+    assign acc_done_0_7 = acc_done_wire[0][7];
+
+    assign acc_done_1_0 = acc_done_wire[1][0];
+    assign acc_done_1_1 = acc_done_wire[1][1];
+    assign acc_done_1_2 = acc_done_wire[1][2];
+    assign acc_done_1_3 = acc_done_wire[1][3];
+    assign acc_done_1_4 = acc_done_wire[1][4];
+    assign acc_done_1_5 = acc_done_wire[1][5];
+    assign acc_done_1_6 = acc_done_wire[1][6];
+    assign acc_done_1_7 = acc_done_wire[1][7];
+
+    assign acc_done_2_0 = acc_done_wire[2][0];
+    assign acc_done_2_1 = acc_done_wire[2][1];
+    assign acc_done_2_2 = acc_done_wire[2][2];
+    assign acc_done_2_3 = acc_done_wire[2][3];
+    assign acc_done_2_4 = acc_done_wire[2][4];
+    assign acc_done_2_5 = acc_done_wire[2][5];
+    assign acc_done_2_6 = acc_done_wire[2][6];
+    assign acc_done_2_7 = acc_done_wire[2][7];
+
+    assign acc_done_3_0 = acc_done_wire[3][0];
+    assign acc_done_3_1 = acc_done_wire[3][1];
+    assign acc_done_3_2 = acc_done_wire[3][2];
+    assign acc_done_3_3 = acc_done_wire[3][3];
+    assign acc_done_3_4 = acc_done_wire[3][4];
+    assign acc_done_3_5 = acc_done_wire[3][5];
+    assign acc_done_3_6 = acc_done_wire[3][6];
+    assign acc_done_3_7 = acc_done_wire[3][7];
+
+    assign acc_done_4_0 = acc_done_wire[4][0];
+    assign acc_done_4_1 = acc_done_wire[4][1];
+    assign acc_done_4_2 = acc_done_wire[4][2];
+    assign acc_done_4_3 = acc_done_wire[4][3];
+    assign acc_done_4_4 = acc_done_wire[4][4];
+    assign acc_done_4_5 = acc_done_wire[4][5];
+    assign acc_done_4_6 = acc_done_wire[4][6];
+    assign acc_done_4_7 = acc_done_wire[4][7];
+
+    assign acc_done_5_0 = acc_done_wire[5][0];
+    assign acc_done_5_1 = acc_done_wire[5][1];
+    assign acc_done_5_2 = acc_done_wire[5][2];
+    assign acc_done_5_3 = acc_done_wire[5][3];
+    assign acc_done_5_4 = acc_done_wire[5][4];
+    assign acc_done_5_5 = acc_done_wire[5][5];
+    assign acc_done_5_6 = acc_done_wire[5][6];
+    assign acc_done_5_7 = acc_done_wire[5][7];
+
+    assign acc_done_6_0 = acc_done_wire[6][0];
+    assign acc_done_6_1 = acc_done_wire[6][1];
+    assign acc_done_6_2 = acc_done_wire[6][2];
+    assign acc_done_6_3 = acc_done_wire[6][3];
+    assign acc_done_6_4 = acc_done_wire[6][4];
+    assign acc_done_6_5 = acc_done_wire[6][5];
+    assign acc_done_6_6 = acc_done_wire[6][6];
+    assign acc_done_6_7 = acc_done_wire[6][7];
+
+    assign acc_done_7_0 = acc_done_wire[7][0];
+    assign acc_done_7_1 = acc_done_wire[7][1];
+    assign acc_done_7_2 = acc_done_wire[7][2];
+    assign acc_done_7_3 = acc_done_wire[7][3];
+    assign acc_done_7_4 = acc_done_wire[7][4];
+    assign acc_done_7_5 = acc_done_wire[7][5];
+    assign acc_done_7_6 = acc_done_wire[7][6];
+    assign acc_done_7_7 = acc_done_wire[7][7];
+
     // Generate 64 PEs (8x8 grid)
     genvar row, col;
     generate
@@ -246,7 +391,8 @@ module systolic_array #(
 
                 processing_element #(
                     .DATA_WIDTH(DATA_WIDTH),
-                    .ACC_WIDTH (ACC_WIDTH)
+                    .ACC_WIDTH (ACC_WIDTH),
+                    .ARRAY_SIZE(ARRAY_SIZE)
                 ) pe_inst (
                     .clk  (clk),
                     .rst_n(rst_n),
@@ -264,7 +410,8 @@ module systolic_array #(
                     .b_valid_out(b_valid_wire[row+1][col]),
 
                     .clear_acc(clear_acc),
-                    .acc_out  (acc_wire[row][col])
+                    .acc_out  (acc_wire[row][col]),
+                    .acc_done (acc_done_wire[row][col])
                 );
 
                 assign mac_active[row][col] = a_valid_wire[row][col] && b_valid_wire[row][col];

@@ -49,7 +49,7 @@ Each stream feeds an `input_buffer_controller` that contains a one-beat skid buf
 
 ## Output Stream Behavior
 
-Outputs are produced right after the systolic pipeline is empty. Once both A and B streams have observed `TLAST`, the core simply waits until the array reports that no multiply-accumulate activity is in flight (`array_active = 0`) and then releases the output collector. This removes the old fixed `FLUSH_LATENCY` guard band and immediately starts draining the tile as soon as the bottom-right PE finishes its final accumulation.
+Outputs are produced as soon as the corresponding accumulators finish. Every processing element counts its own MACs and raises an `acc_done` flag once it has consumed `ARRAY_SIZE` operand pairs. The output collector monitors those flags and only emits a beat when all values packed in that beat are marked done. Because the collector arms itself at `start_tile`, it can begin streaming the top-left entries while the rest of the systolic wave is still propagating, overlapping compute and drain without reading partial sums.
 
 The output collector scans the accumulated matrix `C` in row-major order and packs `VALUES_PER_BEAT = AXIS_DATA_WIDTH / ACC_WIDTH` results per beat (2 × 32-bit values for the default configuration):
 
@@ -70,27 +70,28 @@ The output collector scans the accumulated matrix `C` in row-major order and pac
 
 ### 2. `processing_element`
 
-- Each PE performs `acc_out <= acc_out + (a_in * b_in)` whenever both inputs are valid.
+- Each PE performs `acc_out <= acc_out + (a_in * b_in)` whenever both inputs are valid, tracking how many MACs have been observed.
 - `a_in` propagates to the right each cycle, `b_in` propagates downward, so every value participates in multiple MACs.
-- `clear_acc` synchronous reset is driven by `start_tile` to zero all accumulators between tiles.
+- `clear_acc` synchronous reset is driven by `start_tile` to zero all accumulators and their MAC counters between tiles.
+- After `ARRAY_SIZE` accumulations the PE asserts `acc_done`, which stays high until the next tile and guarantees the exposed value will no longer change.
 
 ### 3. `systolic_array`
 
 - 8×8 grid created with Verilog `generate` loops.
 - Internal wiring arrays route `a` horizontally and `b` vertically, maintaining valid bits alongside data.
-- Exposes all 64 accumulator taps (`acc_out_r_c`) so the collector can read them without additional buffering.
-- Raises `array_active` whenever any PE sees valid A and B operands simultaneously, which lets the top level know exactly when the pipeline is empty.
+- Exposes all 64 accumulator taps (`acc_out_r_c`) and their matching `acc_done_r_c` flags so the collector can read them without additional buffering or speculation.
+- Raises `array_active` whenever any PE sees valid A and B operands simultaneously (handy for debug/visibility).
 
 ### 4. Tile Control Logic (inside `gemm_core_top`)
 
-- Monitors `TLAST` on both input streams (`a_last_handshake`, `b_last_handshake`).
-- Arms an output-start request once both matrices are fully received and immediately fires a one-cycle `start_output` pulse when `array_active` drops to zero.
-- Tracks whether output has started so that a new `start_tile` resets the finite-state machine cleanly.
+- Pulses `start_tile` to clear accumulators and arm both the systolic array and the output collector.
+- Relies on each PE’s `acc_done` indicator and the collector’s gating to ensure only finalized values leave the core, so no extra flush or TLAST bookkeeping is required beyond what the AXI sources already provide.
 
 ### 5. `output_collector`
 
 - Uses a simple FSM with `(row_idx, col_idx)` pointers and a helper function to address the flattened accumulator wires.
-- Issues AXI beats whenever idle or the previous beat has been accepted. `m_axis_tvalid` remains deasserted during idle/flush periods.
+- Issues an AXI beat only when all cells that would be packed into that beat have asserted `acc_done`, so partial sums are never leaked.
+- `m_axis_tvalid` remains deasserted during idle/wait periods and asserts immediately once the targeted accumulators finish.
 - Drives `done` high alongside the final `TLAST`.
 
 ## Example Tile Sequence
@@ -98,7 +99,7 @@ The output collector scans the accumulated matrix `C` in row-major order and pac
 1. Assert `start_tile` for one `aclk` cycle while both input streams are idle.
 2. Beginning the next cycle, start driving the wavefront-formatted A and B streams. Keep `TVALID` asserted while data is available and monitor `TREADY` for backpressure.
 3. Assert `TLAST` together on the final wavefront beat (`cycle = 2*ARRAY_SIZE - 2`).
-4. After both `TLAST`s are acknowledged, the core watches `array_active` and fires the output collector as soon as the systolic wave has drained—typically ~`2*(ARRAY_SIZE-1)` cycles later.
+4. As the systolic wave advances, each PE raises `acc_done` once its column is finalized. The output collector, already armed from step 1, streams any row whose next pair of values is marked done—top rows start draining while lower rows are still computing.
 5. Monitor `m_axis_out_tvalid`. Once asserted, accept every beat until `TLAST`. Each beat contains two 32-bit row-major results.
 6. When `tile_done` pulses, the tile is complete and the core is ready for another `start_tile` once outputs have been consumed.
 
