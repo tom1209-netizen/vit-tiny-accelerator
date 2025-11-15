@@ -113,7 +113,7 @@ module tb_gemm_core_top;
 
     task reset_dut;
         begin
-            repeat (5) @(posedge aclk);
+            @(posedge aclk);
             aresetn = 1'b1;
             @(posedge aclk);
         end
@@ -360,6 +360,7 @@ module tb_gemm_core_top;
             $display("\n========================================");
             if (errors == 0) begin
                 $display("*** ALL TESTS PASSED! ***");
+                $display("Total cycles: %0d", cycles);
             end else begin
                 $display("*** FAILED: %0d errors ***", errors);
             end
@@ -407,7 +408,6 @@ module tb_gemm_core_top;
         check_results;
         print_summary;
 
-        repeat (10) @(posedge aclk);
         $finish;
     end
 

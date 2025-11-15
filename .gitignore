@@ -8,6 +8,8 @@ modelsim.ini
 compile.log
 work/
 *.log
+*.jou
+transcript
 
 # Models folder
 tiny_vit_5m_1k.pth

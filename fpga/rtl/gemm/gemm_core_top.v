@@ -32,7 +32,7 @@ module gemm_core_top #(
     input  wire                       m_axis_out_tready
 );
 
-    
+
     // A and B lanes from input buffer controllers
     wire signed [DATA_WIDTH-1:0] a0, a1, a2, a3, a4, a5, a6, a7;
     wire a_valid_beat;
@@ -88,62 +88,51 @@ module gemm_core_top #(
         .enable       (1'b1)
     );
 
-    
+
     // Control: detect last beats and wait for systolic flush
     wire a_last_handshake = s_axis_a_tvalid && s_axis_a_tready && s_axis_a_tlast;
     wire b_last_handshake = s_axis_b_tvalid && s_axis_b_tready && s_axis_b_tlast;
 
     reg a_last_seen, b_last_seen;
-    reg flushing;
-    reg output_started;
-    reg [7:0] flush_cnt;
+    reg  start_output_pending;
+    reg  output_started;
 
+    wire array_active;
     wire both_inputs_complete = a_last_seen && b_last_seen;
-
-    // Conservative flush latency ~3*ARRAY_SIZE (pipeline depth)
-    localparam integer FLUSH_LATENCY = ARRAY_SIZE * 3 + 8;
+    wire ready_to_start_output = start_output_pending && !array_active;
 
     always @(posedge aclk or negedge aresetn) begin
         if (!aresetn) begin
             a_last_seen    <= 1'b0;
             b_last_seen    <= 1'b0;
-            flushing       <= 1'b0;
+            start_output_pending <= 1'b0;
             output_started <= 1'b0;
-            flush_cnt      <= 8'd0;
         end else begin
             if (start_tile) begin
                 a_last_seen    <= 1'b0;
                 b_last_seen    <= 1'b0;
-                flushing       <= 1'b0;
+                start_output_pending <= 1'b0;
                 output_started <= 1'b0;
-                flush_cnt      <= 8'd0;
             end else begin
                 if (a_last_handshake) a_last_seen <= 1'b1;
                 if (b_last_handshake) b_last_seen <= 1'b1;
 
-                if (both_inputs_complete && !flushing && !output_started) begin
-                    flushing  <= 1'b1;
-                    flush_cnt <= 8'd0;
-                end
-
-                if (flushing) begin
-                    if (flush_cnt == FLUSH_LATENCY - 1) begin
-                        flushing       <= 1'b0;
-                        output_started <= 1'b1;
-                    end else begin
-                        flush_cnt <= flush_cnt + 8'd1;
-                    end
+                if (ready_to_start_output) begin
+                    start_output_pending <= 1'b0;
+                    output_started <= 1'b1;
+                end else if (both_inputs_complete && !output_started) begin
+                    start_output_pending <= 1'b1;
                 end
             end
         end
     end
 
-    wire start_output_collector = output_started;
+    wire start_output_collector = ready_to_start_output;
 
     // Clear accumulators at tile start
     wire clear_acc = start_tile;
 
-    
+
     // Systolic array instance
     wire signed [ACC_WIDTH-1:0]
         acc_out_0_0, acc_out_0_1, acc_out_0_2, acc_out_0_3,
@@ -279,10 +268,12 @@ module gemm_core_top #(
         .acc_out_7_4(acc_out_7_4),
         .acc_out_7_5(acc_out_7_5),
         .acc_out_7_6(acc_out_7_6),
-        .acc_out_7_7(acc_out_7_7)
+        .acc_out_7_7(acc_out_7_7),
+
+        .array_active(array_active)
     );
 
-    
+
     // Output collector
     output_collector #(
         .ACC_WIDTH      (ACC_WIDTH),

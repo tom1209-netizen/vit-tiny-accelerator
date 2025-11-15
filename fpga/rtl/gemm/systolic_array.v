@@ -15,15 +15,15 @@ module systolic_array #(
     input wire signed [DATA_WIDTH-1:0] a_in_5,
     input wire signed [DATA_WIDTH-1:0] a_in_6,
     input wire signed [DATA_WIDTH-1:0] a_in_7,
-    
-    input wire                         a_valid_in_0,
-    input wire                         a_valid_in_1,
-    input wire                         a_valid_in_2,
-    input wire                         a_valid_in_3,
-    input wire                         a_valid_in_4,
-    input wire                         a_valid_in_5,
-    input wire                         a_valid_in_6,
-    input wire                         a_valid_in_7,
+
+    input wire a_valid_in_0,
+    input wire a_valid_in_1,
+    input wire a_valid_in_2,
+    input wire a_valid_in_3,
+    input wire a_valid_in_4,
+    input wire a_valid_in_5,
+    input wire a_valid_in_6,
+    input wire a_valid_in_7,
 
     // Flattened B inputs (8 columns)
     input wire signed [DATA_WIDTH-1:0] b_in_0,
@@ -35,14 +35,14 @@ module systolic_array #(
     input wire signed [DATA_WIDTH-1:0] b_in_6,
     input wire signed [DATA_WIDTH-1:0] b_in_7,
 
-    input wire                         b_valid_in_0,
-    input wire                         b_valid_in_1,
-    input wire                         b_valid_in_2,
-    input wire                         b_valid_in_3,
-    input wire                         b_valid_in_4,
-    input wire                         b_valid_in_5,
-    input wire                         b_valid_in_6,
-    input wire                         b_valid_in_7,
+    input wire b_valid_in_0,
+    input wire b_valid_in_1,
+    input wire b_valid_in_2,
+    input wire b_valid_in_3,
+    input wire b_valid_in_4,
+    input wire b_valid_in_5,
+    input wire b_valid_in_6,
+    input wire b_valid_in_7,
 
     input wire clear_acc,
 
@@ -117,7 +117,9 @@ module systolic_array #(
     output wire signed [ACC_WIDTH-1:0] acc_out_7_4,
     output wire signed [ACC_WIDTH-1:0] acc_out_7_5,
     output wire signed [ACC_WIDTH-1:0] acc_out_7_6,
-    output wire signed [ACC_WIDTH-1:0] acc_out_7_7
+    output wire signed [ACC_WIDTH-1:0] acc_out_7_7,
+
+    output wire array_active
 );
 
     // Internal wires - using arrays internally is OK
@@ -126,6 +128,7 @@ module systolic_array #(
     wire signed [DATA_WIDTH-1:0] b_wire      [  0:ARRAY_SIZE][0:ARRAY_SIZE-1];
     wire                         b_valid_wire[  0:ARRAY_SIZE][0:ARRAY_SIZE-1];
     wire signed [ ACC_WIDTH-1:0] acc_wire    [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    wire                         mac_active  [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
 
     // Connect inputs to internal wires
     assign a_wire[0][0] = a_in_0;
@@ -144,7 +147,7 @@ module systolic_array #(
     assign a_valid_wire[6][0] = a_valid_in_6;
     assign a_wire[7][0] = a_in_7;
     assign a_valid_wire[7][0] = a_valid_in_7;
-    
+
     assign b_wire[0][0] = b_in_0;
     assign b_valid_wire[0][0] = b_valid_in_0;
     assign b_wire[0][1] = b_in_1;
@@ -245,27 +248,44 @@ module systolic_array #(
                     .DATA_WIDTH(DATA_WIDTH),
                     .ACC_WIDTH (ACC_WIDTH)
                 ) pe_inst (
-                    .clk(clk),
+                    .clk  (clk),
                     .rst_n(rst_n),
-                    
+
                     // 'A' path connections
                     .a_in(a_wire[row][col]),
                     .a_valid_in(a_valid_wire[row][col]),
                     .a_out(a_wire[row][col+1]),
-                    .a_valid_out(a_valid_wire[row][col+1]), 
-                    
+                    .a_valid_out(a_valid_wire[row][col+1]),
+
                     // 'B' path connections
                     .b_in(b_wire[row][col]),
                     .b_valid_in(b_valid_wire[row][col]),
                     .b_out(b_wire[row+1][col]),
-                    .b_valid_out(b_valid_wire[row+1][col]), 
-                    
+                    .b_valid_out(b_valid_wire[row+1][col]),
+
                     .clear_acc(clear_acc),
-                    .acc_out(acc_wire[row][col])
+                    .acc_out  (acc_wire[row][col])
                 );
+
+                assign mac_active[row][col] = a_valid_wire[row][col] && b_valid_wire[row][col];
 
             end
         end
     endgenerate
+
+    // Collapse all PE valid overlaps to a single activity indicator so top-level
+    // logic knows when MACs are still in flight.
+    integer r, c;
+    reg array_active_r;
+    always @(*) begin
+        array_active_r = 1'b0;
+        for (r = 0; r < ARRAY_SIZE; r = r + 1) begin
+            for (c = 0; c < ARRAY_SIZE; c = c + 1) begin
+                array_active_r = array_active_r | mac_active[r][c];
+            end
+        end
+    end
+
+    assign array_active = array_active_r;
 
 endmodule

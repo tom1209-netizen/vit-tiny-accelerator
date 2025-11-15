@@ -34,6 +34,7 @@ module tb_systolic_array;
     wire signed [ACC_WIDTH-1:0] acc_out_6_4, acc_out_6_5, acc_out_6_6, acc_out_6_7;
     wire signed [ACC_WIDTH-1:0] acc_out_7_0, acc_out_7_1, acc_out_7_2, acc_out_7_3;
     wire signed [ACC_WIDTH-1:0] acc_out_7_4, acc_out_7_5, acc_out_7_6, acc_out_7_7;
+    wire array_active;
 
     reg signed [DATA_WIDTH-1:0] matrix_A[0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
     reg signed [DATA_WIDTH-1:0] matrix_B[0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
@@ -152,7 +153,8 @@ module tb_systolic_array;
         .acc_out_7_4(acc_out_7_4),
         .acc_out_7_5(acc_out_7_5),
         .acc_out_7_6(acc_out_7_6),
-        .acc_out_7_7(acc_out_7_7)
+        .acc_out_7_7(acc_out_7_7),
+        .array_active(array_active)
     );
 
     task collect_outputs;
