@@ -4,3 +4,6 @@
 ../rtl/gemm/output_collector.v
 ../rtl/gemm/processing_element.v
 ../rtl/gemm/systolic_array.v
+
+// Residual addition module
+../rtl/residual/residual_add.v
