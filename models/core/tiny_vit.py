@@ -135,11 +135,10 @@ class PatchMerging(nn.Module):
         self.conv3 = Conv2d_BN(out_dim, out_dim, 1, 1, 0)
 
     def forward(self, x):
-        if x.ndim == 3:
-            H, W = self.input_resolution
-            B = len(x)
-            # (B, C, H, W)
-            x = x.view(B, H, W, -1).permute(0, 3, 1, 2)
+        # Reshape token sequence [B, HW, C] into NCHW; avoids tensor-dependent control flow for FX/QAT.
+        H, W = self.input_resolution
+        B = x.shape[0]
+        x = x.view(B, H, W, -1).permute(0, 3, 1, 2)
 
         x = self.conv1(x)
         x = self.act(x)
@@ -186,6 +185,9 @@ class ConvLayer(nn.Module):
             else:
                 x = blk(x)
         if self.downsample is not None:
+            # Convert NCHW to token sequence for downsampling path
+            B, C, H, W = x.shape
+            x = x.flatten(2).transpose(1, 2)  # [B, HW, C]
             x = self.downsample(x)
         return x
 
@@ -337,7 +339,16 @@ class TinyViTBlock(nn.Module):
     def forward(self, x):
         H, W = self.input_resolution
         B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
+
+        # Avoid tensor-dependent control flow during FX tracing
+        try:
+            from torch.fx._symbolic_trace import is_fx_tracing
+        except Exception:
+            def is_fx_tracing() -> bool:  # type: ignore
+                return False
+        if not is_fx_tracing():
+            assert L == H * W, "input feature has wrong size"
+            
         res_x = x
         if H == self.window_size and W == self.window_size:
             x = self.attn(x)
