@@ -1,6 +1,6 @@
 #Define variables
-TESTNAME 	?= tb_residual_add
-TB_NAME 	?= tb_residual_add
+TESTNAME 	?= tb_norm_unit
+TB_NAME 	?= tb_norm_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
 
@@ -15,6 +15,7 @@ COMMANDS := all all_wave all_cov \
 			wave \
 			gen_cov gen_html \
 			clean \
+			fast \
 			help
 
 TEST_ARG := $(filter-out $(COMMANDS),$(ARGS))
@@ -74,6 +75,11 @@ clean:
 	rm -rf transcript
 	rm -rf *.ucdb
 
+fast: 
+	$(MAKE) clean
+	clear
+	$(MAKE) all_wave TESTNAME=$(TESTNAME) TB_NAME=$(TB_NAME) MEALY_FSM=$(MEALY_FSM)
+
 help:
 	@echo ""
 	@echo "****************************************"
@@ -87,5 +93,7 @@ help:
 	@echo "** make wave     : open waveform"
 	@echo "** make gen_cov  : merge, generate coverage data base and text coverage report"
 	@echo "** make gen_cov  : merge, gemerate coverage data base and html coverage report"
+	@echo "** make fast     : clean, build and run simulation with waveform"
+	@echo "** make help     : print this help message"
 	@echo "****************************************"
 	@echo ""

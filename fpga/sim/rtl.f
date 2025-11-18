@@ -7,3 +7,12 @@
 
 // Residual addition module
 ../rtl/residual/residual_add.v
+
+// MLP module
+// ../rtl/mlp/mlp_block_top.v
+../rtl/mlp/relu_unit.v
+../rtl/mlp/norm_unit.v
+// ../rtl/mlp/mlp_controller.v
+// ../rtl/mlp/weight_buffer.v
+
+// Requant module

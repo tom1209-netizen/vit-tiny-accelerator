@@ -1,30 +1,30 @@
 `timescale 1ns / 1ps
 
-module tb_norm_unit;
+module tb_relu_unit;
 
     // Parameters
     parameter AXIS_DATA_WIDTH = 64;
     parameter DATA_WIDTH      = 8;
     parameter CLK_PERIOD      = 10;
 
-    localparam VALUES_PER_BEAT = AXIS_DATA_WIDTH / DATA_WIDTH;
-    localparam MAX_CYCLES      = 20000;
+    localparam VALUES_PER_BEAT    = AXIS_DATA_WIDTH / DATA_WIDTH;
+    localparam MAX_CYCLES         = 20000;
 
     // Hardcoded configuration for this testbench
-    localparam BEAT_PER_PACKET = 8;
-    localparam MAX_BEATS       = 20;
+    localparam BEAT_PER_PACKET    = 10;
+    localparam MAX_BEATS          = 20;
 
     // Testbench Signals
     reg                         clk;
     reg                         rst_n;
 
-    // AXI4-Stream input signals
+    // AXI4-Stream input signals (AXIS_DATA_WIDTH = 64 bits)
     reg  [AXIS_DATA_WIDTH-1:0]  s_axis_tdata;
     reg                         s_axis_tvalid;
     reg                         s_axis_tlast;
     wire                        s_axis_tready;
 
-    // AXI4-Stream output signals
+    // AXI4-Stream output signals (AXIS_DATA_WIDTH = 64 bits)
     wire [AXIS_DATA_WIDTH-1:0]  m_axis_tdata;
     wire                        m_axis_tvalid;
     wire                        m_axis_tlast;
@@ -39,11 +39,9 @@ module tb_norm_unit;
     reg signed [AXIS_DATA_WIDTH-1:0] check_data_continuous [0:MAX_BEATS-1];
 
     // Instantiate the DUT
-    norm_unit #(
+    relu_unit #(
         .AXIS_DATA_WIDTH (AXIS_DATA_WIDTH),
-        .DATA_WIDTH      (DATA_WIDTH),
-        .BEAT_PER_PACKET (BEAT_PER_PACKET),
-        .MAX_BEATS       (MAX_BEATS)
+        .DATA_WIDTH      (DATA_WIDTH)
     ) uut (
         .clk            (clk),
         .rst_n          (rst_n),
@@ -56,11 +54,7 @@ module tb_norm_unit;
         .m_axis_tdata   (m_axis_tdata),
         .m_axis_tvalid  (m_axis_tvalid),
         .m_axis_tlast   (m_axis_tlast),
-        .m_axis_tready  (m_axis_tready),
-
-        .gain_q8_8    (16'd256),   // = 1.0 ở Q8.8
-        .offset_q0    (8'd0),
-        .epsilon_q0   (16'd1)      // epsilon nhỏ, tránh chia cho 0
+        .m_axis_tready  (m_axis_tready)
     );
 
     // Clock generation
@@ -74,8 +68,7 @@ module tb_norm_unit;
     always @(posedge clk) begin
         if (cycles == MAX_CYCLES) begin
             $display("TIMEOUT at cycle %0d in test %0d", cycles, current_test);
-            $display("  s_tvalid=%0b s_tready=%0b  m_tvalid=%0b m_tready=%0b",
-                     s_axis_tvalid, s_axis_tready, m_axis_tvalid, m_axis_tready);
+            $display("  tvalid=%0b tready=%0b", s_axis_tvalid, s_axis_tready);
             $finish;
         end
     end
@@ -87,12 +80,12 @@ module tb_norm_unit;
         #(CLK_PERIOD * 5) rst_n = 1'b1; // Deassert reset after some clock cycles
 
         $display("==========================================");
-        $display("norm_unit Testbench");
+        $display("ReLU Unit Testbench");
         $display("==========================================");
 
         // Run all tests
         @(posedge clk);
-        // run_single_test();
+        run_single_test();
         run_continuous_test();
 
         // Summary
@@ -110,87 +103,104 @@ module tb_norm_unit;
 
     // Initialize signals and test data, mainly apply reset
     task initialize_tests;
-        integer i;
         begin
             total_errors = 0;
             current_test = 0;
 
             rst_n         = 1'b0; // Active-low reset asserted
 
+            // s_axis_tdata = {AXIS_DATA_WIDTH{1'b0}};
             s_axis_tdata  = {AXIS_DATA_WIDTH{1'bX}};
             s_axis_tvalid = 1'b0;
             s_axis_tlast  = 1'b0;
 
+            // m_axis_tdata = {AXIS_DATA_WIDTH{1'bX}};
             m_axis_tready = 1'b0;
 
             // Initialize test data arrays
-            // Packet 0 (beats  0.. 9): all lanes = 0
-            // Packet 1 (beats 10..14): all lanes = 0
-            //           (beats 15..19): all lanes = +10
-            // Single-beat test vectors from run_test_case(1..20)
-            sent_data_continuous[0]  = 64'h0102030405060708;
-            check_data_continuous[0] = 64'hFEFFFF0000010102;
+            // Test Case 1: +1 (all lanes) -> 0x01
+            sent_data_continuous[0]  = 64'h0101010101010101;
+            check_data_continuous[0] = 64'h0101010101010101;
 
-            sent_data_continuous[1]  = 64'h7F00FF0001FE0008;
-            check_data_continuous[1] = 64'h0300000000000000;
+            // Test Case 2: All ones (0xFF) -> 0x00
+            sent_data_continuous[1]  = 64'hFFFFFFFFFFFFFFFF;
+            check_data_continuous[1] = 64'h0000000000000000;
 
-            sent_data_continuous[2]  = 64'h807F80807F80807F;
-            check_data_continuous[2] = 64'hFF01FFFF01FFFF01;
+            // Test Case 3: +127 (all lanes) -> 0x7F
+            sent_data_continuous[2]  = 64'h7F7F7F7F7F7F7F7F;
+            check_data_continuous[2] = 64'h7F7F7F7F7F7F7F7F;
 
-            sent_data_continuous[3]  = 64'h0101010101010101;
+            // Test Case 4: -128 (all lanes) -> 0x00
+            sent_data_continuous[3]  = 64'h8080808080808080;
             check_data_continuous[3] = 64'h0000000000000000;
 
-            sent_data_continuous[4]  = 64'hFFFFFFFFFFFFFFFF;
-            check_data_continuous[4] = 64'h0000000000000000;
+            // Test Case 5: Mixed values (80=-128, 25=+37, 01=+1, 20=+32, 05=+5)
+            sent_data_continuous[4]  = 64'h8000250001002005;
+            check_data_continuous[4] = 64'h0000250001002005;
 
-            sent_data_continuous[5]  = 64'h0000000000000000;
-            check_data_continuous[5] = 64'h0000000000000000;
+            // Test Case 6: All positives
+            sent_data_continuous[5]  = 64'h7F00110004002005;
+            check_data_continuous[5] = 64'h7F00110004002005;
 
-            sent_data_continuous[6]  = 64'h0807060504030201;
-            check_data_continuous[6] = 64'h0201010000FFFFFE;
+            // Test Case 7: Mixed positives and negatives (85=-123, 95=-107, FA=-6)
+            sent_data_continuous[6]  = 64'h7F0085009500FA00;
+            check_data_continuous[6] = 64'h7F00000000000000;
 
-            sent_data_continuous[7]  = 64'h0AF614EC1EE228D8;
-            check_data_continuous[7] = 64'h000001FF01FF01FF;
+            // Test Case 8: Mixed values (A5=-91, 88=-120)
+            sent_data_continuous[7]  = 64'hA500110044008899;
+            check_data_continuous[7] = 64'h0000110044000000;
 
-            sent_data_continuous[8]  = 64'h645A50463C32281E;
-            check_data_continuous[8] = 64'h0201010000FFFFFE;
+            // Test Case 9: Alternating negatives
+            sent_data_continuous[8]  = 64'hFF00FF00FF00FF00;
+            check_data_continuous[8] = 64'h0000000000000000;
 
-            sent_data_continuous[9]  = 64'hCED8E2ECF6000A14;
-            check_data_continuous[9] = 64'hFEFFFF0000010102;
+            // Test Case 10: Some negatives (80=-128, A9=-87)
+            sent_data_continuous[9]  = 64'h0809008000FF00A9;
+            check_data_continuous[9] = 64'h0809000000000000;
 
-            sent_data_continuous[10]  = 64'h0C0E10121416181A;
-            check_data_continuous[10] = 64'hFEFFFF0000010102;
+            // Test Case 11: Negative boundary (close to 0)
+            sent_data_continuous[10]  = 64'hFEFEFEFEFEFEFEFE;
+            check_data_continuous[10] = 64'h0000000000000000;
 
-            sent_data_continuous[11]  = 64'h809CB0C4D8EC0014;
-            check_data_continuous[11] = 64'hFEFFFF0000010101;
+            // Test Case 12: Positive boundary (close to 0)
+            sent_data_continuous[11]  = 64'h0202020202020202;
+            check_data_continuous[11] = 64'h0202020202020202;
 
-            sent_data_continuous[12]  = 64'h7F7F7E7D7C7B7A79;
-            check_data_continuous[12] = 64'h0101010000FFFFFE;
+            // Test Case 13: Alternating negative and positive
+            sent_data_continuous[12]  = 64'hA5B6C7D801020304;
+            check_data_continuous[12] = 64'h0000000001020304;
 
-            sent_data_continuous[13]  = 64'hFF01FF01FF01FF01;
-            check_data_continuous[13] = 64'hFF01FF01FF01FF01;
+            // Test Case 14: Alternating negative and zero
+            sent_data_continuous[13]  = 64'h00A500B600C700D8;
+            check_data_continuous[13] = 64'h0000000000000000;
 
-            sent_data_continuous[14]  = 64'h0505050506060606;
-            check_data_continuous[14] = 64'hFFFFFFFF01010101;
+            // Test Case 15: Alternating positive and zero
+            sent_data_continuous[14]  = 64'h007F001000300060;
+            check_data_continuous[14] = 64'h007F001000300060;
 
-            sent_data_continuous[15]  = 64'h323C46505A646E78;
-            check_data_continuous[15] = 64'hFEFFFF0000010102;
+            // Test Case 16: All boundaries
+            sent_data_continuous[15]  = 64'h7F8000FF01FE02FD;
+            check_data_continuous[15] = 64'h7F00000001000200;
 
-            sent_data_continuous[16]  = 64'hC0E0002040607F80;
-            check_data_continuous[16] = 64'hFFFF0000010101FE;
+            // Test Case 17: Large/small positive values
+            sent_data_continuous[16]  = 64'h7A05700A6014501E;
+            check_data_continuous[16] = 64'h7A05700A6014501E;
 
-            sent_data_continuous[17]  = 64'h7F00000000000080;
-            check_data_continuous[17] = 64'h02000000000000FE;
+            // Test Case 18: Large/small negative values
+            sent_data_continuous[17]  = 64'h81F08AF590FA95FF;
+            check_data_continuous[17] = 64'h0000000000000000;
 
-            sent_data_continuous[18]  = 64'h0A141E28323C4650;
-            check_data_continuous[18] = 64'hFEFFFF0000010102;
+            // Test Case 19: Half negative (first 4 bytes), half positive (last 4 bytes)
+            sent_data_continuous[18]  = 64'h808080807F7F7F7F;
+            check_data_continuous[18] = 64'h000000007F7F7F7F;
 
-            sent_data_continuous[19]  = 64'h9CA6B0BAC4CED8E2;
-            check_data_continuous[19] = 64'hFEFFFF0000010102;
+            // Test Case 20: All zeros
+            sent_data_continuous[19]  = 64'h0000000000000000;
+            check_data_continuous[19] = 64'h0000000000000000;
         end
     endtask
 
-    // Task to print the result of each logical test (per packet)
+    // Task to print the result of each test case
     task automatic print_result;
         input integer                  id;
         input [AXIS_DATA_WIDTH-1:0]    input_val;
@@ -198,156 +208,93 @@ module tb_norm_unit;
         input [AXIS_DATA_WIDTH-1:0]    output_val;
         begin
             $display("\n============================================================");
-            $display(" Packet Test %0d", id);
+            $display(" Test Case %0d", id);
             $display("------------------------------------------------------------");
-            $display("   First beat input     : %h", input_val);
-            $display("   First beat expected  : %h", expected_val);
-            $display("   First beat observed  : %h", output_val);
+            $display("   Input     : %h", input_val);
+            $display("   Expected  : %h", expected_val);
+            $display("   Output    : %h", output_val);
             if (output_val === expected_val) begin
-                $display("   Result (packet)      : PASSED");
+                $display("   Result    : PASSED");
             end else begin
-                $display("   Result (packet)      : FAILED (first beat mismatch)");
+                $display("   Result    : FAILED");
+                total_errors = total_errors + 1; // Update error counter
             end
             $display("============================================================\n");
         end
     endtask
 
-    // Task 1
+    // Test 1: single-beat test cases
+    localparam integer GAP_CYCLES = 0;
+
     task automatic run_test_case;
-        input integer test_case_id;  // 0 .. MAX_BEATS-1
-
-        reg [AXIS_DATA_WIDTH-1:0] input_data;
-        reg [AXIS_DATA_WIDTH-1:0] expected_output;
-        integer g;
+        input integer                test_case_id;
+        input [AXIS_DATA_WIDTH-1:0]  input_data;
+        input [AXIS_DATA_WIDTH-1:0]  expected_output;
+        integer                      g;
         begin
-            $display("\n--- RUN TEST_CASE %0d ---", test_case_id);
-
-            // luôn sẵn sàng nhận output
+            // Downstream is ready
             m_axis_tready = 1'b1;
 
-            // 1) Gửi 1 beat (1 packet đơn lẻ)
-            s_axis_tdata  = sent_data_continuous[test_case_id];
+            // Send 1 packet = 1 beat, hold until input handshake
+            s_axis_tdata  = input_data;
             s_axis_tvalid = 1'b1;
-            s_axis_tlast  = 1'b1;  // packet 1-beat
+            s_axis_tlast  = 1'b1;
 
-            // Chờ handshake input
+            // Wait for input handshake
             @(posedge clk);
-            while (!(s_axis_tvalid && s_axis_tready)) begin
-                @(posedge clk);
-            end
+            while (!(s_axis_tvalid && s_axis_tready)) @(posedge clk);
 
-            // Deassert source sau khi handshake xong
+            // Deassert source after handshake completes
             s_axis_tvalid = 1'b0;
             s_axis_tlast  = 1'b0;
-            // s_axis_tdata  = {AXIS_DATA_WIDTH{1'bX}}; // optional
+            // s_axis_tdata  = {AXIS_DATA_WIDTH{1'bX}};
 
-            // 2) Chờ output hợp lệ
-            @(posedge clk);
-            while (!(m_axis_tvalid && m_axis_tready)) begin
-                @(posedge clk);
-            end
+            // Wait for output handshake
+            while (!(m_axis_tvalid && m_axis_tready)) @(posedge clk);
 
-            // 3) So sánh kết quả
-            input_data      = m_axis_tdata;
-            expected_output = check_data_continuous[test_case_id];
+            // Compare result
+            print_result(test_case_id, input_data, expected_output, m_axis_tdata);
+            if (m_axis_tlast !== 1'b1)
+                $error("Test %0d: Expected m_axis_tlast=1 for single-beat packet", test_case_id);
 
-            if (input_data !== expected_output) begin
-                $display("  ERROR: Test %0d: data mismatch. Expected %h, got %h",
-                         test_case_id, expected_output, input_data);
-                total_errors = total_errors + 1;
-            end else begin
-                // In summary cho test này
-                print_result(test_case_id + 1,
-                             sent_data_continuous[test_case_id],
-                             expected_output,
-                             input_data);
-            end
+            // Optional gap between test cases
+            for (g = 0; g < GAP_CYCLES; g = g + 1) @(posedge clk);
 
-            // Nếu bạn đang để BEAT_PER_PACKET = 1 cho DUT,
-            // thì ở đây m_axis_tlast phải =1 cho packet 1-beat.
-            if (m_axis_tlast !== 1'b1) begin
-                $display("  ERROR: Test %0d: Expected m_axis_tlast=1 for single-beat packet, got %b",
-                         test_case_id, m_axis_tlast);
-                total_errors = total_errors + 1;
-            end
-
-            // 4) Kết thúc test case, deassert ready + để 1–2 cycle nghỉ nếu muốn
+            // End of test case
             m_axis_tready = 1'b0;
-            // s_axis_tdata  = {AXIS_DATA_WIDTH{1'bX}}; // optional
-
-            for (g = 0; g < 0; g = g + 1) @(posedge clk);
         end
     endtask
 
     task run_single_test;
-        integer tc;
+        integer i;
         begin
             current_test = 1;
+            $display("\n================== Test 1: Single Test Cases ==================\n");
 
-            $display("\n================== Test 1: Per-test (single-beat) ==================\n");
-            $display("  Each logical test sends ONE packet with 1 beat (AXIS_DATA_WIDTH=%0d, DATA_WIDTH=%0d)",
-                     AXIS_DATA_WIDTH, DATA_WIDTH);
-
-            // Chạy lần lượt tất cả test_case 0..MAX_BEATS-1
-            for (tc = 0; tc < MAX_BEATS; tc = tc + 1) begin
-                run_test_case(tc);
+            // INT8 data (8 bits): bit 7 is sign bit. ReLU(x) = max(0, x).
+            // Example: 0xFF = -1 (ReLU -> 0x00). 0x7F = +127 (ReLU -> 0x7F). 0x80 = -128 (ReLU -> 0x00).
+            for (i = 0; i < MAX_BEATS; i = i + 1) begin
+                run_test_case(i + 1, sent_data_continuous[i], check_data_continuous[i]);
             end
         end
     endtask
 
-
-    // Send one packet with BEAT_PER_PACKET beats (non-continuous pattern)
+    // Send one packet with BEAT_PER_PACKET beats (non-continuous pattern with optional gaps)
     task automatic send_packet;
-        input integer packet_index;
-        integer beat_idx;
-        integer data_offset;
-        begin
-            beat_idx    = 0;
-            data_offset = packet_index * BEAT_PER_PACKET;
-
-            s_axis_tvalid = 1'b0;
-
-            if (BEAT_PER_PACKET > MAX_BEATS)
-                $fatal(1, "BEAT_PER_PACKET must not exceed MAX_BEATS.");
-
-            while (beat_idx < BEAT_PER_PACKET) begin
-                @(posedge clk);
-                if (s_axis_tready) begin
-                    if (beat_idx < BEAT_PER_PACKET) begin
-                        s_axis_tdata  = sent_data_continuous[beat_idx + data_offset];
-                        s_axis_tvalid = 1'b1;
-                        s_axis_tlast  = (beat_idx == BEAT_PER_PACKET - 1);
-                    end
-                    beat_idx = beat_idx + 1;
-                end
-            end
-
-            // Deassert after the entire packet has been successfully handshaken
-            @(posedge clk);
-            s_axis_tvalid = 1'b0;
-            s_axis_tlast  = 1'b0;
-        end
-    endtask
-
-    // Send one packet with BEAT_PER_PACKET beats continuously (back-to-back mode)
-    task automatic send_packet_continuous;
-        input integer packet_index;
+        input integer beat_counter;
 
         integer beat_idx;
         integer data_offset;
         begin
             beat_idx    = 0;
-            data_offset = packet_index * BEAT_PER_PACKET;
+            data_offset = beat_counter * BEAT_PER_PACKET;
 
             s_axis_tvalid = 1'b0;
             m_axis_tready = 1'b1;
 
-            // @(posedge clk) wait(s_axis_tready);
-
             if (BEAT_PER_PACKET > MAX_BEATS)
                 $fatal(1, "BEAT_PER_PACKET must not exceed MAX_BEATS.");
 
-            // Main loop for send & handshake (continuous)
             while (beat_idx < BEAT_PER_PACKET) begin
                 @(posedge clk);
                 if (s_axis_tready) begin
@@ -368,12 +315,51 @@ module tb_norm_unit;
         end
     endtask
 
-    // Test 2: continuous / multi-packet streaming
+    // Send one packet with BEAT_PER_PACKET beats continuously (back-to-back mode)
+    task automatic send_packet_continuous;
+        input integer beat_counter;
+
+        integer beat_idx;
+        integer data_offset;
+        begin
+            beat_idx    = 0;
+            data_offset = beat_counter * BEAT_PER_PACKET;
+
+            s_axis_tvalid = 1'b0;
+            m_axis_tready = 1'b1;
+
+            // @(posedge clk) wait(s_axis_tready);
+
+            if (BEAT_PER_PACKET > MAX_BEATS)
+                $fatal(1, "BEAT_PER_PACKET must not exceed MAX_BEATS.");
+
+            // Main loop for send & handshake
+            while (beat_idx < BEAT_PER_PACKET) begin
+                @(posedge clk);
+                if (s_axis_tready) begin
+                    if (beat_idx < BEAT_PER_PACKET) begin
+                        s_axis_tdata  = sent_data_continuous[beat_idx + data_offset];
+                        s_axis_tvalid = 1'b1;
+                        s_axis_tlast  = (beat_idx == BEAT_PER_PACKET - 1);
+                    end
+                    beat_idx = beat_idx + 1;
+                end
+            end
+
+            // Deassert after the entire packet has been successfully handshaken
+            @(posedge clk);
+            s_axis_tvalid = 1'b0;
+            s_axis_tlast  = 1'b0;
+            // s_axis_tdata  = {AXIS_DATA_WIDTH{1'bX}};
+        end
+    endtask
+
+    // Test 2: continuous test cases
     task automatic run_continuous_test;
         integer counter;
         integer packets_per_phase;
         begin
-            current_test      = 2;
+            current_test     = 2;
             packets_per_phase = MAX_BEATS / BEAT_PER_PACKET;
 
             $display("\n================== Test 2: Continuous Test Cases ==================\n");
@@ -386,19 +372,18 @@ module tb_norm_unit;
             $display("    Packets per phase = %0d", packets_per_phase);
 
             // Phase 1: Packets with small gaps between them (using send_packet)
-            $display("\n  [Phase 1] Non-continuous streaming using send_packet()\n");
-            m_axis_tready = 1'b1;
-            counter       = 0;
+            $display("\n  [Phase 1] Non-continuous streaming using send_packet()");
+            counter = 0;
             while (counter < packets_per_phase) begin
                 $display("    -> Sending packet %0d/%0d with send_packet() (non-continuous)",
                          counter + 1, packets_per_phase);
                 send_packet(counter);
                 counter = counter + 1;
-                repeat (2) @(posedge clk);  // Small gap between packets
+                repeat (5) @(posedge clk);  // Small gap between packets
             end
 
             // Phase 2: Packets back-to-back (continuous streaming)
-            $display("\n  [Phase 2] Continuous back-to-back streaming using send_packet_continuous()\n");
+            $display("\n  [Phase 2] Continuous back-to-back streaming using send_packet_continuous()");
             counter = 0;
             while (counter < packets_per_phase) begin
                 $display("    -> Sending packet %0d/%0d with send_packet_continuous() (continuous)",
@@ -408,7 +393,7 @@ module tb_norm_unit;
             end
 
             $display("\n  [Test 2] Completed all continuous packets.\n");
-            repeat (2) @(posedge clk);
+            repeat (5) @(posedge clk);
         end
     endtask
 

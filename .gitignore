@@ -2,23 +2,27 @@
 .DS_Store
 
 # FPGA synthesis files
+work/
 *.wlf
 *.dbg
-modelsim.ini
-compile.log
-work/
 *.log
 *.jou
 transcript
+compile.log
+modelsim.ini
 
 # Models folder
-tiny_vit_5m_1k.pth
-sample_image/
+.venv/
 __pycache__/
 golden/
+sample_image/
+tiny_vit_5m_1k.pth
 
 # Vscode
 .vscode/
 
 # Vivado report
 build
+
+# Junk Folders
+test_files/

@@ -1,25 +1,3 @@
-//////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 11/12/2025 11:32:36 PM
-// Design Name: 
-// Module Name: weight_buffer
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-//////////////////////////////////////////////////////////////////////////////////
-
-`timescale 1ns / 1ps
-
 module weight_buffer #(
     parameter AXIS_DATA_WIDTH = 64   // Width of AXI4-Stream data
 )(

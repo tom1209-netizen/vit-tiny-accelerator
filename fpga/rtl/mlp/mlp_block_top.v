@@ -1,29 +1,9 @@
-//////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 11/12/2025 07:55:15 PM
-// Design Name: 
-// Module Name: mlp_block_top
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-//////////////////////////////////////////////////////////////////////////////////
-
 `timescale 1ns / 1ps
-// waiting for tile config 0x10 and 0x70 to continue
 
+// Waiting for tile config 0x10 and 0x70 to continue
 module mlp_block_top #(
-    parameter DATA_WIDTH        = 8,
     parameter AXIS_DATA_WIDTH   = 64,
+    parameter DATA_WIDTH        = 8,
     parameter ARRAY_SIZE        = 8
 )(
     input wire clk,
@@ -58,7 +38,6 @@ module mlp_block_top #(
 );
 
     // Wires for internal processing
-    
     // AXI4-Stream control signals for weight_buffer_out
     wire [AXIS_DATA_WIDTH-1:0]  weight_buffer_out_tdata;
     wire                        weight_buffer_out_tvalid;
@@ -77,9 +56,9 @@ module mlp_block_top #(
     wire                        gelu_out_tready;
     wire                        gelu_out_tlast;
     
-    reg current_phase; // Used to alternate between Norm and GeLU outputs
+    reg current_phase;
 
-    // Weight Buffer to store weights and push data to axis_1
+    // Store weights and push data to axis_1
     weight_buffer #(
         .DATA_WIDTH(DATA_WIDTH),
         .AXIS_DATA_WIDTH(AXIS_DATA_WIDTH)
@@ -95,11 +74,7 @@ module mlp_block_top #(
         .m_axis_tdata       (weight_buffer_out_tdata),
         .m_axis_tvalid      (weight_buffer_out_tvalid),
         .m_axis_tlast       (weight_buffer_out_tlast),
-        .m_axis_tready      (weight_buffer_out_tready)//,
-        
-        //
-        //
-        //.enable             (enable)
+        .m_axis_tready      (weight_buffer_out_tready)
     );
 
     // Norm Block to normalize tokens
@@ -107,8 +82,8 @@ module mlp_block_top #(
         .DATA_WIDTH(DATA_WIDTH),
         .AXIS_DATA_WIDTH(AXIS_DATA_WIDTH)
     ) norm_inst (
-        .aclk(clk),
-        .aresetn(rst_n),
+        .clk                (clk),
+        .rst_n              (rst_n),
         
         .s_axis_tdata       (axis_data_1_in_tdata),
         .s_axis_tvalid      (axis_data_1_in_tvalid),
@@ -118,18 +93,13 @@ module mlp_block_top #(
         .m_axis_tdata       (norm_out_tdata),
         .m_axis_tvalid      (norm_out_tvalid),
         .m_axis_tlast       (norm_out_tlast),
-        .m_axis_tready      (norm_out_tready)//,
-        
-        //
-        //
-        //
-        //.enable(enable)
+        .m_axis_tready      (norm_out_tready)
     );
 
     // GeLU Block for activation, using axis_requant_b as input
     gelu_pwl gelu_inst (
-        .clk(clk),
-        .rst_n(rst_n),
+        .clk                (clk),
+        .rst_n              (rst_n),
         
         .s_axis_tdata       (axis_requant_b_tdata),
         .s_axis_tvalid      (axis_requant_b_tvalid),
@@ -139,12 +109,7 @@ module mlp_block_top #(
         .m_axis_tdata       (gelu_out_tdata),
         .m_axis_tvalid      (gelu_out_tvalid),
         .m_axis_tlast       (gelu_out_tlast),
-        .m_axis_tready      (gelu_out_tready)//,
-        
-        //
-        //
-        //
-        //.enable(enable)
+        .m_axis_tready      (gelu_out_tready)
     );
 
     // Logic to alternate between norm and GeLU outputs to axis_0
@@ -153,7 +118,7 @@ module mlp_block_top #(
     assign m_axis_0_tlast   = current_phase ? gelu_out_tlast    : norm_out_tlast;
     
     // Ensure that tready is only asserted when tvalid is valid and the receiver is ready
-    assign m_axis_0_tready = (m_axis_0_tvalid && m_axis_0_tready);  // Basic example to check if the receiver is ready for data
+    assign m_axis_0_tready = (m_axis_0_tvalid && m_axis_0_tready);
 
 endmodule
 
