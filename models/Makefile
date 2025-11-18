@@ -59,6 +59,7 @@ ptq: | $(LOG_DIR)
 		--calib-batches $(CALIB_BATCHES) \
 		--batch-size $(BATCH_SIZE) \
 		--observer-percentile $(OBSERVER_PERCENTILE) \
+		--device cuda \
 		$$( [ "$(PER_CHANNEL)" = "1" ] && echo "--per-channel" ) 2>&1 | tee $(LOG_FILE)
 
 golden:
@@ -115,6 +116,7 @@ qat_export: | $(LOG_DIR)
 		--calib-batches $(CALIB_BATCHES) \
 		--batch-size $(BATCH_SIZE) \
 		--observer-percentile $(OBSERVER_PERCENTILE) \
+		--device cuda \
 		--per-channel 2>&1 | tee $(QAT_EXPORT_LOG_FILE)
 
 help:

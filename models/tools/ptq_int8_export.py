@@ -76,7 +76,13 @@ def fuse_conv_bn_weight_bias(
     b_fused = bn_b + (conv_bias - bn_running_mean) * inv
     return w_fused.contiguous(), b_fused.contiguous()
 
-def get_model_and_cfg(cfg_path: str, img_size: int, num_classes: int):
+def get_model_and_cfg(
+    cfg_path: str,
+    img_size: int,
+    num_classes: int,
+    *,
+    device: torch.device,
+):
     # Build yacs config by mimicking CLI
     args = SimpleNamespace(
         cfg=cfg_path,
@@ -88,7 +94,7 @@ def get_model_and_cfg(cfg_path: str, img_size: int, num_classes: int):
         accumulation_steps=None,
         use_checkpoint=False,
         disable_amp=True,
-        only_cpu=True,
+        only_cpu=device.type == "cpu",
         output="output",
         tag="ptq",
         eval=False,
@@ -106,11 +112,12 @@ def get_model_and_cfg(cfg_path: str, img_size: int, num_classes: int):
     config.freeze()
 
     model = build_model(config)
+    model.to(device)
     model.eval()
     return model, config
 
-def safe_load_checkpoint(model: nn.Module, ckpt_path: str):
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+def safe_load_checkpoint(model: nn.Module, ckpt_path: str, device: torch.device):
+    ckpt = torch.load(ckpt_path, map_location=device)
     state = ckpt.get("model", ckpt)
     msg = model.load_state_dict(state, strict=False)
     return str(msg)
@@ -130,6 +137,7 @@ def collect_activation_scales(
     loader,
     max_batches: Optional[int],
     percentile: float,
+    device: torch.device,
 ) -> Dict[str, float]:
     """
     Collect activation scales by observing MODULE OUTPUTS with a forward hook,
@@ -171,6 +179,7 @@ def collect_activation_scales(
             desc=f"Calibration ({total_str} batches)",
             unit="batch",
         ):
+            x = x.to(device, non_blocking=True)
             _ = model(x)
 
     for h in handles:
@@ -463,12 +472,29 @@ def main():
         "--out-dir",
         required=True,
     )
+    ap.add_argument(
+        "--device",
+        default="cuda",
+        help='Device to run calibration on, e.g., "cuda", "cuda:0", or "cpu"',
+    )
 
     args = ap.parse_args()
 
-    # Build model (CPU) and load FP weights
-    model, cfg = get_model_and_cfg(args.cfg, args.img_size, args.num_classes)
-    print(safe_load_checkpoint(model, args.ckpt))
+    # Resolve device
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        print("CUDA not available, falling back to CPU.")
+        device = torch.device("cpu")
+    else:
+        device = torch.device(args.device)
+
+    # Build model and load FP weights
+    model, cfg = get_model_and_cfg(
+        args.cfg,
+        args.img_size,
+        args.num_classes,
+        device=device,
+    )
+    print(safe_load_checkpoint(model, args.ckpt, device))
 
     # Calibration loader
     tfm = mk_transform(args.img_size)
@@ -478,7 +504,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=10,
-        pin_memory=False,
+        pin_memory=device.type == "cuda",
     )
 
     # Collect activation scales
@@ -488,6 +514,7 @@ def main():
         loader,
         max_batches=max_batches,
         percentile=args.observer_percentile,
+        device=device,
     )
 
     # Export INT8 weights + scales
