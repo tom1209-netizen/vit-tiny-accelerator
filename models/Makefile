@@ -41,10 +41,16 @@ QAT_LR        ?= 1e-4
 QAT_WORKERS   ?= 8
 QAT_SAVE_CONVERTED ?= 0
 
+# Logging
+LOG_DIR ?= $(MODELS_DIR)/logs
+LOG_FILE ?= $(LOG_DIR)/ptq_$(shell date +%Y%m%d_%H%M%S).log
+QAT_LOG_FILE ?= $(LOG_DIR)/qat_$(shell date +%Y%m%d_%H%M%S).log
+QAT_EXPORT_LOG_FILE ?= $(LOG_DIR)/qat_export_$(shell date +%Y%m%d_%H%M%S).log
 
 .PHONY: ptq golden qdq_report eval qat qat_export help
 
-ptq:
+ptq: | $(LOG_DIR)
+	@echo "Logging to $(LOG_FILE)"
 	@$(PYTHON) $(MODELS_DIR)/tools/ptq_int8_export.py \
 		--cfg $(CFG) \
 		--ckpt $(CKPT) \
@@ -53,7 +59,7 @@ ptq:
 		--calib-batches $(CALIB_BATCHES) \
 		--batch-size $(BATCH_SIZE) \
 		--observer-percentile $(OBSERVER_PERCENTILE) \
-		$$( [ "$(PER_CHANNEL)" = "1" ] && echo "--per-channel" )
+		$$( [ "$(PER_CHANNEL)" = "1" ] && echo "--per-channel" ) 2>&1 | tee $(LOG_FILE)
 
 golden:
 	@$(PYTHON) $(MODELS_DIR)/tools/cpu_golden_infer.py \
@@ -83,7 +89,8 @@ qdq_report:
 		$$( [ -n "$(QDQ_SCALES_JSON)" ] && echo "--scales-json $(QDQ_SCALES_JSON)" ) \
 		$$( [ -n "$(QDQ_JSON)" ] && echo "--save-json $(QDQ_JSON)" )
 
-qat:
+qat: | $(LOG_DIR)
+	@echo "Logging to $(QAT_LOG_FILE)"
 	@$(PYTHON) $(MODELS_DIR)/tools/qat_train.py \
 		--cfg $(CFG) \
 		--train-dir $(QAT_TRAIN_DIR) \
@@ -96,9 +103,10 @@ qat:
 		--num-classes $(NUM_CLASSES) \
 		--workers $(QAT_WORKERS) \
 		$$( [ -n "$(CKPT)" ] && echo "--ckpt $(CKPT)" ) \
-		$$( [ "$(QAT_SAVE_CONVERTED)" = "1" ] && echo "--save-converted" )
+		$$( [ "$(QAT_SAVE_CONVERTED)" = "1" ] && echo "--save-converted" ) 2>&1 | tee $(QAT_LOG_FILE)
 
-qat_export:
+qat_export: | $(LOG_DIR)
+	@echo "Logging to $(QAT_EXPORT_LOG_FILE)"
 	@$(PYTHON) $(MODELS_DIR)/tools/ptq_int8_export.py \
 		--cfg $(CFG) \
 		--ckpt $(QAT_OUT_DIR)/qat_best.pth \
@@ -107,7 +115,7 @@ qat_export:
 		--calib-batches $(CALIB_BATCHES) \
 		--batch-size $(BATCH_SIZE) \
 		--observer-percentile $(OBSERVER_PERCENTILE) \
-		--per-channel
+		--per-channel 2>&1 | tee $(QAT_EXPORT_LOG_FILE)
 
 help:
 	@echo ""
@@ -120,3 +128,5 @@ help:
 	@echo "** make qat_export : export INT8 from the best QAT ckpt"
 	@echo "**********************************************************"
 
+$(LOG_DIR):
+	@mkdir -p $(LOG_DIR)

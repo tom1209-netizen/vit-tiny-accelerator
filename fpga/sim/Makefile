@@ -15,7 +15,6 @@ COMMANDS := all all_wave all_cov \
 			wave \
 			gen_cov gen_html \
 			clean \
-			fast \
 			help
 
 TEST_ARG := $(filter-out $(COMMANDS),$(ARGS))
@@ -30,11 +29,11 @@ endif
 
 #==============================
 
-all: build run
+all: clean build run
 
-all_wave: build run wave
+all_wave: clean build run wave
 
-all_cov: build_cov run_cov
+all_cov: clean build_cov run_cov
 
 build:
 	vlib work
@@ -75,11 +74,6 @@ clean:
 	rm -rf transcript
 	rm -rf *.ucdb
 
-fast: 
-	$(MAKE) clean
-	clear
-	$(MAKE) all_wave TESTNAME=$(TESTNAME) TB_NAME=$(TB_NAME) MEALY_FSM=$(MEALY_FSM)
-
 help:
 	@echo ""
 	@echo "****************************************"
@@ -93,7 +87,6 @@ help:
 	@echo "** make wave     : open waveform"
 	@echo "** make gen_cov  : merge, generate coverage data base and text coverage report"
 	@echo "** make gen_cov  : merge, gemerate coverage data base and html coverage report"
-	@echo "** make fast     : clean, build and run simulation with waveform"
 	@echo "** make help     : print this help message"
 	@echo "****************************************"
 	@echo ""

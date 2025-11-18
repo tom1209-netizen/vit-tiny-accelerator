@@ -1,4 +1,4 @@
-import argparse, os, json, math, struct, sys
+import argparse, os, json, math, struct, sys, itertools
 
 from types import SimpleNamespace
 from collections import OrderedDict, defaultdict
@@ -9,6 +9,7 @@ import torch.nn as nn
 import torchvision.transforms as T
 import torchvision.datasets as dsets
 import numpy as np
+from tqdm import tqdm
 
 # Ensure project root (parent of `models`) is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -159,11 +160,17 @@ def collect_activation_scales(
     max_batches = max_batches if max_batches is not None and max_batches > 0 else None
     total_str = str(max_batches) if max_batches is not None else "all"
 
+    iterable = loader
+    if max_batches is not None:
+        iterable = itertools.islice(loader, max_batches)
+
     with torch.no_grad():
-        for i, (x, _) in enumerate(loader):
-            if max_batches is not None and i >= max_batches:
-                break
-            print(f"Calib batch {i + 1}/{total_str}")
+        for x, _ in tqdm(
+            iterable,
+            total=max_batches if max_batches is not None else len(loader),
+            desc=f"Calibration ({total_str} batches)",
+            unit="batch",
+        ):
             _ = model(x)
 
     for h in handles:

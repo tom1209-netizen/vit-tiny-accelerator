@@ -3,3 +3,4 @@ yacs
 termcolor
 wandb
 gdown
+tqdm
