@@ -5,21 +5,38 @@
 - [Vision Transformer (Tiny-ViT) Accelerator on Zynq-7000](#vision-transformer-tiny-vit-accelerator-on-zynq-7000)
   - [Table of Contents](#table-of-contents)
   - [1. Abstract](#1-abstract)
-  - [2. System Overview](#2-system-overview)
-    - [2.1 Goals \& Metrics](#21-goals--metrics)
-    - [2.2 Hardware/Software Partition](#22-hardwaresoftware-partition)
-    - [2.3 Top-Level Architecture](#23-top-level-architecture)
-      - [2.3.1 Processing System (PS)](#231-processing-system-ps)
-      - [2.3.2 Programmable Logic (PL)](#232-programmable-logic-pl)
-  - [3. TinyViT-5M Model Architecture](#3-tinyvit-5m-model-architecture)
-    - [3.1 Model Parameters (TinyViT-5M)](#31-model-parameters-tinyvit-5m)
-    - [3.2 Architectural Stages](#32-architectural-stages)
-      - [1. Convolutional Stem (PatchEmbed)](#1-convolutional-stem-patchembed)
-      - [2. Stage 1 – Convolutional Layer](#2-stage-1--convolutional-layer)
-      - [3. Stages 2–4 – Transformer Layers](#3-stages-24--transformer-layers)
-      - [4. Downsampling (PatchMerging)](#4-downsampling-patchmerging)
-      - [5. Classifier Head](#5-classifier-head)
-    - [3.3 Hardware Relevance Summary](#33-hardware-relevance-summary)
+  - [2. Theory and Background](#2-theory-and-background)
+    - [2.1 Architectural Paradigm: The Hybrid Transformer](#21-architectural-paradigm-the-hybrid-transformer)
+    - [2.2 Core Components](#22-core-components)
+      - [2.2.1 The Convolutional Stem](#221-the-convolutional-stem)
+      - [2.2.2 The TinyViT Block (Hybrid Attention)](#222-the-tinyvit-block-hybrid-attention)
+      - [2.2.3 Convolutional Patch Merging](#223-convolutional-patch-merging)
+    - [2.3 Data Flow and Dimensionality Analysis](#23-data-flow-and-dimensionality-analysis)
+      - [Step 1: The Stem (4x Downsampling)](#step-1-the-stem-4x-downsampling)
+      - [Step 2: Stage 0 (Convolutional Processing)](#step-2-stage-0-convolutional-processing)
+      - [Step 3: Stage 1 (Transformer / TinyViT Block)](#step-3-stage-1-transformer--tinyvit-block)
+      - [Step 4: Stage 2 (Deep Semantic Processing)](#step-4-stage-2-deep-semantic-processing)
+      - [Step 5: Stage 3 \& Classifier Head](#step-5-stage-3--classifier-head)
+    - [2.4 Mathematical Formulation](#24-mathematical-formulation)
+      - [2.4.1 Decoupled Window Attention](#241-decoupled-window-attention)
+      - [2.4.2 Symmetric Relative Position Bias](#242-symmetric-relative-position-bias)
+      - [2.4.3 Batch Normalization Fusion](#243-batch-normalization-fusion)
+    - [2.5 Hardware-Oriented Quantization Scheme](#25-hardware-oriented-quantization-scheme)
+    - [2.6 TinyViT-5M Model Architecture](#26-tinyvit-5m-model-architecture)
+      - [2.6.1 Model Parameters (TinyViT-5M)](#261-model-parameters-tinyvit-5m)
+      - [2.6.2 Architectural Stages](#262-architectural-stages)
+        - [1. Convolutional Stem (PatchEmbed)](#1-convolutional-stem-patchembed)
+        - [2. Stage 1 – Convolutional Layer](#2-stage-1--convolutional-layer)
+        - [3. Stages 2–4 – Transformer Layers](#3-stages-24--transformer-layers)
+        - [4. Downsampling (PatchMerging)](#4-downsampling-patchmerging)
+        - [5. Classifier Head](#5-classifier-head)
+      - [2.6.3 Hardware Relevance Summary](#263-hardware-relevance-summary)
+  - [3. System Overview](#3-system-overview)
+    - [3.1 Goals \& Metrics](#31-goals--metrics)
+    - [3.2 Hardware/Software Partition](#32-hardwaresoftware-partition)
+    - [3.3 Top-Level Architecture](#33-top-level-architecture)
+      - [3.3.1 Processing System (PS)](#331-processing-system-ps)
+      - [3.3.2 Programmable Logic (PL)](#332-programmable-logic-pl)
   - [4. Global Design Constraints](#4-global-design-constraints)
     - [4.1 Clocking \& Reset](#41-clocking--reset)
     - [4.2 Numerics \& Data Representation](#42-numerics--data-representation)
@@ -58,45 +75,122 @@ Recent advances in Vision Transformers (ViTs) have established them as a powerfu
 
 This work presents a hardware accelerator design for TinyViT-5M inference, implemented entirely in Verilog RTL on the Xilinx Zynq-7000 SoC. The proposed system restructures TinyViT’s hierarchical architecture into a quantized and tiled dataflow tailored for FPGA execution. Core computational components—including patch embedding, windowed multi-head self-attention, and MLP feed-forward layers—are mapped to a unified integer pipeline employing INT8 arithmetic with INT32 accumulation. A centralized scheduling finite state machine coordinates computation, data movement, and quantization across stages via AXI4 streaming interfaces and on-chip tiling buffers, minimizing off-chip bandwidth usage.
 
-## 2. System Overview
+## 2. Theory and Background
 
-### 2.1 Goals & Metrics
+### 2.1 Architectural Paradigm: The Hybrid Transformer
 
-- **Throughput:** >=1 FPS baseline; stretch 2–5 FPS on Z7-20.  
-- **Accuracy:** <=2% drop vs. INT8 golden model.  
-- **Implementation:** Verilog RTL
+Standard Vision Transformers (ViT) process images by flattening them into a sequence of patches and applying global self-attention. While powerful, this approach has two major limitations for embedded deployment:
 
-### 2.2 Hardware/Software Partition
+1. **Quadratic Complexity:** Global attention scales as $O(N^2)$ with the number of pixels.
+2. **Lack of Inductive Bias:** ViTs lack the inherent understanding of locality and translation invariance that Convolutional Neural Networks (CNNs) possess, requiring massive datasets to train effectively.
 
-- **PS (ARM):** config, DMA setup, I/O management, post-processing.  
-- **PL:** compute kernels (GEMM, Softmax, GELU, Norm), buffers, control FSMs.  
-- **Memory:** External DDR for images/weights/results.
+**TinyViT** addresses these by adopting a **Hybrid Hierarchical Architecture**. It reintroduces Convolutions for early feature extraction (the "Stem") and uses Window-based Attention for semantic reasoning. This structure creates a multi-scale representation similar to a ResNet ($H/4 \to H/8 \to H/16 \to H/32$), making it highly suitable for dense prediction tasks and efficient hardware implementation.
 
-### 2.3 Top-Level Architecture
+### 2.2 Core Components
 
-![Top level diagram](./figure/block_diagram/top.png)
-*Figure 1: Top level diagram*
+#### 2.2.1 The Convolutional Stem
 
-#### 2.3.1 Processing System (PS)
+Unlike the standard ViT which "chops" an image into non-overlapping patches, TinyViT uses a **Convolutional Stem**. This consists of two stacked $3 \times 3$ convolutions with stride 2. This approach preserves local continuity at the pixel level and stabilizes training by providing a robust feature map to the subsequent Transformer layers.
 
-The PS runs the main control firmware on its ARM core. Its primary responsibilities include:
+#### 2.2.2 The TinyViT Block (Hybrid Attention)
 
-- **Memory Management:** Allocating and managing DDR memory buffers for input images, model weights, and output results.
-- **Accelerator Control:** Programming the accelerator's control registers via the AXI-Lite interface to set parameters and start computation.
-- **Data Movement:** Configuring AXI DMA transfer descriptors to move data between DDR and the PL.
-- **Supervision:** Handling interrupts, monitoring for timeouts, and managing error recovery.
-- **Post-processing:** Optionally performing final computations on the results, such as argmax to find the classification.
+The fundamental building block of the network replaces the complex "Shifted Window" mechanism of Swin Transformers with a simpler, hardware-efficient design. A single block consists of three sequential operations:
 
-#### 2.3.2 Programmable Logic (PL)
+1. **Window Attention:** Captures long-range dependencies within a local $7 \times 7$ grid.
+2. **Local Convolution:** A $3 \times 3$ Depthwise Convolution is inserted between the Attention and MLP layers. This "leaks" information across the isolated window boundaries, effectively connecting the global receptive field without requiring memory-intensive window-shifting operations.
+3. **MLP:** A standard feed-forward network for feature transformation.
 
-The PL contains the custom hardware for the ViT computation.
+#### 2.2.3 Convolutional Patch Merging
 
-- **ViT Accelerator Core:** A dedicated RTL module containing the compute engines (GEMM, Softmax, Norm, GELU), on-chip tile buffers, and control FSMs that orchestrate the layer computations.
-- **AXI DMA Engine:** Provides high-bandwidth data transfer between the external DDR and the accelerator core over AXI-Stream interfaces.
-  - **MM2S (Memory-to-Stream):** Reads input tokens and weights from DDR and streams them into the accelerator.
-  - **S2MM (Stream-to-Memory):** Captures processed results from the accelerator and writes them back to DDR.
+To reduce resolution between stages, the model uses a strided convolution layer. Unlike the Swin Transformer (which uses pixel-unshuffling/concatenation), this implementation uses a $3 \times 3$ Depthwise Convolution with `stride=2` followed by a $1 \times 1$ pointwise projection. This is computationally friendlier for the FPGA's systolic array as it avoids complex memory addressing logic.
 
-## 3. TinyViT-5M Model Architecture
+### 2.3 Data Flow and Dimensionality Analysis
+
+This section details the transformation of the input tensor through the network's four stages. The configuration follows the `tiny_vit_5m_224` specification found in the codebase.
+
+**Input:** RGB Image tensor of shape $(B, 3, 224, 224)$.
+
+#### Step 1: The Stem (4x Downsampling)
+
+The input passes through the `PatchEmbed` module, which contains two `Conv2d_BN` layers with stride 2.
+
+- Input: $224 \times 224 \times 3$
+- Conv 1 (Stride 2): $112 \times 112 \times 48$
+- Conv 2 (Stride 2): $56 \times 56 \times 96$
+- **Output Stage 0 Start:** $56 \times 56$ resolution with $C=96$ channels.
+
+#### Step 2: Stage 0 (Convolutional Processing)
+
+This stage uses `MBConv` blocks (MobileNet-style) rather than Transformers. This is an optimization for high-resolution feature maps where Attention is too expensive.
+
+- **Processing:** The $56 \times 56$ feature map passes through 2 MBConv blocks. Resolution remains constant.
+- **Downsample:** At the end of Stage 0, a `PatchMerging` layer is applied.
+  - Math: Resolution $/ 2$, Channels $\times 2$.
+- **Output Stage 1 Start:** $28 \times 28$ resolution with $C=192$ channels.
+
+#### Step 3: Stage 1 (Transformer / TinyViT Block)
+
+This stage processes features using the Hybrid TinyViT Block.
+
+- **Windowing:** The $28 \times 28$ image is logically partitioned into sixteen $7 \times 7$ windows.
+- **Attention:** Self-attention is computed locally within these 16 windows.
+- **Local Conv:** A $3 \times 3$ convolution mixes information across window boundaries.
+- **Downsample:** `PatchMerging` is applied.
+- **Output Stage 2 Start:** $14 \times 14$ resolution with $C=384$ channels.
+
+#### Step 4: Stage 2 (Deep Semantic Processing)
+
+This is typically the deepest stage (6 blocks).
+
+- **Windowing:** The $14 \times 14$ image is partitioned into four $7 \times 7$ windows.
+- **Processing:** Features pass through 6 layers of TinyViT blocks.
+- **Downsample:** `PatchMerging` is applied.
+- **Output Stage 3 Start:** $7 \times 7$ resolution with $C=768$ channels.
+
+#### Step 5: Stage 3 & Classifier Head
+
+The final stage operates on the coarsest semantic features.
+
+- **Processing:** The $7 \times 7$ grid is treated as a single window (or $1 \times 1$ window grid).
+- **Pooling:** A Global Average Pooling (GAP) operation collapses the spatial dimensions:
+    $$\frac{1}{H \times W} \sum_{h, w} X_{h,w,c} \rightarrow (1, 1, 768)$$
+- **Classification:** A final Linear Layer projects the 768 features to the class logits (e.g., 1000 classes).
+- **Final Output:** A vector of size $(1, 1000)$.
+
+### 2.4 Mathematical Formulation
+
+#### 2.4.1 Decoupled Window Attention
+
+For the FPGA implementation, we utilize a decoupled attention mechanism where the dimension of the Value head ($d_v$) is decoupled from the Query/Key heads ($d_k$). The attention score for a window is calculated as:
+
+$$\text{Attn} = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d_k}} + B_{relative}\right) V$$
+
+This separation allows us to keep the costly $QK^T$ matrix multiplication small (saving DSP slices) while transporting a larger payload in $V$ (preserving accuracy).
+
+#### 2.4.2 Symmetric Relative Position Bias
+
+Instead of absolute position embeddings, which fail when image resolution changes, we utilize a learnable relative bias $B$. For any two pixels $i$ and $j$ in a window, their attention score is modulated by their spatial distance $(\Delta x, \Delta y)$.
+
+In our implementation, this is optimized via a **Lookup Table (LUT)** approach. During inference, the bias matrix is pre-calculated and added directly to the attention logits prior to the Softmax operation.
+
+#### 2.4.3 Batch Normalization Fusion
+
+To maximize inference throughput, all `Conv2d_BN` blocks defined in the training code are mathematically fused. The batch normalization parameters ($\gamma, \beta, \mu, \sigma$) are absorbed into the convolution weights ($W$) and bias ($b$) offline:
+
+$$W_{fused} = W \cdot \frac{\gamma}{\sqrt{\sigma^2 + \epsilon}}, \quad b_{fused} = \beta - \mu \cdot \frac{\gamma}{\sqrt{\sigma^2 + \epsilon}}$$
+
+This removes the Batch Norm layer entirely from the FPGA runtime, reducing memory bandwidth requirements.
+
+### 2.5 Hardware-Oriented Quantization Scheme
+
+The Zynq-7000 FPGA architecture favors fixed-point arithmetic. The model is quantized to **INT8** for weights and activations, using **INT32** for accumulation to prevent overflow.
+
+The quantization function is defined as:
+$$q = \text{clamp}\left(\lfloor \frac{r}{S} \rfloor + Z, -128, 127 \right)$$
+
+Where $r$ is the real value, $S$ is the scale factor, and $Z$ is the zero-point. The system employs **Per-Tensor Quantization** for activations (one scale per tensor) and **Per-Channel Quantization** for weights (one scale per output channel) to balance hardware complexity with model accuracy. Re-quantization (converting INT32 back to INT8) occurs after every Residual Addition block.
+
+### 2.6 TinyViT-5M Model Architecture
 
 To understand the hardware requirements, it is essential to first analyze the target neural network.  
 The accelerator is designed for **TinyViT-5M**, a compact, high-performance hybrid vision model.
@@ -110,7 +204,7 @@ This hybrid design is key to TinyViT’s computational efficiency — and maps d
 
 The model is organized into a **convolutional stem**, **four sequential stages**, and a **classifier head**.
 
-### 3.1 Model Parameters (TinyViT-5M)
+#### 2.6.1 Model Parameters (TinyViT-5M)
 
 The target variant is `tiny_vit_5m_224`, which determines the compute and memory footprint of the accelerator.
 
@@ -123,22 +217,22 @@ The target variant is `tiny_vit_5m_224`, which determines the compute and memory
 | **Attention Heads**    | Multi-head attention configuration    | [2, 4, 5, 10]       |
 | **Attention Windows**  | Window sizes per stage                | [7, 7, 14, 7]       |
 
-### 3.2 Architectural Stages
+#### 2.6.2 Architectural Stages
 
 The data flows through the network as follows:
 
-#### 1. Convolutional Stem (PatchEmbed)
+##### 1. Convolutional Stem (PatchEmbed)
 
 The model begins with a **PatchEmbed** module.  
 Instead of a single large convolution, TinyViT uses **two sequential 3×3 convolutions** (each with stride 2, followed by BatchNorm and GELU).  
 This down-samples the image by 4× and forms the initial token embeddings.
 
-#### 2. Stage 1 – Convolutional Layer
+##### 2. Stage 1 – Convolutional Layer
 
 This stage is **purely convolutional**, built from **MBConv** (Mobile Inverted Bottleneck) blocks inspired by MobileNetV2.  
 It efficiently processes high-resolution, low-level features without the quadratic cost of self-attention.
 
-#### 3. Stages 2–4 – Transformer Layers
+##### 3. Stages 2–4 – Transformer Layers
 
 These are the **core transformer stages**.  
 Each stage is a stack of **TinyViTBlock** modules — the primary target of our accelerator.
@@ -205,7 +299,7 @@ $$
 X_{\text{out}} = X'' + X_{\text{mlp}}
 $$
 
-#### 4. Downsampling (PatchMerging)
+##### 4. Downsampling (PatchMerging)
 
 Between stages, **PatchMerging** reduces spatial resolution while increasing channel width.  
 It consists of **1×1**, **3×3 (stride=2)**, and **1×1** convolutions.  
@@ -214,7 +308,7 @@ Example transitions:
 - 56×56 → 28×28 spatially  
 - 64 → 128 channels
 
-#### 5. Classifier Head
+##### 5. Classifier Head
 
 Finally, all token outputs are **average pooled**, passed through a **LayerNorm**, and a final **Linear layer** (GEMM) produces the classification logits.
 
@@ -224,7 +318,7 @@ $$
 
 This is the only layer executed on the **ARM core** (optional) or the **GEMM hardware unit** for full acceleration.
 
-### 3.3 Hardware Relevance Summary
+#### 2.6.3 Hardware Relevance Summary
 
 | **Model Component**       | **Hardware Module**           | **Operation Type**               |
 | ------------------------- | ----------------------------- | -------------------------------- |
@@ -233,6 +327,44 @@ This is the only layer executed on the **ARM core** (optional) or the **GEMM har
 | MLP (fc1, GELU, fc2)      | MLP Block + GEMM Core         | Matrix Multiply + Non-linear     |
 | Residual / LayerNorm      | Residual + Norm Units         | Elementwise Add / Normalization  |
 | Classifier Head           | GEMM Core                     | Fully Connected Layer            |
+
+## 3. System Overview
+
+### 3.1 Goals & Metrics
+
+- **Throughput:** >=1 FPS baseline; stretch 2–5 FPS on Z7-20.  
+- **Accuracy:** <=2% drop vs. INT8 golden model.  
+- **Implementation:** Verilog RTL
+
+### 3.2 Hardware/Software Partition
+
+- **PS (ARM):** config, DMA setup, I/O management, post-processing.  
+- **PL:** compute kernels (GEMM, Softmax, GELU, Norm), buffers, control FSMs.  
+- **Memory:** External DDR for images/weights/results.
+
+### 3.3 Top-Level Architecture
+
+![Top level diagram](./figure/block_diagram/top.png)
+*Figure 1: Top level diagram*
+
+#### 3.3.1 Processing System (PS)
+
+The PS runs the main control firmware on its ARM core. Its primary responsibilities include:
+
+- **Memory Management:** Allocating and managing DDR memory buffers for input images, model weights, and output results.
+- **Accelerator Control:** Programming the accelerator's control registers via the AXI-Lite interface to set parameters and start computation.
+- **Data Movement:** Configuring AXI DMA transfer descriptors to move data between DDR and the PL.
+- **Supervision:** Handling interrupts, monitoring for timeouts, and managing error recovery.
+- **Post-processing:** Optionally performing final computations on the results, such as argmax to find the classification.
+
+#### 3.3.2 Programmable Logic (PL)
+
+The PL contains the custom hardware for the ViT computation.
+
+- **ViT Accelerator Core:** A dedicated RTL module containing the compute engines (GEMM, Softmax, Norm, GELU), on-chip tile buffers, and control FSMs that orchestrate the layer computations.
+- **AXI DMA Engine:** Provides high-bandwidth data transfer between the external DDR and the accelerator core over AXI-Stream interfaces.
+  - **MM2S (Memory-to-Stream):** Reads input tokens and weights from DDR and streams them into the accelerator.
+  - **S2MM (Stream-to-Memory):** Captures processed results from the accelerator and writes them back to DDR.
 
 ## 4. Global Design Constraints
 

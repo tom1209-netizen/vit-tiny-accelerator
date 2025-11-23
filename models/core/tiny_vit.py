@@ -29,8 +29,11 @@ class Conv2d_BN(torch.nn.Sequential):
     def __init__(self, a, b, ks=1, stride=1, pad=0, dilation=1,
                  groups=1, bn_weight_init=1):
         super().__init__()
+        # Convolution
         self.add_module('c', torch.nn.Conv2d(
             a, b, ks, stride, pad, dilation, groups, bias=False))
+        
+        # BatchNorm
         bn = torch.nn.BatchNorm2d(b)
         torch.nn.init.constant_(bn.weight, bn_weight_init)
         torch.nn.init.constant_(bn.bias, 0)
@@ -38,11 +41,18 @@ class Conv2d_BN(torch.nn.Sequential):
 
     @torch.no_grad()
     def fuse(self):
+        # get modules value
         c, bn = self._modules.values()
+
+        # weight_fused
         w = bn.weight / (bn.running_var + bn.eps)**0.5
         w = c.weight * w[:, None, None, None]
+
+        # bias_fused
         b = bn.bias - bn.running_mean * bn.weight / \
             (bn.running_var + bn.eps)**0.5
+
+        # create fused conv
         m = torch.nn.Conv2d(w.size(1) * self.c.groups, w.size(
             0), w.shape[2:], stride=self.c.stride, padding=self.c.padding, dilation=self.c.dilation, groups=self.c.groups)
         m.weight.data.copy_(w)
@@ -65,16 +75,15 @@ class PatchEmbed(nn.Module):
     def __init__(self, in_chans, embed_dim, resolution, activation):
         super().__init__()
         img_size: Tuple[int, int] = to_2tuple(resolution)
-        self.patches_resolution = (img_size[0] // 4, img_size[1] // 4)
-        self.num_patches = self.patches_resolution[0] * \
-            self.patches_resolution[1]
+        self.patches_resolution = (img_size[0] // 4, img_size[1] // 4) # 4x downsample
+        self.num_patches = self.patches_resolution[0] * self.patches_resolution[1] # total patches
         self.in_chans = in_chans
         self.embed_dim = embed_dim
         n = embed_dim
         self.seq = nn.Sequential(
-            Conv2d_BN(in_chans, n // 2, 3, 2, 1),
+            Conv2d_BN(in_chans, n // 2, 3, 2, 1), # 2x downsample
             activation(),
-            Conv2d_BN(n // 2, n, 3, 2, 1),
+            Conv2d_BN(n // 2, n, 3, 2, 1), # 2x downsample
         )
 
     def forward(self, x):
@@ -89,13 +98,16 @@ class MBConv(nn.Module):
         self.hidden_chans = int(in_chans * expand_ratio)
         self.out_chans = out_chans
 
+        # Expansion phase
         self.conv1 = Conv2d_BN(in_chans, self.hidden_chans, ks=1)
         self.act1 = activation()
 
+        # Depthwise convolution
         self.conv2 = Conv2d_BN(self.hidden_chans, self.hidden_chans,
                                ks=3, stride=1, pad=1, groups=self.hidden_chans)
         self.act2 = activation()
 
+        # Projection phase
         self.conv3 = Conv2d_BN(
             self.hidden_chans, out_chans, ks=1, bn_weight_init=0.0)
         self.act3 = activation()
@@ -130,9 +142,9 @@ class PatchMerging(nn.Module):
         self.dim = dim
         self.out_dim = out_dim
         self.act = activation()
-        self.conv1 = Conv2d_BN(dim, out_dim, 1, 1, 0)
-        self.conv2 = Conv2d_BN(out_dim, out_dim, 3, 2, 1, groups=out_dim)
-        self.conv3 = Conv2d_BN(out_dim, out_dim, 1, 1, 0)
+        self.conv1 = Conv2d_BN(dim, out_dim, 1, 1, 0) # pointwise conv
+        self.conv2 = Conv2d_BN(out_dim, out_dim, 3, 2, 1, groups=out_dim) # depthwise conv
+        self.conv3 = Conv2d_BN(out_dim, out_dim, 1, 1, 0) # pointwise conv
 
     def forward(self, x):
         # Reshape token sequence [B, HW, C] into NCHW; avoids tensor-dependent control flow for FX/QAT.
@@ -223,23 +235,27 @@ class Attention(torch.nn.Module):
         super().__init__()
         # (h, w)
         assert isinstance(resolution, tuple) and len(resolution) == 2
-        self.num_heads = num_heads
-        self.scale = key_dim ** -0.5
-        self.key_dim = key_dim
-        self.nh_kd = nh_kd = key_dim * num_heads
-        self.d = int(attn_ratio * key_dim)
-        self.dh = int(attn_ratio * key_dim) * num_heads
-        self.attn_ratio = attn_ratio
-        h = self.dh + nh_kd * 2
+        self.num_heads = num_heads # number of attention heads
+        self.scale = key_dim ** -0.5 # scale factor
+        self.key_dim = key_dim # dimension of K and Q
+        self.nh_kd = nh_kd = key_dim * num_heads # total dimension of K and Q
+        self.d = int(attn_ratio * key_dim) # dimension of V
+        self.dh = int(attn_ratio * key_dim) * num_heads # total dimension of V
+        self.attn_ratio = attn_ratio # ratio of dim of V to dim of K/Q
+        h = self.dh + nh_kd * 2 # total dimension of Q, K, V
 
-        self.norm = nn.LayerNorm(dim)
-        self.qkv = nn.Linear(dim, h)
-        self.proj = nn.Linear(self.dh, dim)
+        self.norm = nn.LayerNorm(dim) # LayerNorm before attention
+        self.qkv = nn.Linear(dim, h) # Create Q, K, V matrices
+        self.proj = nn.Linear(self.dh, dim) # Output projection
 
+        # Create attention biases
+        # Create a list of all possible attention offsets
         points = list(itertools.product(
-            range(resolution[0]), range(resolution[1])))
-        N = len(points)
-        attention_offsets = {}
+            range(resolution[0]), range(resolution[1]))) # all points in the feature map
+        N = len(points) 
+
+        # Create a dictionary to hold unique attention offsets
+        attention_offsets = {} 
         idxs = []
         for p1 in points:
             for p2 in points:
@@ -247,6 +263,8 @@ class Attention(torch.nn.Module):
                 if offset not in attention_offsets:
                     attention_offsets[offset] = len(attention_offsets)
                 idxs.append(attention_offsets[offset])
+
+        # Register attention biases and their corresponding indices
         self.attention_biases = torch.nn.Parameter(
             torch.zeros(num_heads, len(attention_offsets)))
         self.register_buffer('attention_bias_idxs',
