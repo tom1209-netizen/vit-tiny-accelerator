@@ -115,9 +115,9 @@ This section details the transformation of the input tensor through the network'
 The input passes through the `PatchEmbed` module, which contains two `Conv2d_BN` layers with stride 2.
 
 - Input: $224 \times 224 \times 3$
-- Conv 1 (Stride 2): $112 \times 112 \times 48$
-- Conv 2 (Stride 2): $56 \times 56 \times 96$
-- **Output Stage 0 Start:** $56 \times 56$ resolution with $C=96$ channels.
+- Conv 1 (Stride 2): $112 \times 112 \times 32$
+- Conv 2 (Stride 2): $56 \times 56 \times 64$
+- **Output Stage 0 Start:** $56 \times 56$ resolution with $C=64$ channels.
 
 #### Step 2: Stage 0 (Convolutional Processing)
 
@@ -125,36 +125,37 @@ This stage uses `MBConv` blocks (MobileNet-style) rather than Transformers. This
 
 - **Processing:** The $56 \times 56$ feature map passes through 2 MBConv blocks. Resolution remains constant.
 - **Downsample:** At the end of Stage 0, a `PatchMerging` layer is applied.
-  - Math: Resolution $/ 2$, Channels $\times 2$.
-- **Output Stage 1 Start:** $28 \times 28$ resolution with $C=192$ channels.
+  - Math: Resolution $/ 2$, Channels $64 \to 128$.
+- **Output Stage 1 Start:** $28 \times 28$ resolution with $C=128$ channels.
 
 #### Step 3: Stage 1 (Transformer / TinyViT Block)
 
 This stage processes features using the Hybrid TinyViT Block.
 
 - **Windowing:** The $28 \times 28$ image is logically partitioned into sixteen $7 \times 7$ windows.
-- **Attention:** Self-attention is computed locally within these 16 windows.
-- **Local Conv:** A $3 \times 3$ convolution mixes information across window boundaries.
+- **Processing:** Features pass through 2 layers of TinyViT blocks.
 - **Downsample:** `PatchMerging` is applied.
-- **Output Stage 2 Start:** $14 \times 14$ resolution with $C=384$ channels.
+  - Math: Resolution $/ 2$, Channels $128 \to 160$.
+- **Output Stage 2 Start:** $14 \times 14$ resolution with $C=160$ channels.
 
 #### Step 4: Stage 2 (Deep Semantic Processing)
 
 This is typically the deepest stage (6 blocks).
 
-- **Windowing:** The $14 \times 14$ image is partitioned into four $7 \times 7$ windows.
+- **Windowing:** The $14 \times 14$ image is treated as a single $14 \times 14$ window (Window Size = 14).
 - **Processing:** Features pass through 6 layers of TinyViT blocks.
 - **Downsample:** `PatchMerging` is applied.
-- **Output Stage 3 Start:** $7 \times 7$ resolution with $C=768$ channels.
+  - Math: Resolution $/ 2$, Channels $160 \to 320$.
+- **Output Stage 3 Start:** $7 \times 7$ resolution with $C=320$ channels.
 
 #### Step 5: Stage 3 & Classifier Head
 
 The final stage operates on the coarsest semantic features.
 
-- **Processing:** The $7 \times 7$ grid is treated as a single window (or $1 \times 1$ window grid).
+- **Processing:** The $7 \times 7$ grid is treated as a single window.
 - **Pooling:** A Global Average Pooling (GAP) operation collapses the spatial dimensions:
-    $$\frac{1}{H \times W} \sum_{h, w} X_{h,w,c} \rightarrow (1, 1, 768)$$
-- **Classification:** A final Linear Layer projects the 768 features to the class logits (e.g., 1000 classes).
+    $$\frac{1}{H \times W} \sum_{h, w} X_{h,w,c} \rightarrow (1, 1, 320)$$
+- **Classification:** A final Linear Layer projects the 320 features to the class logits (e.g., 1000 classes).
 - **Final Output:** A vector of size $(1, 1000)$.
 
 ### 2.4 Mathematical Formulation
@@ -316,7 +317,7 @@ $$
 \text{logits} = \text{Linear}(\text{AvgPool}(\text{LayerNorm}(X_{\text{out}})))
 $$
 
-This is the only layer executed on the **ARM core** (optional) or the **GEMM hardware unit** for full acceleration.
+This projects the final 320-dimensional feature vector to the 1000 class scores. This is the only layer executed on the **ARM core** (optional) or the **GEMM hardware unit** for full acceleration.
 
 #### 2.6.3 Hardware Relevance Summary
 
@@ -624,7 +625,7 @@ y_int8 = scaled_32[7:0]
 
 | **Signal Name**                      | **Signal Width**   | **Direction** | **Source/Destination**              | **Description**                                                           |
 | ------------------------------------ | ------------------ | ------------- | ----------------------------------- | ------------------------------------------------------------------------- |
-| **AXI Lite Regs**                    |                    |               |                                     |                                                                           |
+| **AXI Lite Regs**                   |                    |               |                                     |                                                                           |
 | `status[2:0]`                        | 3 bits             | Output        | `axi_lite_regs`                     | Scheduler status flags (e.g., idle, busy, done).                          |
 | `start`                              | 1 bit              | Input         | `axi_lite_regs`                     | Trigger to start the scheduler operation.                                 |
 | `soft_reset`                         | 1 bit              | Input         | `axi_lite_regs`                     | Soft reset for internal FSM reset.                                        |
@@ -636,7 +637,7 @@ y_int8 = scaled_32[7:0]
 | `requant_scale[31:0]`                | 32 bits            | Input         | `axi_lite_regs`                     | Requantization scaling factor for INT8.                                   |
 | `requant_shift[31:0]`                | 32 bits            | Input         | `axi_lite_regs`                     | Requantization shift value.                                               |
 | `layer_cfg[31:0]`                    | 32 bits            | Input         | `axi_lite_regs`                     | Layer configuration register.                                             |
-| **AXI DMA Shim**                     |                    |               |                                     |                                                                           |
+| **AXI DMA Shim**                    |                    |               |                                     |                                                                           |
 | `dma_start_transfer`                 | 1 bit              | Output        | `axi_dma_shim`                      | Command to start the DMA transfer.                                        |
 | `dma_ddr_addr[31:0]`                 | 32 bits            | Output        | `axi_dma_shim`                      | DDR address for DMA operation.                                            |
 | `dma_length_bytes[31:0]`             | 32 bits            | Output        | `axi_dma_shim`                      | Data length for DMA transfer.                                             |
@@ -771,12 +772,14 @@ Each descriptor is 64-byte aligned and contains the following fields:
 **Prerequisite**: Build descriptor chain in DDR memory (64-byte aligned addresses)
 
 **MM2S (Read from DDR to Accelerator)**
+
 1. **Set Current Descriptor**: Write address of first descriptor to `MM2S_CURDESC` (and `MSB` if using >32-bit addressing)
 2. **Start Channel**: Set Run/Stop bit: `MM2S_DMACR.RS = 1`
 3. **Enable Interrupts**: Configure `MM2S_DMACR.IOC_IrqEn`, `Err_IrqEn` as needed
 4. **Trigger Processing**: Write tail descriptor address to `MM2S_TAILDESC` - **this triggers SG Engine to start processing**
 
 **S2MM (Write from Accelerator to DDR)**
+
 1. **Set Current Descriptor**: Write address of first descriptor to `S2MM_CURDESC` (and `MSB` if using >32-bit addressing)
 2. **Start Channel**: Set Run/Stop bit: `S2MM_DMACR.RS = 1`
 3. **Enable Interrupts**: Configure `S2MM_DMACR.IOC_IrqEn`, `Err_IrqEn` as needed
@@ -791,7 +794,6 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 3. **Descriptor Updating**: Writes back status information (completion flags, error status, actual bytes transferred)
 4. **Chain Traversal**: Automatically follows the descriptor chain using `NXTDESC_PTR` values
 5. **Completion**: Stops when reaching the tail descriptor or on error condition
-
 
 ### 6.5 GEMM Core
 
