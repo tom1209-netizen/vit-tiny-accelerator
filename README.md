@@ -383,7 +383,7 @@ The PL contains the custom hardware for the ViT computation.
 
 ### 4.3 Interface Standards
 
-- **AXI4-Stream:** default 128-bit (16×INT8), full tvalid/tready back-pressure, `tlast` on packet end.  
+- **AXI4-Stream:** default 64-bit (8×INT8), full tvalid/tready back-pressure, `tlast` on packet end.  
 - **AXI4-Lite:** 32-bit CSRs, 32-bit aligned; W1C status flags.
 
 ## 5. Accelerator Architecture (PL)
@@ -644,29 +644,9 @@ y_int8 = scaled_32[7:0]
 | `dma_direction`                      | 1 bit              | Output        | `axi_dma_shim`                      | Direction for DMA operation (0 = read, 1 = write).                        |
 | `dma_transfer_done`                  | 1 bit              | Input         | `axi_dma_shim`                      | Flag indicating DMA transfer completion.                                  |
 | **AXI DMA IP**                       |                    |               |                                     |                                                                           |
-| `mm2s_introut`                       | 1 bit              | Input         | `axi_dma_ip`                        | Interrupt output for the memory-to-stream (MM2S) transfer completion.     |
-| `s2mm_introut`                       | 1 bit              | Input         | `axi_dma_ip`                        | Interrupt output for the stream-to-memory (S2MM) transfer completion.     |
-| **Attention Block & MLP Block**      |                    |               |                                     |                                                                           |
-| `compute_start_op`                   | 1 bit              | Output        | `attention_block`, `mlp_block`      | Start signal for compute operations.                                      |
-| `compute_op_select[3:0]`             | 4 bits             | Output        | `attention_block`, `mlp_block`      | Select operation type (e.g., Attention, MLP, GEMM, Requant).              |
-| `mlp_block_op_done`                  | 1 bit              | Input         | `mlp_block`                         | Operation done signal from MLP block.                                     |
-| `attn_block_op_done`                 | 1 bit              | Input         | `attention_block`                   | Operation done signal from Attention block.                               |
-| **requant_in_mux**                   |                    |               |                                     |                                                                           |
-| `requant_in_sel`                     | 1 bit              | Output        | `requant_in_mux`                    | Select input source for the Requantization Unit.                          |
-| **requant_out_demux**                |                    |               |                                     |                                                                           |
-| `requant_out_sel`                    | 1 bit              | Output        | `requant_out_demux`                 | Select output destination for the Requantization Unit.                    |
-| **gemm_a_mux**                       |                    |               |                                     |                                                                           |
-| `gemm_a_mux_sel`                     | 1 bit              | Output        | `gemm_a_mux`                        | Select data stream for GEMM input A.                                      |
-| **gemm_b_mux**                       |                    |               |                                     |                                                                           |
-| `gemm_b_mux_sel`                     | 1 bit              | Output        | `gemm_b_mux`                        | Select data stream for GEMM input B.                                      |
-| **residual_in_a_mux**                |                    |               |                                     |                                                                           |
-| `residual_a_mux_sel`                 | 1 bit              | Output        | `residual_in_a_mux`                 | Select first operand for Residual Add.                                    |
-| **residual_in_b_mux**                |                    |               |                                     |                                                                           |
-| `residual_b_mux_sel`                 | 1 bit              | Output        | `residual_in_b_mux`                 | Select second operand for Residual Add.                                   |
-| **GEMM done demux & GEMM start mux** |                    |               |                                     |                                                                           |
-| `sel`                                | 1 bit              | Output        | `gemm_start_mux`, `gemm_done_demux` | Select GEMM start/done routing for parallel compute paths.                |
-| **DMA Demux**                        |                    |               |                                     |                                                                           |
-| `dma_sel`                            | 1 bit              | Output        | `dma_demux`                         | Select data path or buffer for DMA read/write.                            |
+| `m_axis_mm2s[74:0]`                 | 75 bits            | Output        | `axi_dma_ip`                         | Data stream from memory to accelerator (MM2S).                              |
+| `s_axis_s2mm[74:0]`                 | 75 bits            | Output        | `axi_dma_ip`                         | Data stream from accelerator to memory (S2MM).                              |
+| `axi_lite[146:0]`                   | 147 bits           | Output        | `axi_dma_ip`                         | AXI-Lite interface for control and status register communication.           |
 
 **Key Functionality:**
 
@@ -691,10 +671,10 @@ y_int8 = scaled_32[7:0]
 | `dma_direction`               | 1 bit              | Input         | `scheduler_tiler`        | DMA direction control: 0 = MM2S (DDR -> PL), 1 = S2MM (PL -> DDR).              |
 | `dma_transfer_done`           | 1 bit              | Output        | `scheduler_tiler`        | Indicates DMA transaction completion.                                           |
 | **DMA Demux**                 |                    |               |                          |                                                                                 |
-| `axis_in[130:0]`              | 131 bits           | Output        | `dma_demux`              | AXI4-Stream data output for DMA Demux.                                          |
+| `axis_in[66:0]`               | 67 bits            | Output        | `dma_demux`              | AXI4-Stream data output for DMA Demux.                                          |
 | **AXI DMA IP**                |                    |               |                          |                                                                                 |
-| `m_axis_mm2s[38:0]`           | 39 bits            | Output        | `axi_dma_ip`             | Data stream from memory to accelerator (MM2S).                                  |
-| `s_axis_s2mm[38:0]`           | 39 bits            | Output        | `axi_dma_ip`             | Data stream from accelerator to memory (S2MM).                                  |
+| `m_axis_mm2s[74:0]`           | 75 bits            | Output        | `axi_dma_ip`             | Data stream from memory to accelerator (MM2S).                                  |
+| `s_axis_s2mm[74:0]`           | 75 bits            | Output        | `axi_dma_ip`             | Data stream from accelerator to memory (S2MM).                                  |
 | `axi_lite[146:0]`             | 147 bits           | Output        | `axi_dma_ip`             | AXI-Lite interface for control and status register communication.               |
 
 **Key Functionality:**
@@ -713,8 +693,8 @@ y_int8 = scaled_32[7:0]
 | **Signal Name**            | **Signal Width**   | **Direction** | **Source/Destination**    | **Description**                                                                 |
 | -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
 | **AXI DMA Shim**           |                    |               |                           |                                                                                 |
-| `m_axis_mm2s[38:0]`        | 39 bits            | Input         | `axi_dma_shim`            | Data stream from memory to accelerator (MM2S).                                  |
-| `s_axis_s2mm[38:0]`        | 39 bits            | Input         | `axi_dma_shim`            | Data stream from accelerator to memory (S2MM).                                  |
+| `m_axis_mm2s[74:0]`        | 75 bits            | Input         | `axi_dma_shim`            | Data stream from memory to accelerator (MM2S).                                  |
+| `s_axis_s2mm[74:0]`        | 75 bits            | Input         | `axi_dma_shim`            | Data stream from accelerator to memory (S2MM).                                  |
 | `axi_lite[146:0]`          | 147 bits           | Input         | `axi_dma_shim`            | AXI-Lite interface for control and status register communication.               |
 | **Scatter Gather**         |                    |               |                           |                                                                                 |
 | `m_axi_sg_*`               | 188 bits           | Input/Output  | `DDR`                     | AXI4 master interface for autonomous descriptor management.                     |
@@ -808,11 +788,11 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 | **GEMM done demux**         |                    |               |                           |                                                                                 |
 | `tile_done`                 | 1 bit              | Output        | `gemm_done_demux`         | Tile computation completion signal.                                             |
 | **GEMM a mux**              |                    |               |                           |                                                                                 |
-| `axis_gemm_a[130:0]`        | 131 bits           | Input         | `gemm_a_mux`              | Input matrix tile A (INT8 elements packed, 128-bit per beat).                   |
+| `axis_gemm_a[66:0]`         | 67 bits            | Input         | `gemm_a_mux`              | Input matrix tile A (INT8 elements packed, 64-bit per beat).                    |
 | **GEMM b mux**              |                    |               |                           |                                                                                 |
-| `axis_gemm_b[130:0]`        | 131 bits           | Input         | `gemm_b_mux`              | Input matrix tile B (INT8 elements packed, 128-bit per beat).                   |
+| `axis_gemm_b[66:0]`         | 67 bits            | Input         | `gemm_b_mux`              | Input matrix tile B (INT8 elements packed, 64-bit per beat).                    |
 | **Requant in mux**          |                    |               |                           |                                                                                 |
-| `axis_0[130:0]`             | 131 bits           | Output        | `requant_in_mux`          | Output data stream of GEMM result (INT32 partial sums or accumulated INT8).     |
+| `axis_0[66:0]`              | 67 bits            | Output        | `requant_in_mux`          | Output data stream of GEMM result (INT32 partial sums or accumulated INT8).     |
 
 **Key Functionality:**
 
@@ -831,11 +811,11 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 | **Signal Name**            | **Signal Width**   | **Direction** | **Source/Destination**    | **Description**                                                                  |
 | -------------------------- | ------------------ | ------------- | ------------------------- | -------------------------------------------------------------------------------- |
 | **Requant In Mux**         |                    |               |                           |                                                                                  |
-| `axis_1[130:0]`            | 131 bits           | Output        | `requant_in_mux`          | Output data stream (sum of input A and B, element-wise INT8 addition result).    |
+| `axis_1[66:0]`             | 67 bits            | Output        | `requant_in_mux`          | Output data stream (sum of input A and B, element-wise INT8 addition result).    |
 | **Residual in a mux**      |                    |               |                           |                                                                                  |
-| `axis_residual_a[130:0]`   | 131 bits           | Input         | `residual_in_a_mux`       | First input tensor (skip path or previous layer output).                         |
+| `axis_residual_a[66:0]`    | 67 bits            | Input         | `residual_in_a_mux`       | First input tensor (skip path or previous layer output).                         |
 | **Residual in b mux**      |                    |               |                           |                                                                                  |
-| `axis_residual_b[130:0]`   | 131 bits           | Input         | `residual_in_b_mux`       | Second input tensor (current sublayer output or activation).                     |
+| `axis_residual_b[66:0]`    | 67 bits            | Input         | `residual_in_b_mux`       | Second input tensor (current sublayer output or activation).                     |
 
 **Key Functionality:**
 
@@ -852,9 +832,9 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 | **Signal Name**            | **Signal Width**   | **Direction** | **Source/Destination**    | **Description**                                                                 |
 | -------------------------- | ------------------ | ------------- | ------------------------- | ------------------------------------------------------------------------------- |
 | **Requant in mux**         |                    |               |                           |                                                                                 |
-| `axis_in[130:0]`           | 131 bits           | Input         | `requant_in_mux`          | Input activation data stream (INT32 or INT8, 128-bit per beat).                 |
+| `axis_in[66:0]`            | 67 bits            | Input         | `requant_in_mux`          | Input activation data stream (INT32 or INT8, 64-bit per beat).                  |
 | **Requant out demux**      |                    |               |                           |                                                                                 |
-| `axis_out[130:0]`          | 131 bits           | Output        | `requant_out_demux`       | Requantized output data stream (INT8, 128-bit per beat, packed tensor output).  |
+| `axis_out[66:0]`           | 67 bits            | Output        | `requant_out_demux`       | Requantized output data stream (INT8, 64-bit per beat, packed tensor output).   |
 
 **Key Functionality:**
 
@@ -875,12 +855,12 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 | ------------------------------------- | ---------------- | ------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
 | `compute_start_op`                    | 1 bit            | Input         | `scheduler_tiler`                        | Start trigger for Attention block execution.                             |
 | `compute_op_select[3:0]`              | 4 bits           | Input         | `scheduler_tiler`                        | Operation selector defining sub-operation (Q, K, V, Softmax, etc.).      |
-| `axis_data_0[130:0]`                  | 131 bits         | Input         | `dma_demux`                              | Input token feature stream loaded from DDR via DMA.                      |
-| `axis_requant_a[130:0]`               | 131 bits         | Input         | `requant_out_demux`                      | Requantized feature input (e.g., for Softmax or output normalization).   |
+| `axis_data_0[66:0]`                   | 67 bits          | Input         | `dma_demux`                              | Input token feature stream loaded from DDR via DMA.                      |
+| `axis_requant_a[66:0]`                | 67 bits          | Input         | `requant_out_demux`                      | Requantized feature input (e.g., for Softmax or output normalization).   |
 | `done_out_0`                          | 1 bit            | Input         | `gemm_done_demux`                        | Completion signal from GEMM indicating that Attention GEMM tile is done. |
 | `attn_block_op_done`                  | 1 bit            | Output        | `scheduler_tiler`                        | Attention block operation completion flag.                               |
-| `axis_0[130:0]`                       | 131 bits         | Output        | `gemm_a_mux`, `residual_in_b_mux`        | Output data stream (Q×Kᵀ or Attention-weighted values) for next GEMM.    |
-| `axis_1[130:0]`                       | 131 bits         | Output        | `gemm_b_mux`                             | Secondary output stream for V-matrix or attention value propagation.     |
+| `axis_0[66:0]`                        | 67 bits          | Output        | `gemm_a_mux`, `residual_in_b_mux`        | Output data stream (Q×Kᵀ or Attention-weighted values) for next GEMM.    |
+| `axis_1[66:0]`                        | 67 bits          | Output        | `gemm_b_mux`                             | Secondary output stream for V-matrix or attention value propagation.     |
 | `start_in_0`                          | 1 bit            | Output        | `gemm_start_mux`                         | Internal start signal routed to GEMM Start Mux.                          |
 
 ### 7.2 Phase map
@@ -914,12 +894,12 @@ Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses w
 | ------------------------ | ---------------- | ------------- | ---------------------------------------- | -------------------------------------------------------------------------------- |
 | `compute_start_op`       | 1 bit            | Input         | `scheduler_tiler`                        | Start trigger for MLP computation sequence (activates linear layers and GELU).   |
 | `compute_op_select[3:0]` | 4 bits           | Input         | `scheduler_tiler`                        | Operation selector defining which sublayer is active: Linear1, GELU, or Linear2. |
-| `axis_data_1[130:0]`     | 131 bits         | Input         | `dma_demux`                              | Input feature stream for MLP (from previous layer normalization or attention).   |
-| `axis_requant_b[130:0]`  | 131 bits         | Input         | `requant_out_demux`                      | Requantized feature input stream for MLP layer.                                  |
+| `axis_data_1[66:0]`      | 67 bits          | Input         | `dma_demux`                              | Input feature stream for MLP (from previous layer normalization or attention).   |
+| `axis_requant_b[66:0]`   | 67 bits          | Input         | `requant_out_demux`                      | Requantized feature input stream for MLP layer.                                  |
 | `done_out_1`             | 1 bit            | Input         | `gemm_done_demux`                        | Completion signal from GEMM indicating that MLP GEMM tile is done.               |
 | `mlp_block_op_done`      | 1 bit            | Output        | `scheduler_tiler`                        | MLP block operation completion flag (end of feedforward computation).            |
-| `axis_0[130:0]`          | 131 bits         | Output        | `gemm_a_mux`                             | Primary output stream (e.g., Linear1 or GELU output) routed to GEMM A input.     |
-| `axis_1[130:0]`          | 131 bits         | Output        | `gemm_b_mux`, `residual_in_b_mux`        | Secondary output stream (e.g., Linear2 output) routed to GEMM or Residual path.  |
+| `axis_0[66:0]`           | 67 bits          | Output        | `gemm_a_mux`                             | Primary output stream (e.g., Linear1 or GELU output) routed to GEMM A input.     |
+| `axis_1[66:0]`           | 67 bits          | Output        | `gemm_b_mux`, `residual_in_b_mux`        | Secondary output stream (e.g., Linear2 output) routed to GEMM or Residual path.  |
 | `start_in_0`             | 1 bit            | Output        | `gemm_start_mux`                         | Internal start signal routed to GEMM Start Mux (initiates GEMM operation).       |
 
 ### 8.2 Phase map
