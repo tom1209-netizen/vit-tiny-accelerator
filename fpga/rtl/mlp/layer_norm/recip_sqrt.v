@@ -1,5 +1,4 @@
 `timescale 1ns / 1ps
-
 module recip_sqrt #(
     parameter DATA_WIDTH = 32,
     parameter M_BITS     = 12,
@@ -25,7 +24,7 @@ module recip_sqrt #(
     reg [OUT_WIDTH-1:0] lut_2_pow_v [0:(1<<M_BITS)-1];
     
     initial begin
-        $readmemh("lut_pow2.mem", lut_2_pow_v);
+        $readmemh("lut_pow2.hex", lut_2_pow_v);
     end
 
     localparam K_WIDTH = $clog2(DATA_WIDTH); // 5
