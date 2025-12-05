@@ -88,10 +88,19 @@ module tb_layer_norm_top;
         else clamp_to_int8 = val[7:0];
     endfunction
 
-    function integer round_half_up(input real val);
-        begin
-            round_half_up = $floor(val + 0.5);
-        end
+    function integer round_half_away_from_zero(input real val);
+        real abs_val;
+        integer abs_rounded;
+    begin
+        // 1. Get Absolute value
+        abs_val = (val < 0) ? -val : val;
+        
+        // 2. Round Magnitude (Standard floor(x+0.5))
+        abs_rounded = $floor(abs_val + 0.5);
+        
+        // 3. Restore Sign
+        round_half_away_from_zero = (val < 0) ? -abs_rounded : abs_rounded;
+    end
     endfunction
 
     // Golden Calculation Task
@@ -123,7 +132,7 @@ module tb_layer_norm_top;
             for (i=0; i<PACKET_LEN; i=i+1) begin
                 val = $itor(input_buffer[i]);
                 norm = (val - mean) * inv_std * r_gamma + r_beta;
-                expected_buffer[i] = clamp_to_int8(round_half_up(norm));
+                expected_buffer[i] = clamp_to_int8(round_half_away_from_zero(norm));
             end
         end
     endtask
