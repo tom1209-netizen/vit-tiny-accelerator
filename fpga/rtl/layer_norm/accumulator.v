@@ -19,14 +19,11 @@ module accumulator #(
     output reg signed [SUM_SQ_WIDTH-1:0] sum_sq_out_int,
     output reg                           stats_valid
 );
-
     assign s_axis_tready = 1'b1; 
 
     // =========================================================================
-    // STAGE 0: INPUT PIPELINE (TIMING FIX)
+    // STAGE 0: INPUT PIPELINE
     // =========================================================================
-    // Break the critical path from FIFO RAM -> Multiplier
-    
     reg [BEAT_WIDTH-1:0] r_tdata;
     reg                  r_tvalid;
     reg                  r_tlast;
@@ -37,7 +34,6 @@ module accumulator #(
             r_tlast  <= 0;
             r_tdata  <= 0;
         end else begin
-            // Simple register delay since s_axis_tready is always 1
             r_tvalid <= s_axis_tvalid;
             r_tlast  <= s_axis_tlast;
             r_tdata  <= s_axis_tdata;
@@ -48,7 +44,6 @@ module accumulator #(
     genvar i;
     generate
         for (i = 0; i < NUM_ELEMS; i = i + 1) begin
-            // Extract from Registered Data
             assign el[i] = r_tdata[(i+1)*ELEM_WIDTH-1 : i*ELEM_WIDTH];
         end
     endgenerate
@@ -57,20 +52,30 @@ module accumulator #(
     // STAGE 1: SQUARING (Multiplication Only)
     // =========================================================================
     
-    reg signed [2*ELEM_WIDTH-1:0] st1_sq [0:NUM_ELEMS-1];
+    // [FIX] Force usage of DSP48 blocks for multiplication.
+    // This replaces the slow LUT/CARRY4 logic chains (7 levels) with a single DSP block (1 level).
+    (* use_dsp = "yes" *) reg signed [2*ELEM_WIDTH-1:0] st1_sq [0:NUM_ELEMS-1];
+    
     reg signed [ELEM_WIDTH-1:0]   st1_val [0:NUM_ELEMS-1];
     reg                           st1_valid, st1_last;
-    
     integer j;
+    
     always @(posedge clk) begin
         if (!aresetn) begin
-            st1_valid <= 0; st1_last <= 0;
+            st1_valid <= 0;
+            st1_last <= 0;
+            // Reset for loop inference
+            for (j=0; j<NUM_ELEMS; j=j+1) begin
+                st1_sq[j]  <= 0;
+                st1_val[j] <= 0;
+            end
         end else begin
-            st1_valid <= r_tvalid; // Use Registered Valid
+            st1_valid <= r_tvalid; 
             st1_last  <= r_tlast;
+            
             if (r_tvalid) begin
                 for (j=0; j<NUM_ELEMS; j=j+1) begin
-                    st1_sq[j]  <= el[j] * el[j]; 
+                    st1_sq[j]  <= el[j] * el[j]; // Mapped to DSP
                     st1_val[j] <= el[j];         
                 end
             end
@@ -81,13 +86,14 @@ module accumulator #(
     // STAGE 2: PAIRWISE SUM (Add Depth 1)
     // =========================================================================
     
-    reg signed [ELEM_WIDTH:0]     st2_pair_sum [0:3];    
+    reg signed [ELEM_WIDTH:0]     st2_pair_sum [0:3];
     reg signed [2*ELEM_WIDTH:0]   st2_pair_sq_sum [0:3]; 
     reg                           st2_valid, st2_last;
-
+    
     always @(posedge clk) begin
         if (!aresetn) begin
-            st2_valid <= 0; st2_last <= 0;
+            st2_valid <= 0;
+            st2_last <= 0;
         end else begin
             st2_valid <= st1_valid;
             st2_last  <= st1_last;
@@ -114,10 +120,11 @@ module accumulator #(
     reg signed [ELEM_WIDTH+1:0]   st3_quad_sum [0:1];
     reg signed [2*ELEM_WIDTH+1:0]   st3_quad_sq_sum [0:1];
     reg                           st3_valid, st3_last;
-
+    
     always @(posedge clk) begin
         if (!aresetn) begin
-            st3_valid <= 0; st3_last <= 0;
+            st3_valid <= 0;
+            st3_last <= 0;
         end else begin
             st3_valid <= st2_valid;
             st3_last  <= st2_last;
@@ -138,10 +145,11 @@ module accumulator #(
     reg signed [15:0] st4_beat_sum;
     reg signed [19:0] st4_beat_sum_sq;
     reg               st4_valid, st4_last;
-
+    
     always @(posedge clk) begin
         if (!aresetn) begin
-            st4_valid <= 0; st4_last <= 0;
+            st4_valid <= 0;
+            st4_last <= 0;
         end else begin
             st4_valid <= st3_valid;
             st4_last  <= st3_last;
@@ -161,18 +169,17 @@ module accumulator #(
 
     always @(posedge clk) begin
         if (!aresetn) begin
-            acc_sum <= 0; acc_sum_sq <= 0;
+            acc_sum <= 0;
+            acc_sum_sq <= 0;
             sum_out_int <= 0; sum_sq_out_int <= 0; stats_valid <= 0;
         end else begin
-            stats_valid <= 0; 
-
+            stats_valid <= 0;
             if (st4_valid) begin
                 if (st4_last) begin
                     // Final Output
                     sum_out_int    <= acc_sum + st4_beat_sum;
                     sum_sq_out_int <= acc_sum_sq + st4_beat_sum_sq;
                     stats_valid    <= 1;
-                    
                     // Reset
                     acc_sum     <= 0;
                     acc_sum_sq  <= 0;

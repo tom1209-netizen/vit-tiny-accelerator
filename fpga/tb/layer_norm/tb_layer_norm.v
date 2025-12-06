@@ -14,7 +14,7 @@ module tb_layer_norm_top;
     parameter SUM_SQ_WIDTH = 24;
     parameter M_BITS       = 12;
 
-    localparam CLK_PERIOD = 8.0;
+    localparam CLK_PERIOD = 5.0;
 
     reg clk;
     reg aresetn;
@@ -69,10 +69,10 @@ module tb_layer_norm_top;
     // =========================================================
     // 3. GOLDEN MODEL RESOURCES
     // =========================================================
-    localparam PACKET_LEN = 320; 
+    localparam PACKET_LEN = 320;
     reg signed [7:0] input_buffer [0:PACKET_LEN-1];
     reg signed [7:0] expected_buffer [0:PACKET_LEN-1];
-    
+
     // Helpers
     function real q16_to_real(input signed [31:0] val);
         q16_to_real = $itor(val) / 65536.0;
@@ -88,8 +88,7 @@ module tb_layer_norm_top;
         else clamp_to_int8 = val[7:0];
     endfunction
 
-    // CHANGED: Reverted to standard "Round Half Up" to match hardware implementation
-    // (Hardware does: floor(x + 0.5))
+    // Standard "Round Half Up" to match hardware implementation (floor(x + 0.5))
     function integer round_half_up(input real val);
     begin
         round_half_up = $floor(val + 0.5);
@@ -101,35 +100,34 @@ module tb_layer_norm_top;
         integer i;
         real sum, sum_sq, mean, var, inv_std, val, norm;
         real r_gamma, r_beta;
-        begin
-            sum = 0; sum_sq = 0;
-            // 1. Calculate Stats
-            for (i=0; i<PACKET_LEN; i=i+1) begin
-                val = $itor(input_buffer[i]);
-                sum = sum + val;
-                sum_sq = sum_sq + (val*val);
-            end
-            
-            mean = sum / PACKET_LEN;
-            var  = (sum_sq / PACKET_LEN) - (mean * mean);
-            
-            // Handle very small variance (prevent divide by zero)
-            if (var <= 0.0001) inv_std = 0;
-            else inv_std = 1.0 / $sqrt(var);
-            
-            r_gamma = q16_to_real(cfg_gamma);
-            r_beta  = q16_to_real(cfg_beta);
-            
-            $display("[Golden] Mean=%.4f, Var=%.4f, InvStd=%.4f", mean, var, inv_std);
-            
-            // 2. Calculate Expected Output
-            for (i=0; i<PACKET_LEN; i=i+1) begin
-                val = $itor(input_buffer[i]);
-                norm = (val - mean) * inv_std * r_gamma + r_beta;
-                // CHANGED: Use round_half_up
-                expected_buffer[i] = clamp_to_int8(round_half_up(norm));
-            end
+    begin
+        sum = 0; sum_sq = 0;
+        // 1. Calculate Stats
+        for (i=0; i<PACKET_LEN; i=i+1) begin
+            val = $itor(input_buffer[i]);
+            sum = sum + val;
+            sum_sq = sum_sq + (val*val);
         end
+        
+        mean = sum / PACKET_LEN;
+        var  = (sum_sq / PACKET_LEN) - (mean * mean);
+        
+        // Handle very small variance
+        if (var <= 0.0001) inv_std = 0;
+        else inv_std = 1.0 / $sqrt(var);
+        
+        r_gamma = q16_to_real(cfg_gamma);
+        r_beta  = q16_to_real(cfg_beta);
+        
+        $display("[Golden] Mean=%.4f, Var=%.4f, InvStd=%.4f", mean, var, inv_std);
+
+        // 2. Calculate Expected Output
+        for (i=0; i<PACKET_LEN; i=i+1) begin
+            val = $itor(input_buffer[i]);
+            norm = (val - mean) * inv_std * r_gamma + r_beta;
+            expected_buffer[i] = clamp_to_int8(round_half_up(norm));
+        end
+    end
     endtask
 
     // =========================================================
@@ -141,6 +139,7 @@ module tb_layer_norm_top;
     reg [63:0] r_data;
     reg signed [7:0] rtl_val, exp_val;
     integer diff;
+    integer latency_counter; // [NEW] To measure pipeline depth
 
     initial begin
         clk = 0;
@@ -152,7 +151,8 @@ module tb_layer_norm_top;
         
         // Initialize Signals
         aresetn = 0;
-        s_axis_tdata = 0; s_axis_tvalid = 0; s_axis_tlast = 0;
+        s_axis_tdata = 0; s_axis_tvalid = 0;
+        s_axis_tlast = 0;
         m_axis_tready = 1; // Always ready to receive output
         
         #(CLK_PERIOD * 10);
@@ -161,23 +161,31 @@ module tb_layer_norm_top;
         
         // --- Loop through Test Cases ---
         for (pkt_id = 0; pkt_id < 4; pkt_id = pkt_id + 1) begin
+            
             // 1. Set Configuration
             case (pkt_id)
-                0: begin cfg_gamma = real_to_q16(1.0); cfg_beta = real_to_q16(0.0);   end 
-                1: begin cfg_gamma = real_to_q16(0.5); cfg_beta = real_to_q16(10.0);  end 
-                2: begin cfg_gamma = real_to_q16(-1.0); cfg_beta = real_to_q16(5.0);  end 
-                3: begin cfg_gamma = real_to_q16(2.0); cfg_beta = real_to_q16(-20.0); end 
+                0: begin cfg_gamma = real_to_q16(1.0);  cfg_beta = real_to_q16(0.0);   end 
+                1: begin cfg_gamma = real_to_q16(0.5);  cfg_beta = real_to_q16(10.0);  end 
+                2: begin cfg_gamma = real_to_q16(-1.0); cfg_beta = real_to_q16(5.0);   end 
+                3: begin cfg_gamma = real_to_q16(2.0);  cfg_beta = real_to_q16(-20.0); end 
             endcase
             
             $display("\n[Time %0t] Processing Packet %0d", $time, pkt_id);
             global_idx = 0;
+            latency_counter = 0;
             
             // 2. DRIVER
-            // Sync to clock edge before starting (No #1 delay)
+            // Sync to clock edge before starting
             @(posedge clk);
-            
             for (beat_idx = 0; beat_idx < 40; ) begin
-                // Only generate new data if we are advancing (or first iter)
+                // Check if the drive from *previous* cycle was accepted
+                // If yes, we can move to the next beat
+                if (beat_idx > 0 && s_axis_tready) begin
+                     // Logic handled in previous loop iteration via NBA
+                end
+
+                // Only generate new data if we are ready to drive
+                // (First beat, or previous beat was accepted)
                 if (beat_idx == 0 || s_axis_tready) begin
                     r_data = {$random, $random};
                     
@@ -187,7 +195,7 @@ module tb_layer_norm_top;
                         global_idx = global_idx + 1;
                     end
                     
-                    // Drive Signals using NBA (updates at end of this time slot)
+                    // Drive Signals using NBA
                     s_axis_tdata  <= r_data;
                     s_axis_tvalid <= 1;
                     s_axis_tlast  <= (beat_idx == 39);
@@ -196,21 +204,19 @@ module tb_layer_norm_top;
                 // Wait for next edge (DUT samples here)
                 @(posedge clk);
                 
-                // Check if the drive from *previous* cycle was accepted
-                // (Sampling the 'ready' that was valid at this rising edge)
-                if (s_axis_tready) begin
+                // Check if transfer occurred at the rising edge we just passed
+                if (s_axis_tvalid && s_axis_tready) begin
                      beat_idx = beat_idx + 1;
                 end
-                // If not ready, loop repeats, keeping tvalid/tdata/tlast stable
             end
             
-            // Packet Done: Drop Valid (NBA)
+            // Packet Done: Drop Valid
             s_axis_tvalid <= 0;
             s_axis_tlast  <= 0;
             
             $display("[Time %0t] Data Sent. Waiting for Output...", $time);
             calc_golden_model();
-            
+
             // 3. MONITOR
             out_cnt = 0;
             global_idx = 0;
@@ -220,8 +226,16 @@ module tb_layer_norm_top;
                 begin
                     while (out_cnt < 40) begin
                         // Wait for Valid Output
-                        while (!m_axis_tvalid) @(posedge clk);
+                        // [NEW] Measure Latency
+                        while (!m_axis_tvalid) begin
+                             latency_counter = latency_counter + 1;
+                             @(posedge clk);
+                        end
                         
+                        if (out_cnt == 0) begin
+                            $display("[Info] Pipeline Latency: %0d cycles", latency_counter);
+                        end
+
                         // Check TLAST on final beat
                         if (out_cnt == 39 && !m_axis_tlast) begin
                             $display("[FAIL] TLAST missing on final beat!");
@@ -238,10 +252,12 @@ module tb_layer_norm_top;
                             
                             diff = rtl_val - exp_val;
                             if (diff < 0) diff = -diff;
-                            
-                            // Tolerance Check (Allow +/- 1 error for rounding differences)
-                            if (diff >= 1) begin 
-                                if (err_cnt < 10) 
+
+                            // [MODIFIED] Tolerance Check 
+                            // Allow +/- 1 error for rounding differences between Real (Golden) 
+                            // and Fixed-Point DSP (Hardware) logic.
+                            if (diff > 1) begin 
+//                                if (err_cnt < 10) 
                                     $display("[FAIL] Idx%0d: Exp=%d, Act=%d (Diff=%d)", global_idx, exp_val, rtl_val, diff);
                                 err_cnt = err_cnt + 1;
                             end
@@ -264,7 +280,7 @@ module tb_layer_norm_top;
             
             if (err_cnt == 0) $display("[PASS] Packet %0d OK.", pkt_id);
             else $display("[FAIL] Packet %0d Failed with %0d errors.", pkt_id, err_cnt);
-            
+
             // Gap between packets
             #(CLK_PERIOD * 50);
         end
