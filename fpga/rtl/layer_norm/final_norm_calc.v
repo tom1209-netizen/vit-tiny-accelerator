@@ -3,7 +3,7 @@
 module final_norm_calc #(
     parameter DATA_WIDTH = 8,
     parameter PARALLEL_N = 8,
-    parameter STAT_WIDTH = 32, // Input width remains standard
+    parameter STAT_WIDTH = 32, 
     parameter DO_REQUANTIZE = 1     
 )(
     input  wire                   clk,
@@ -32,35 +32,29 @@ module final_norm_calc #(
     // =========================================================
     // OPTIMIZED PARAMETER STORAGE
     // =========================================================
-    // We assume Gamma and Beta fit in Q8.16 (Range +/- 128)
-    // This saves registers compared to full 32-bit storage.
     localparam STORE_W = 24; 
     
-    reg signed [STORE_W-1:0] latched_beta;  // Q8.16
+    reg signed [STORE_W-1:0] latched_beta;   // Q8.16
     reg signed [STORE_W-1:0] combined_scale; // Q8.16
-    
-    // Mean needs to stay full width or similar to ensure accurate subtraction
-    // But input pixels are 8-bit (0-255). Mean is Q16.16.
-    // Mean range is 0-255. Q8.16 is sufficient (Range +/- 128... wait).
-    // 255 is 0x00FF. In Q16.16 it is 0x00FF0000.
-    // Requires 8 integer bits. Q8.16 fits exactly (signed +/- 128). 
-    // Wait, 255 overflows signed 8-bit integer part.
-    // We need 9 integer bits for 255. Let's keep Mean at 32 bits to be safe/simple.
     reg signed [STAT_WIDTH-1:0] latched_mean;
 
-    // Intermediate Full Multiplier Result
-    reg signed [63:0] scale_mul_full_comb;
+    // PIPELINE REGISTERS
+    reg signed [STAT_WIDTH-1:0] r_inv_sqrt;
+    reg signed [STAT_WIDTH-1:0] r_gamma;
     
-    always @(*) begin
-        scale_mul_full_comb = inv_sqrt_val * gamma_val;
-    end
-    
+    // DSP Multiplier Output
+    (* use_dsp = "yes" *) 
+    reg signed [63:0] r_mul_full;
+
     // =========================================================
     // FSM
     // =========================================================
-    localparam IDLE = 0;
-    localparam BUSY = 1;
-    reg state;
+    localparam IDLE       = 0;
+    localparam WAIT_MUL   = 1; 
+    localparam WAIT_SCALE = 2; // NEW STATE: Wait for extraction
+    localparam BUSY       = 3;
+    
+    reg [1:0] state;
 
     always @(posedge clk) begin
         if (!aresetn) begin
@@ -69,34 +63,42 @@ module final_norm_calc #(
             latched_mean   <= 0;
             combined_scale <= 0;
             latched_beta   <= 0;
+            r_inv_sqrt     <= 0;
+            r_gamma        <= 0;
+            r_mul_full     <= 0;
         end else begin
             case (state)
                 IDLE: begin
                     s_axis_ready <= 0;
                     
                     if (params_valid) begin
-                        latched_mean   <= mean_val;
+                        latched_mean <= mean_val;
+                        latched_beta <= beta_val[STORE_W-1:0];
                         
-                        // Latch Scale: Result is Q32.32. We want Q8.16.
-                        // Full: [63:0]. Q16.16 is [47:16].
-                        // We want bottom 24 bits of the Q16.16 part?
-                        // Or rather: We verify the range fits.
-                        // We extract the Q16.16 portion and truncate to 24 bits.
-                        // scale_mul_full_comb >>> 16 gives Q??.16 in LSBs.
-                        // We take [23:0] of that.
-                        // Checks: [47:16] is the 32-bit Q16.16.
-                        // We take [39:16] (24 bits: 8 int, 16 frac).
-                        combined_scale <= scale_mul_full_comb[39:16];
+                        // Stage 1: Latch Inputs
+                        r_inv_sqrt <= inv_sqrt_val;
+                        r_gamma    <= gamma_val;
                         
-                        // Latch Beta: Take [23:0] (Assuming Q8.16 fit)
-                        latched_beta   <= beta_val[STORE_W-1:0];
-                        
-                        state        <= BUSY;
-                        s_axis_ready <= 1; 
+                        state <= WAIT_MUL;
                     end
                 end
 
+                WAIT_MUL: begin
+                    // Stage 2: Multiply
+                    r_mul_full <= r_inv_sqrt * r_gamma;
+                    state <= WAIT_SCALE;
+                end
+                
+                WAIT_SCALE: begin
+                    // Stage 3: Extract (Now safe because r_mul_full is stable)
+                    combined_scale <= r_mul_full[39:16]; 
+                    
+                    state        <= BUSY;
+                    s_axis_ready <= 1;
+                end
+
                 BUSY: begin
+                    // Processing Data
                     if (m_axis_ready) begin
                         s_axis_ready <= 1;
                         if (s_axis_valid && s_axis_ready && s_axis_last) begin
@@ -114,7 +116,6 @@ module final_norm_calc #(
     // =========================================================
     // STAGE 1: SUBTRACT MEAN
     // =========================================================
-    // Result is Q16.16 (32-bit) to maintain precision
     reg signed [31:0] st1_diff [0:PARALLEL_N-1];
     reg               st1_valid;
     reg               st1_last;
@@ -130,7 +131,7 @@ module final_norm_calc #(
             
             if (s_axis_valid && s_axis_ready) begin
                 for (i = 0; i < PARALLEL_N; i = i + 1) begin
-                    // Input 8-bit -> Q16.16
+                    // Q16.16 Result
                     st1_diff[i] <= ($signed(s_axis_data[i*8 +: 8]) <<< 16) - latched_mean;
                 end
             end
@@ -138,20 +139,17 @@ module final_norm_calc #(
     end
 
     // =========================================================
-    // STAGE 2: MULTIPLY BY SCALE (Optimized)
+    // STAGE 2: MULTIPLY BY SCALE
     // =========================================================
     reg signed [31:0] st2_norm_val [0:PARALLEL_N-1];
     reg               st2_valid;
     reg               st2_last;
     
-    // Diff (32-bit) * Scale (24-bit) -> 56 bit result
     reg signed [55:0] mul_comb [0:PARALLEL_N-1];
     integer j;
 
     always @(*) begin
         for (j = 0; j < PARALLEL_N; j = j + 1) begin
-            // Diff is Q16.16. Scale is Q8.16.
-            // Result is Q24.32.
             mul_comb[j] = st1_diff[j] * combined_scale;
         end
     end
@@ -166,16 +164,7 @@ module final_norm_calc #(
             
             if (st1_valid) begin
                 for (j = 0; j < PARALLEL_N; j = j + 1) begin
-                    // We want Q16.16 Output.
-                    // Result has 32 fractional bits.
-                    // We need bits [47:16] of a full Q32.32 product.
-                    // Here we have Q24.32.
-                    // The integer part starts at bit 32. 
-                    // We want 16 fractional bits, so we drop the bottom 16 bits [15:0].
-                    // We take [47:16].
-                    // In our 56-bit result [55:0]:
-                    // Bit 0 = 2^-32. Bit 16 = 2^-16. Bit 32 = 2^0.
-                    // We want Q16.16. So we want bits starting from 16 up to 47.
+                    // Extract Q16.16 from Q24.32 result
                     st2_norm_val[j] <= mul_comb[j][47:16];
                 end
             end
@@ -193,14 +182,13 @@ module final_norm_calc #(
 
     always @(*) begin
         for (k = 0; k < PARALLEL_N; k = k + 1) begin
-            // Beta is Q8.16 (24-bit). Norm is Q16.16 (32-bit).
-            // Sign extend Beta to 32-bit for addition
             final_val_q16[k] = st2_norm_val[k] + {{8{latched_beta[STORE_W-1]}}, latched_beta};
 
             final_int_rounded[k] = 0;
             clamped_val[k]       = 0;
 
             if (DO_REQUANTIZE) begin
+                // Round Half Up logic: floor(x + 0.5)
                 final_int_rounded[k] = (final_val_q16[k] + $signed(32'h8000)) >>> 16;
                 
                 if (final_int_rounded[k] > 127) clamped_val[k] = 8'd127;

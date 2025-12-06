@@ -22,18 +22,40 @@ module accumulator #(
 
     assign s_axis_tready = 1'b1; 
 
+    // =========================================================================
+    // STAGE 0: INPUT PIPELINE (TIMING FIX)
+    // =========================================================================
+    // Break the critical path from FIFO RAM -> Multiplier
+    
+    reg [BEAT_WIDTH-1:0] r_tdata;
+    reg                  r_tvalid;
+    reg                  r_tlast;
+    
+    always @(posedge clk) begin
+        if (!aresetn) begin
+            r_tvalid <= 0;
+            r_tlast  <= 0;
+            r_tdata  <= 0;
+        end else begin
+            // Simple register delay since s_axis_tready is always 1
+            r_tvalid <= s_axis_tvalid;
+            r_tlast  <= s_axis_tlast;
+            r_tdata  <= s_axis_tdata;
+        end
+    end
+
     wire signed [ELEM_WIDTH-1:0] el [0:NUM_ELEMS-1];
     genvar i;
     generate
         for (i = 0; i < NUM_ELEMS; i = i + 1) begin
-            assign el[i] = s_axis_tdata[(i+1)*ELEM_WIDTH-1 : i*ELEM_WIDTH];
+            // Extract from Registered Data
+            assign el[i] = r_tdata[(i+1)*ELEM_WIDTH-1 : i*ELEM_WIDTH];
         end
     endgenerate
 
     // =========================================================================
     // STAGE 1: SQUARING (Multiplication Only)
     // =========================================================================
-    // Critical Path: 8x8 Multiplier -> Register
     
     reg signed [2*ELEM_WIDTH-1:0] st1_sq [0:NUM_ELEMS-1];
     reg signed [ELEM_WIDTH-1:0]   st1_val [0:NUM_ELEMS-1];
@@ -44,12 +66,12 @@ module accumulator #(
         if (!aresetn) begin
             st1_valid <= 0; st1_last <= 0;
         end else begin
-            st1_valid <= s_axis_tvalid;
-            st1_last  <= s_axis_tlast;
-            if (s_axis_tvalid) begin
+            st1_valid <= r_tvalid; // Use Registered Valid
+            st1_last  <= r_tlast;
+            if (r_tvalid) begin
                 for (j=0; j<NUM_ELEMS; j=j+1) begin
-                    st1_sq[j]  <= el[j] * el[j]; // 16-bit result
-                    st1_val[j] <= el[j];         // Pass through value
+                    st1_sq[j]  <= el[j] * el[j]; 
+                    st1_val[j] <= el[j];         
                 end
             end
         end
@@ -58,7 +80,6 @@ module accumulator #(
     // =========================================================================
     // STAGE 2: PAIRWISE SUM (Add Depth 1)
     // =========================================================================
-    // Reduce 8 elements -> 4 pairs
     
     reg signed [ELEM_WIDTH:0]     st2_pair_sum [0:3];    
     reg signed [2*ELEM_WIDTH:0]   st2_pair_sq_sum [0:3]; 
@@ -89,10 +110,9 @@ module accumulator #(
     // =========================================================================
     // STAGE 3: QUAD SUM (Add Depth 1)
     // =========================================================================
-    // Reduce 4 pairs -> 2 quads
     
     reg signed [ELEM_WIDTH+1:0]   st3_quad_sum [0:1];
-    reg signed [2*ELEM_WIDTH+1:0] st3_quad_sq_sum [0:1];
+    reg signed [2*ELEM_WIDTH+1:0]   st3_quad_sq_sum [0:1];
     reg                           st3_valid, st3_last;
 
     always @(posedge clk) begin
@@ -114,7 +134,6 @@ module accumulator #(
     // =========================================================================
     // STAGE 4: FINAL BEAT SUM (Add Depth 1)
     // =========================================================================
-    // Reduce 2 quads -> 1 Total
     
     reg signed [15:0] st4_beat_sum;
     reg signed [19:0] st4_beat_sum_sq;
