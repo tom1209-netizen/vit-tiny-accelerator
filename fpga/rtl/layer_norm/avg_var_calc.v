@@ -16,24 +16,47 @@ module avg_var_calc #(
     output reg signed [FIXED_WIDTH-1:0] var_out,
     output reg                          calc_valid_out
 );
-
     localparam signed [17:0] INV_N_SHORT = 18'd819; // 1/320 * 2^18
+
+    // =========================================================
+    // STAGE 0: INPUT PIPELINE (NEW STAGE)
+    // =========================================================
+    // Breaking the critical path from stats_fifo RAM -> DSP Multiplier
+    reg signed [SUM_WIDTH-1:0]    sum_int_reg;
+    reg signed [SUM_SQ_WIDTH-1:0] sum_sq_int_reg;
+    reg                           st0_valid;
+
+    always @(posedge clk) begin
+        if (!aresetn) begin
+            sum_int_reg    <= 0;
+            sum_sq_int_reg <= 0;
+            st0_valid      <= 0;
+        end else begin
+            sum_int_reg    <= sum_int;
+            sum_sq_int_reg <= sum_sq_int;
+            st0_valid      <= stats_valid_in;
+        end
+    end
 
     // =========================================================
     // STAGE 1: MULTIPLY BY 1/N
     // =========================================================
-    reg signed [35:0] st1_mean_mult;   
+    reg signed [35:0] st1_mean_mult;
     reg signed [41:0] st1_avg_sq_mult; 
     reg               st1_valid;
 
     always @(posedge clk) begin
         if (!aresetn) begin
-            st1_mean_mult <= 0; st1_avg_sq_mult <= 0; st1_valid <= 0;
+            st1_mean_mult   <= 0;
+            st1_avg_sq_mult <= 0; 
+            st1_valid       <= 0;
         end else begin
-            st1_valid <= stats_valid_in;
-            if (stats_valid_in) begin
-                st1_mean_mult   <= sum_int * INV_N_SHORT;
-                st1_avg_sq_mult <= sum_sq_int * INV_N_SHORT;
+            st1_valid <= st0_valid; // Propagate from Stage 0
+            
+            if (st0_valid) begin
+                // Use the REGISTERED inputs here
+                st1_mean_mult   <= sum_int_reg * INV_N_SHORT;
+                st1_avg_sq_mult <= sum_sq_int_reg * INV_N_SHORT;
             end
         end
     end
@@ -46,23 +69,26 @@ module avg_var_calc #(
     wire signed [31:0] w_mean_q16   = st1_mean_mult[33:2];
     wire signed [31:0] w_avg_sq_q16 = st1_avg_sq_mult[33:2];
 
-    reg signed [15:0] st2_mean_H;     // Top 16 bits
-    reg signed [16:0] st2_mean_L;     // Bottom 16 bits (treated as pos signed)
+    reg signed [15:0] st2_mean_H; // Top 16 bits
+    reg signed [16:0] st2_mean_L; // Bottom 16 bits (treated as pos signed)
     reg signed [31:0] st2_avg_sq_q16;
-    reg signed [31:0] st2_mean_q16;   // For passthrough
+    reg signed [31:0] st2_mean_q16; // For passthrough
     reg               st2_valid;
 
     always @(posedge clk) begin
         if (!aresetn) begin
-            st2_mean_H <= 0; st2_mean_L <= 0;
-            st2_avg_sq_q16 <= 0; st2_mean_q16 <= 0; st2_valid <= 0;
+            st2_mean_H     <= 0;
+            st2_mean_L     <= 0;
+            st2_avg_sq_q16 <= 0; 
+            st2_mean_q16   <= 0; 
+            st2_valid      <= 0;
         end else begin
             st2_valid <= st1_valid;
+            
             if (st1_valid) begin
                 st2_mean_H <= w_mean_q16[31:16];
                 // Force Low part to be positive signed for DSP logic
                 st2_mean_L <= {1'b0, w_mean_q16[15:0]};
-                
                 st2_avg_sq_q16 <= w_avg_sq_q16;
                 st2_mean_q16   <= w_mean_q16;
             end
@@ -73,7 +99,6 @@ module avg_var_calc #(
     // STAGE 3: PARTIAL SQUARING (Multiplication)
     // =========================================================
     // (H*2^16 + L)^2 = H^2*2^32 + 2HL*2^16 + L^2
-    // Calc terms: P_H = H*H, P_M = H*L, P_L = L*L
     
     reg signed [31:0] st3_prod_H; // 16x16 signed
     reg signed [33:0] st3_prod_M; // 16s x 17s
@@ -85,7 +110,10 @@ module avg_var_calc #(
 
     always @(posedge clk) begin
         if (!aresetn) begin
-            st3_prod_H <= 0; st3_prod_M <= 0; st3_prod_L <= 0; st3_valid <= 0;
+            st3_prod_H <= 0;
+            st3_prod_M <= 0; 
+            st3_prod_L <= 0; 
+            st3_valid  <= 0;
         end else begin
             st3_valid <= st2_valid;
             if (st2_valid) begin
@@ -111,7 +139,8 @@ module avg_var_calc #(
 
     always @(posedge clk) begin
         if (!aresetn) begin
-            st4_mean_sq_full <= 0; st4_valid <= 0;
+            st4_mean_sq_full <= 0;
+            st4_valid        <= 0;
         end else begin
             st4_valid <= st3_valid;
             if (st3_valid) begin
@@ -134,12 +163,13 @@ module avg_var_calc #(
     
     always @(posedge clk) begin
         if (!aresetn) begin
-            mean_out <= 0; var_out <= 0; calc_valid_out <= 0;
+            mean_out <= 0;
+            var_out  <= 0; 
+            calc_valid_out <= 0;
         end else begin
             calc_valid_out <= st4_valid;
             if (st4_valid) begin
                 mean_out <= st4_mean_q16;
-                
                 // Variance: Avg_Sq - Mean_Sq[47:16]
                 var_out  <= st4_avg_sq_q16 - st4_mean_sq_full[47:16];
             end
