@@ -240,7 +240,7 @@ module tb_layer_norm_top;
                             if (diff < 0) diff = -diff;
                             
                             // Tolerance Check (Allow +/- 1 error for rounding differences)
-                            if (diff > 1) begin 
+                            if (diff >= 1) begin 
                                 if (err_cnt < 10) 
                                     $display("[FAIL] Idx%0d: Exp=%d, Act=%d (Diff=%d)", global_idx, exp_val, rtl_val, diff);
                                 err_cnt = err_cnt + 1;
