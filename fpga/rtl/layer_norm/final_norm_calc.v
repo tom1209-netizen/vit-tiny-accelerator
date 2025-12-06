@@ -32,8 +32,7 @@ module final_norm_calc #(
     // =========================================================
     // OPTIMIZED PARAMETER STORAGE
     // =========================================================
-    localparam STORE_W = 24; 
-    
+    localparam STORE_W = 24;
     reg signed [STORE_W-1:0] latched_beta;   // Q8.16
     reg signed [STORE_W-1:0] combined_scale; // Q8.16
     reg signed [STAT_WIDTH-1:0] latched_mean;
@@ -53,7 +52,6 @@ module final_norm_calc #(
     localparam WAIT_MUL   = 1; 
     localparam WAIT_SCALE = 2; // NEW STATE: Wait for extraction
     localparam BUSY       = 3;
-    
     reg [1:0] state;
 
     always @(posedge clk) begin
@@ -70,7 +68,6 @@ module final_norm_calc #(
             case (state)
                 IDLE: begin
                     s_axis_ready <= 0;
-                    
                     if (params_valid) begin
                         latched_mean <= mean_val;
                         latched_beta <= beta_val[STORE_W-1:0];
@@ -91,8 +88,7 @@ module final_norm_calc #(
                 
                 WAIT_SCALE: begin
                     // Stage 3: Extract (Now safe because r_mul_full is stable)
-                    combined_scale <= r_mul_full[39:16]; 
-                    
+                    combined_scale <= r_mul_full[39:16];
                     state        <= BUSY;
                     s_axis_ready <= 1;
                 end
@@ -106,7 +102,7 @@ module final_norm_calc #(
                             s_axis_ready <= 0;
                         end
                     end else begin
-                        s_axis_ready <= 0; 
+                        s_axis_ready <= 0;
                     end
                 end
             endcase
@@ -144,7 +140,6 @@ module final_norm_calc #(
     reg signed [31:0] st2_norm_val [0:PARALLEL_N-1];
     reg               st2_valid;
     reg               st2_last;
-    
     reg signed [55:0] mul_comb [0:PARALLEL_N-1];
     integer j;
 
@@ -172,48 +167,73 @@ module final_norm_calc #(
     end
 
     // =========================================================
-    // STAGE 3: ADD BETA & RE-QUANTIZE
+    // STAGE 3: ADD BETA & PREPARE ROUNDING (NEW PIPELINE STAGE)
     // =========================================================
+    // Breaking the critical path: Moving Addition here.
+    // Also adding 0.5 (0x8000 in Q16.16) here to prepare for rounding in next stage.
     
-    reg signed [31:0] final_val_q16     [0:PARALLEL_N-1];
-    reg signed [31:0] final_int_rounded [0:PARALLEL_N-1];
-    reg [7:0]         clamped_val       [0:PARALLEL_N-1];
+    reg signed [31:0] st3_val_w_offset [0:PARALLEL_N-1];
+    reg               st3_valid;
+    reg               st3_last;
     integer k;
 
-    always @(*) begin
-        for (k = 0; k < PARALLEL_N; k = k + 1) begin
-            final_val_q16[k] = st2_norm_val[k] + {{8{latched_beta[STORE_W-1]}}, latched_beta};
+    always @(posedge clk) begin
+        if (!aresetn) begin
+            st3_valid <= 0;
+            st3_last  <= 0;
+        end else if (m_axis_ready) begin
+            st3_valid <= st2_valid;
+            st3_last  <= st2_last;
 
-            final_int_rounded[k] = 0;
-            clamped_val[k]       = 0;
-
-            if (DO_REQUANTIZE) begin
-                // Round Half Up logic: floor(x + 0.5)
-                final_int_rounded[k] = (final_val_q16[k] + $signed(32'h8000)) >>> 16;
-                
-                if (final_int_rounded[k] > 127) clamped_val[k] = 8'd127;
-                else if (final_int_rounded[k] < -128) clamped_val[k] = -8'd128;
-                else clamped_val[k] = final_int_rounded[k][7:0];
+            if (st2_valid) begin
+                for (k = 0; k < PARALLEL_N; k = k + 1) begin
+                    // Optimization: Add Beta and the Rounding Constant (0.5) simultaneously
+                    // 32'sh0000_8000 represents 0.5 in Q16.16
+                    if (DO_REQUANTIZE) begin
+                         st3_val_w_offset[k] <= st2_norm_val[k] + {{8{latched_beta[STORE_W-1]}}, latched_beta} + 32'sh0000_8000;
+                    end else begin
+                         st3_val_w_offset[k] <= st2_norm_val[k] + {{8{latched_beta[STORE_W-1]}}, latched_beta};
+                    end
+                end
             end
         end
     end
 
+    // =========================================================
+    // STAGE 4: SHIFT & CLAMP (OUTPUT STAGE)
+    // =========================================================
+    // Now this stage only does Shift + Comparator, reducing logic depth significantly.
+
+    reg signed [31:0] final_int_shifted;
+    reg [7:0]         clamped_val_temp;
     integer m;
+
     always @(posedge clk) begin
         if (!aresetn) begin
             m_axis_valid <= 0;
             m_axis_last  <= 0;
             m_axis_data  <= 0;
         end else if (m_axis_ready) begin
-            m_axis_valid <= st2_valid; 
-            m_axis_last  <= st2_last; 
+            m_axis_valid <= st3_valid;
+            m_axis_last  <= st3_last; 
             
-            if (st2_valid) begin
+            if (st3_valid) begin
                 for (m = 0; m < PARALLEL_N; m = m + 1) begin
                     if (DO_REQUANTIZE) begin
-                        m_axis_data[m*8 +: 8] <= clamped_val[m];
+                        // Shift down (Round Half Up was handled by adding 0x8000 in Stage 3)
+                        final_int_shifted = st3_val_w_offset[m] >>> 16;
+
+                        // Clamp
+                        if (final_int_shifted > 127) 
+                            clamped_val_temp = 8'd127;
+                        else if (final_int_shifted < -128) 
+                            clamped_val_temp = -8'd128;
+                        else 
+                            clamped_val_temp = final_int_shifted[7:0];
+
+                        m_axis_data[m*8 +: 8] <= clamped_val_temp;
                     end else begin
-                        m_axis_data[m*32 +: 32] <= final_val_q16[m];
+                        m_axis_data[m*32 +: 32] <= st3_val_w_offset[m];
                     end
                 end
             end

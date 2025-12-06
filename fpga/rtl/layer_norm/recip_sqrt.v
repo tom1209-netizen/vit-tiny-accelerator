@@ -22,7 +22,6 @@ module recip_sqrt #(
     // =========================================================================
     (* rom_style = "block" *)
     reg [OUT_WIDTH-1:0] lut_2_pow_v [0:(1<<M_BITS)-1];
-    
     initial begin
         $readmemh("lut_pow2.hex", lut_2_pow_v);
     end
@@ -30,25 +29,20 @@ module recip_sqrt #(
     localparam K_WIDTH = $clog2(DATA_WIDTH); // 5
     localparam MAX_OUTPUT = 32'h7FFFFFFF;
 
-    assign o_var_tready = 1'b1; 
+    assign o_var_tready = 1'b1;
 
     // =========================================================================
     // STAGE 1: LEADING ONE DETECTION (LOD)
     // =========================================================================
-    // Critical Path 1A: Priority Encoder only.
-    // We latch 'k' and the Input Data separately.
-    
     reg [K_WIDTH-1:0]    st1_k;
-    reg [DATA_WIDTH-1:0] st1_var_d; // Delay input for next stage
+    reg [DATA_WIDTH-1:0] st1_var_d;
     reg                  st1_valid;
     reg                  st1_zero;
-
     reg [K_WIDTH-1:0]    lod_comb;
     integer i;
     
     always @(*) begin
         lod_comb = 0;
-        // Priority Encoder
         for (i = 0; i < DATA_WIDTH; i = i + 1) begin
             if (i_var[i]) lod_comb = i[K_WIDTH-1:0];
         end
@@ -74,9 +68,6 @@ module recip_sqrt #(
     // =========================================================================
     // STAGE 2: NORMALIZATION (BARREL SHIFTER)
     // =========================================================================
-    // Critical Path 1B: Barrel Shifter only.
-    // Uses registered 'k' and 'var' from Stage 1.
-    
     reg [M_BITS-1:0]     st2_mantissa;
     reg [K_WIDTH-1:0]    st2_k;
     reg                  st2_valid;
@@ -93,12 +84,7 @@ module recip_sqrt #(
             st2_zero  <= st1_zero;
             
             if (st1_valid) begin
-                // Pass 'k' forward for Stage 3
                 st2_k <= st1_k;
-                
-                // Normalize: Shift left so MSB is at index 31.
-                // We take the top M_BITS after the MSB.
-                // Logic operates on registered data from Stage 1.
                 st2_mantissa <= (st1_var_d << ((DATA_WIDTH - 1) - st1_k)) >> (DATA_WIDTH - 1 - M_BITS);
             end
         end
@@ -107,10 +93,8 @@ module recip_sqrt #(
     // =========================================================================
     // STAGE 3: PEANO ARITHMETIC
     // =========================================================================
-    // Calculates 'u' and 'v' (LUT address).
-    
     reg signed [K_WIDTH:0] st3_u;
-    reg [M_BITS-1:0]       st3_addr; 
+    reg [M_BITS-1:0]       st3_addr;
     reg                    st3_valid;
     reg                    st3_zero;
 
@@ -119,8 +103,6 @@ module recip_sqrt #(
 
     wire signed [31:0] combined_val;
     wire signed [31:0] neg_halved;
-
-    // Peano formula
     assign combined_val = (k_real_exponent <<< M_BITS) | {20'd0, st2_mantissa};
     assign neg_halved   = (-combined_val) >>> 1;
 
@@ -144,8 +126,6 @@ module recip_sqrt #(
     // =========================================================================
     // STAGE 4: MEMORY READ (BRAM)
     // =========================================================================
-    // Synchronous read.
-    
     reg [OUT_WIDTH-1:0]     st4_lut_val;
     reg signed [K_WIDTH:0]  st4_u;
     reg                     st4_valid;
@@ -169,20 +149,43 @@ module recip_sqrt #(
     end
 
     // =========================================================================
-    // STAGE 5: FINAL SCALING
+    // STAGE 5: BUFFER & PRE-CALC SHIFT (NEW STAGE)
     // =========================================================================
-    // Variable Shifter for final result.
-    
-    reg [OUT_WIDTH-1:0] st5_result;
-    integer diff_shift;
+    // Isolate BRAM Read from Shifter Logic
+    reg [OUT_WIDTH-1:0] st5_lut_val;
+    reg signed [31:0]   st5_diff_shift; // Pre-calculated shift amount
+    reg                 st5_valid;
+    reg                 st5_zero;
 
+    always @(posedge clk) begin
+        if (!aresetn) begin
+            st5_valid      <= 0;
+            st5_zero       <= 0;
+            st5_lut_val    <= 0;
+            st5_diff_shift <= 0;
+        end else begin
+            st5_valid <= st4_valid;
+            st5_zero  <= st4_zero;
+
+            if (st4_valid) begin
+                st5_lut_val    <= st4_lut_val;
+                // Move the subtraction here (logic after register is fast)
+                st5_diff_shift <= st4_u - (30 - FRAC_BITS);
+            end
+        end
+    end
+
+    // =========================================================================
+    // STAGE 6: FINAL SCALING (OUTPUT)
+    // =========================================================================
+    // Now the shifter inputs are fully registered
+    reg [OUT_WIDTH-1:0] st6_result;
+    
     always @(*) begin
-        diff_shift = st4_u - (30 - FRAC_BITS);
-        
-        if (diff_shift >= 0)
-            st5_result = st4_lut_val << diff_shift;
+        if (st5_diff_shift >= 0)
+            st6_result = st5_lut_val << st5_diff_shift;
         else
-            st5_result = st4_lut_val >> (-diff_shift);
+            st6_result = st5_lut_val >> (-st5_diff_shift);
     end
 
     always @(posedge clk) begin
@@ -190,13 +193,12 @@ module recip_sqrt #(
             o_recip_sqrt_tvalid <= 0;
             o_recip_sqrt        <= 0;
         end else begin
-            o_recip_sqrt_tvalid <= st4_valid;
-            
-            if (st4_valid) begin
-                if (st4_zero) 
+            o_recip_sqrt_tvalid <= st5_valid;
+            if (st5_valid) begin
+                if (st5_zero) 
                     o_recip_sqrt <= MAX_OUTPUT;
                 else 
-                    o_recip_sqrt <= st5_result;
+                    o_recip_sqrt <= st6_result;
             end
         end
     end
