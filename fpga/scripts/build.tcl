@@ -17,11 +17,31 @@ set constraint_file [file join $constraints_dir "arty_z7.xdc"]
 
 # RTL sources in dependency-friendly order
 set rtl_files [list \
-    [file join $rtl_dir "gemm" "processing_element.v"] \
-    [file join $rtl_dir "gemm" "systolic_array.v"] \
-    [file join $rtl_dir "gemm" "input_buffer_controller.v"] \
-    [file join $rtl_dir "gemm" "output_collector.v"] \
-    [file join $rtl_dir "gemm" "gemm_core_top.v"] \
+    "$rtl_dir/cpu_core/if/pc_reg.v" \
+    "$rtl_dir/cpu_core/if/if_stage.v" \
+    "$rtl_dir/cpu_core/if/if_id_reg.v" \
+    "$rtl_dir/cpu_core/id/imm_gen.v" \
+    "$rtl_dir/cpu_core/id/control.v" \
+    "$rtl_dir/cpu_core/id/reg_file.v" \
+    "$rtl_dir/cpu_core/id/id_ex_reg.v" \
+    "$rtl_dir/cpu_core/id/id_stage.v" \
+    "$rtl_dir/cpu_core/ex/divider_16stage.v" \
+    "$rtl_dir/cpu_core/ex/divu_iter.v" \
+    "$rtl_dir/cpu_core/ex/mul_div.v" \
+    "$rtl_dir/cpu_core/ex/kogge_stone_adder.v" \
+    "$rtl_dir/cpu_core/ex/alu.v" \
+    "$rtl_dir/cpu_core/ex/scoreboard.v" \
+    "$rtl_dir/cpu_core/ex/ex_mem_reg.v" \
+    "$rtl_dir/cpu_core/ex/ex_stage.v" \
+    "$rtl_dir/cpu_core/mem/mem_stage.v" \
+    "$rtl_dir/cpu_core/mem/mem_wb_reg.v" \
+    "$rtl_dir/cpu_core/wb/wb_stage.v" \
+    "$rtl_dir/cpu_core/wb/wb_arbiter.v" \
+    "$rtl_dir/memory/instr_mem.v" \
+    "$rtl_dir/memory/data_mem.v" \
+    "$rtl_dir/csr_file.v" \
+    "$rtl_dir/hazard_unit.v" \
+    "$rtl_dir/riscv_core.v" \
 ]
 
 # Begin synthesis flow

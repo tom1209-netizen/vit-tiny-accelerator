@@ -9,7 +9,7 @@ set build_dir        [file join $fpga_dir "build"]
 file mkdir $build_dir
 
 # Design / board settings
-set top_module      "gemm_core_top"
+set top_module      "softmax_unit"
 set fpga_part       "xc7z020clg400-1"
 set constraint_file [file join $constraints_dir "arty_z7.xdc"]
 
@@ -20,11 +20,10 @@ set fmax_report     [file join $build_dir "${top_module}_fmax.txt"]
 
 # RTL sources in dependency-friendly order
 set rtl_files [list \
-    [file join $rtl_dir "gemm" "processing_element.v"] \
-    [file join $rtl_dir "gemm" "systolic_array.v"] \
-    [file join $rtl_dir "gemm" "input_buffer_controller.v"] \
-    [file join $rtl_dir "gemm" "output_collector.v"] \
-    [file join $rtl_dir "gemm" "gemm_core_top.v"] \
+    [file join $rtl_dir "softmax" "exp_rom.v"] \
+    [file join $rtl_dir "softmax" "msr_unit.v"] \
+    [file join $rtl_dir "softmax" "softmax_fifo.v"] \
+    [file join $rtl_dir "softmax" "softmax_unit.v"] \
 ]
 
 # Read RTL
