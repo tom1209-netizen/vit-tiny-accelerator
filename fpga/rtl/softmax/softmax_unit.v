@@ -1,0 +1,440 @@
+`timescale 1ns / 1ps
+
+module softmax_unit #(
+    parameter integer AXIS_DATA_WIDTH = 64,
+    parameter integer DATA_WIDTH      = 8,
+    parameter integer EXP_WIDTH       = 20,
+    parameter integer SUM_WIDTH       = 32,
+    parameter integer RECIP_WIDTH     = 16,
+    parameter integer FIFO_DEPTH      = 256,
+    parameter         EXP_INIT_FILE   = "lut/exp_table_q4_16.hex",
+    parameter         RECIP_INIT_FILE = "lut/recip_lut.hex"
+) (
+    input wire clk,
+    input wire rst_n,
+
+    // Control
+    input  wire        start,
+    input  wire [31:0] num_tokens,
+    output reg         done,
+
+    // AXI4-Stream input (INT8 logits, 8 lanes)
+    input  wire [AXIS_DATA_WIDTH-1:0] s_axis_tdata,
+    input  wire                       s_axis_tvalid,
+    input  wire                       s_axis_tlast,
+    output wire                       s_axis_tready,
+
+    // AXI4-Stream output (UINT8 probabilities, 8 lanes)
+    output wire [AXIS_DATA_WIDTH-1:0] m_axis_tdata,
+    output wire                       m_axis_tvalid,
+    output wire                       m_axis_tlast,
+    input  wire                       m_axis_tready
+);
+    localparam integer LANES = AXIS_DATA_WIDTH / DATA_WIDTH;  // = 8
+    localparam integer FIFO_WIDTH = LANES * EXP_WIDTH;  // = 160
+
+    // 5-state FSM with S_FIND_MAX for numerical stability
+    localparam [2:0] S_IDLE       = 3'd0,
+                     S_FIND_MAX   = 3'd1,
+                     S_ACCUMULATE = 3'd2,
+                     S_CALC_RECIP = 3'd3,
+                     S_NORMALIZE  = 3'd4;
+
+    reg [2:0] state, next_state;
+
+    // Counters and accumulators
+    reg [SUM_WIDTH-1:0] global_sum;
+    reg [31:0] tokens_accepted;
+    reg [31:0] tokens_processed;
+    reg [31:0] tokens_sent;
+
+    // Max value for numerical stability (signed)
+    reg signed [DATA_WIDTH-1:0] global_max;
+
+    // MSR results latched for pass 2
+    reg [RECIP_WIDTH-1:0] msr_mult_r;
+    reg [4:0] msr_shift_r;
+
+    // Exp pipeline registers
+    reg exp_sum_valid;
+    reg exp_out_valid;
+
+    // =========================================================================
+    // INPUT FIFO - buffer raw inputs during S_FIND_MAX for reuse in S_ACCUMULATE
+    // =========================================================================
+    wire [AXIS_DATA_WIDTH-1:0] input_fifo_dout;
+    wire input_fifo_full, input_fifo_empty;
+    reg  input_fifo_wr_en;
+    reg  input_fifo_rd_en;
+    wire input_fifo_clr = (state == S_IDLE) && start;
+
+    softmax_fifo #(
+        .WIDTH(AXIS_DATA_WIDTH),
+        .DEPTH(FIFO_DEPTH)
+    ) u_input_fifo (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .clr  (input_fifo_clr),
+        .wr_en(input_fifo_wr_en),
+        .din  (s_axis_tdata),
+        .rd_en(input_fifo_rd_en),
+        .dout (input_fifo_dout),
+        .full (input_fifo_full),
+        .empty(input_fifo_empty)
+    );
+
+    // =========================================================================
+    // MAX-FINDING TREE (8 lanes -> 1 max value)
+    // =========================================================================
+    wire signed [DATA_WIDTH-1:0] lane_in[0:LANES-1];
+    genvar gl;
+    generate
+        for (gl = 0; gl < LANES; gl = gl + 1) begin : unpack_lanes
+            assign lane_in[gl] = s_axis_tdata[gl*DATA_WIDTH+:DATA_WIDTH];
+        end
+    endgenerate
+
+    // Tree reduction to find max of 8 signed values
+    wire signed [DATA_WIDTH-1:0] max_01 = (lane_in[0] > lane_in[1]) ? lane_in[0] : lane_in[1];
+    wire signed [DATA_WIDTH-1:0] max_23 = (lane_in[2] > lane_in[3]) ? lane_in[2] : lane_in[3];
+    wire signed [DATA_WIDTH-1:0] max_45 = (lane_in[4] > lane_in[5]) ? lane_in[4] : lane_in[5];
+    wire signed [DATA_WIDTH-1:0] max_67 = (lane_in[6] > lane_in[7]) ? lane_in[6] : lane_in[7];
+    wire signed [DATA_WIDTH-1:0] max_0123 = (max_01 > max_23) ? max_01 : max_23;
+    wire signed [DATA_WIDTH-1:0] max_4567 = (max_45 > max_67) ? max_45 : max_67;
+    wire signed [DATA_WIDTH-1:0] beat_max = (max_0123 > max_4567) ? max_0123 : max_4567;
+
+    // =========================================================================
+    // EXP ROM with max-subtracted addressing
+    // =========================================================================
+    wire [EXP_WIDTH-1:0] exp_out[0:LANES-1];
+    wire signed [DATA_WIDTH-1:0] shifted_lane[0:LANES-1];
+
+    // Register to hold input_fifo data for exp_rom (stable during ROM latency)
+    reg [AXIS_DATA_WIDTH-1:0] input_fifo_data_reg;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            input_fifo_data_reg <= {AXIS_DATA_WIDTH{1'b0}};
+        end else if (input_fifo_rd_en) begin
+            // Capture input_fifo_dout when read is triggered
+            input_fifo_data_reg <= input_fifo_dout;
+        end
+    end
+
+    genvar g;
+    generate
+        for (g = 0; g < LANES; g = g + 1) begin : gen_exp_rom
+            // Subtract global_max for numerical stability
+            // Use registered data instead of combinational fifo output
+            wire signed [DATA_WIDTH-1:0] fifo_lane = input_fifo_data_reg[g*DATA_WIDTH+:DATA_WIDTH];
+            assign shifted_lane[g] = fifo_lane - global_max;
+
+            exp_rom #(
+                .ADDR_WIDTH(8),
+                .DATA_WIDTH(EXP_WIDTH),
+                .INIT_FILE (EXP_INIT_FILE)
+            ) u_exp_rom (
+                .clk (clk),
+                .addr(shifted_lane[g]),  // Now always <= 0
+                .dout(exp_out[g])
+            );
+        end
+    endgenerate
+
+    // Sum of 8 exp results (combinational -> registered)
+    reg [SUM_WIDTH-1:0] exp_sum;
+    reg [SUM_WIDTH-1:0] exp_sum_reg;
+    integer i;
+    always @(*) begin
+        exp_sum = {SUM_WIDTH{1'b0}};
+        for (i = 0; i < LANES; i = i + 1) begin
+            exp_sum = exp_sum + {{(SUM_WIDTH - EXP_WIDTH) {1'b0}}, exp_out[i]};
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            exp_sum_reg   <= {SUM_WIDTH{1'b0}};
+            exp_sum_valid <= 1'b0;
+        end else if (state == S_IDLE) begin
+            exp_sum_reg   <= {SUM_WIDTH{1'b0}};
+            exp_sum_valid <= 1'b0;
+        end else if (exp_out_valid) begin
+            exp_sum_reg   <= exp_sum;
+            exp_sum_valid <= 1'b1;
+        end else begin
+            exp_sum_valid <= 1'b0;
+        end
+    end
+
+    // =========================================================================
+    // EXP FIFO - buffer exp results between passes
+    // =========================================================================
+    reg  [FIFO_WIDTH-1:0] fifo_din_reg;
+    reg                   fifo_wr_en_reg;
+    wire [FIFO_WIDTH-1:0] fifo_dout;
+    wire fifo_full, fifo_empty;
+    wire fifo_rd_en;
+    wire fifo_clr = (state == S_IDLE) && start;
+
+    integer p;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            fifo_din_reg   <= {FIFO_WIDTH{1'b0}};
+            fifo_wr_en_reg <= 1'b0;
+        end else if (state == S_IDLE) begin
+            fifo_din_reg   <= {FIFO_WIDTH{1'b0}};
+            fifo_wr_en_reg <= 1'b0;
+        end else if (state == S_ACCUMULATE && exp_out_valid && !fifo_full) begin
+            // Only write to exp_fifo during S_ACCUMULATE to prevent stale X writes
+            for (p = 0; p < LANES; p = p + 1) fifo_din_reg[p*EXP_WIDTH+:EXP_WIDTH] <= exp_out[p];
+            fifo_wr_en_reg <= 1'b1;
+        end else begin
+            fifo_wr_en_reg <= 1'b0;
+        end
+    end
+
+    softmax_fifo #(
+        .WIDTH(FIFO_WIDTH),
+        .DEPTH(FIFO_DEPTH)
+    ) u_exp_fifo (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .clr  (fifo_clr),
+        .wr_en(fifo_wr_en_reg),
+        .din  (fifo_din_reg),
+        .rd_en(fifo_rd_en),
+        .dout (fifo_dout),
+        .full (fifo_full),
+        .empty(fifo_empty)
+    );
+
+    // =========================================================================
+    // MSR unit (reciprocal approximation)
+    // =========================================================================
+    wire [RECIP_WIDTH-1:0] msr_mult;
+    wire [4:0] msr_shift;
+
+    msr_unit #(
+        .SUM_WIDTH  (SUM_WIDTH),
+        .RECIP_WIDTH(RECIP_WIDTH),
+        .LUT_ADDR_W (6),
+        .INIT_FILE  (RECIP_INIT_FILE)
+    ) u_msr (
+        .sum_in     (global_sum),
+        .recip_out  (msr_mult),
+        .shift_alpha(msr_shift)
+    );
+
+    // =========================================================================
+    // Normalization datapath
+    // =========================================================================
+    wire [EXP_WIDTH-1:0] exp_pop[0:LANES-1];
+    genvar u;
+    generate
+        for (u = 0; u < LANES; u = u + 1) begin : unpack_fifo_out
+            assign exp_pop[u] = fifo_dout[u*EXP_WIDTH+:EXP_WIDTH];
+        end
+    endgenerate
+
+    // Multiply pipeline
+    reg     [               35:0] prod_reg   [0:LANES-1];
+    reg                           prod_valid;
+
+    // Shift + saturate
+    reg     [AXIS_DATA_WIDTH-1:0] shift_data;
+    reg     [               47:0] shift_tmp;
+    integer                       k;
+    always @(*) begin
+        shift_data = {AXIS_DATA_WIDTH{1'b0}};
+        for (k = 0; k < LANES; k = k + 1) begin
+            shift_tmp = (prod_reg[k] >> msr_shift_r) >> 7;
+            if (shift_tmp > 48'd255) shift_data[k*DATA_WIDTH+:DATA_WIDTH] = 8'hFF;
+            else shift_data[k*DATA_WIDTH+:DATA_WIDTH] = shift_tmp[7:0];
+        end
+    end
+
+    // Output holding register
+    reg [AXIS_DATA_WIDTH-1:0] out_data_r;
+    reg out_valid_r;
+    reg out_last_r;
+
+    wire handshake_out = out_valid_r && m_axis_tready;
+    wire out_ready_for_new = (!out_valid_r) || handshake_out;
+    wire can_pop_fifo = (state == S_NORMALIZE) && !fifo_empty && out_ready_for_new && !prod_valid;
+    wire [31:0] tokens_sent_after_consume = tokens_sent + (handshake_out ? LANES : 0);
+    wire last_for_output = (tokens_sent_after_consume + LANES >= num_tokens);
+
+    assign m_axis_tdata = out_data_r;
+    assign m_axis_tvalid = out_valid_r;
+    assign m_axis_tlast = out_last_r;
+
+    // Input ready only during S_FIND_MAX
+    assign s_axis_tready = (state == S_FIND_MAX) && !input_fifo_full && (tokens_accepted < num_tokens);
+
+    assign fifo_rd_en = can_pop_fifo;
+
+    // =========================================================================
+    // Control logic for input FIFO read during S_ACCUMULATE
+    // =========================================================================
+    wire accept_input_fifo = (state == S_ACCUMULATE) && !input_fifo_empty && !fifo_full;
+
+    // Pipeline: input_fifo_rd_en (cycle 0) → data_reg captures + exp_rom latches (cycle 1) → exp_out valid (cycle 2)
+    // Total: 2 cycles of latency
+    reg  input_fifo_rd_en_d1;  // Stage 1: data_reg captures, exp_rom latches
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            input_fifo_rd_en    <= 1'b0;
+            input_fifo_rd_en_d1 <= 1'b0;
+            exp_out_valid       <= 1'b0;
+        end else if (state != S_ACCUMULATE) begin
+            // Clear pipeline when not in ACCUMULATE to prevent stale X values
+            input_fifo_rd_en    <= 1'b0;
+            input_fifo_rd_en_d1 <= 1'b0;
+            exp_out_valid       <= 1'b0;
+        end else begin
+            input_fifo_rd_en    <= accept_input_fifo;
+            input_fifo_rd_en_d1 <= input_fifo_rd_en;
+            exp_out_valid       <= input_fifo_rd_en_d1;
+        end
+    end
+
+    // =========================================================================
+    // State Machine
+    // =========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) state <= S_IDLE;
+        else state <= next_state;
+    end
+
+    always @(*) begin
+        next_state = state;
+        case (state)
+            S_IDLE: begin
+                if (start) begin
+                    if (num_tokens != 0) next_state = S_FIND_MAX;
+                    else next_state = S_IDLE;
+                end
+            end
+            S_FIND_MAX: begin
+                // Transition when all tokens accepted into input_fifo
+                if (tokens_accepted >= num_tokens) next_state = S_ACCUMULATE;
+            end
+            S_ACCUMULATE: begin
+                if (exp_sum_valid && (tokens_processed + LANES >= num_tokens))
+                    next_state = S_CALC_RECIP;
+            end
+            S_CALC_RECIP: begin
+                next_state = S_NORMALIZE;
+            end
+            S_NORMALIZE: begin
+                if (handshake_out && out_last_r) next_state = S_IDLE;
+            end
+            default: next_state = S_IDLE;
+        endcase
+    end
+
+    // =========================================================================
+    // Datapath Logic
+    // =========================================================================
+    wire accept_axi_input = (state == S_FIND_MAX) && s_axis_tvalid && s_axis_tready;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            global_sum       <= {SUM_WIDTH{1'b0}};
+            global_max       <= 8'h80;  // -128 (minimum signed value)
+            tokens_accepted  <= 32'd0;
+            tokens_processed <= 32'd0;
+            tokens_sent      <= 32'd0;
+            msr_mult_r       <= {RECIP_WIDTH{1'b0}};
+            msr_shift_r      <= 5'd0;
+            prod_valid       <= 1'b0;
+            out_data_r       <= {AXIS_DATA_WIDTH{1'b0}};
+            out_valid_r      <= 1'b0;
+            out_last_r       <= 1'b0;
+            done             <= 1'b0;
+            input_fifo_wr_en <= 1'b0;
+            // Initialize prod_reg to prevent X propagation
+            for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= 36'd0;
+        end else begin
+            done <= 1'b0;
+
+            case (state)
+                S_IDLE: begin
+                    global_sum       <= {SUM_WIDTH{1'b0}};
+                    global_max       <= 8'h80;  // Reset to minimum
+                    tokens_accepted  <= 32'd0;
+                    tokens_processed <= 32'd0;
+                    tokens_sent      <= 32'd0;
+                    out_valid_r      <= 1'b0;
+                    out_last_r       <= 1'b0;
+                    prod_valid       <= 1'b0;
+                    input_fifo_wr_en <= 1'b0;
+                    if (start && num_tokens == 0) begin
+                        done <= 1'b1;
+                    end
+                end
+
+                S_FIND_MAX: begin
+                    if (accept_axi_input) begin
+                        // Write to input FIFO
+                        input_fifo_wr_en <= 1'b1;
+                        tokens_accepted  <= tokens_accepted + LANES;
+                        // Update global max
+                        if (beat_max > global_max) begin
+                            global_max <= beat_max;
+                        end
+                    end else begin
+                        input_fifo_wr_en <= 1'b0;
+                    end
+                end
+
+                S_ACCUMULATE: begin
+                    input_fifo_wr_en <= 1'b0;  // No more AXI writes
+                    if (exp_sum_valid) begin
+                        global_sum       <= global_sum + exp_sum_reg;
+                        tokens_processed <= tokens_processed + LANES;
+                    end
+                end
+
+                S_CALC_RECIP: begin
+                    msr_mult_r  <= msr_mult;
+                    msr_shift_r <= msr_shift;
+                    tokens_sent <= 32'd0;
+                    out_valid_r <= 1'b0;
+                    out_last_r  <= 1'b0;
+                    prod_valid  <= 1'b0;
+                end
+
+                S_NORMALIZE: begin
+                    // Stage A: FIFO -> multiply
+                    if (can_pop_fifo) begin
+                        for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= exp_pop[k] * msr_mult_r;
+                        prod_valid <= 1'b1;
+                    end
+
+                    // Stage B: multiply result -> shift/saturate -> output reg
+                    if (out_ready_for_new && prod_valid) begin
+                        out_data_r  <= shift_data;
+                        out_valid_r <= 1'b1;
+                        out_last_r  <= last_for_output;
+                        prod_valid  <= 1'b0;
+                    end else if (handshake_out && !prod_valid) begin
+                        out_valid_r <= 1'b0;
+                        out_last_r  <= 1'b0;
+                    end
+
+                    if (handshake_out) begin
+                        tokens_sent <= tokens_sent_after_consume;
+                        if (out_last_r) begin
+                            done        <= 1'b1;
+                            out_valid_r <= 1'b0;
+                            out_last_r  <= 1'b0;
+                        end
+                    end
+                end
+            endcase
+        end
+    end
+
+endmodule
