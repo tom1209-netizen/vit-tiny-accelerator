@@ -184,25 +184,41 @@ module softmax_unit #(
         end
     endgenerate
 
-    // Sum of 8 exp results (combinational) - PIPELINED for timing
-    reg [SUM_WIDTH-1:0] exp_sum;
-    integer i;
-    always @(*) begin
-        exp_sum = {SUM_WIDTH{1'b0}};
-        for (i = 0; i < LANES; i = i + 1) begin
-            exp_sum = exp_sum + {{(SUM_WIDTH - EXP_WIDTH) {1'b0}}, exp_out[i]};
-        end
-    end
+    // =========================================================================
+    // 2-STAGE PIPELINED ADDER TREE for 8-lane exp_sum
+    // =========================================================================
+    // Stage 1: 8→4 pairwise additions (registered)
+    // Stage 2: 4→1 final sum (combinational, then registered into exp_sum_r)
+    // =========================================================================
 
-    // Pipeline register for exp_sum to break accumulator critical path
-    reg  [ SUM_WIDTH-1:0] exp_sum_r;
-    reg                   exp_sum_valid;
+    // Wider intermediate width for pairwise sums (20 bits: 19+1 for overflow)
+    localparam PAIR_WIDTH = EXP_WIDTH + 1;  // 20 bits
+
+    // Stage 1: Pairwise sums (combinational)
+    wire [PAIR_WIDTH-1:0] pair_01 = {1'b0, exp_out[0]} + {1'b0, exp_out[1]};
+    wire [PAIR_WIDTH-1:0] pair_23 = {1'b0, exp_out[2]} + {1'b0, exp_out[3]};
+    wire [PAIR_WIDTH-1:0] pair_45 = {1'b0, exp_out[4]} + {1'b0, exp_out[5]};
+    wire [PAIR_WIDTH-1:0] pair_67 = {1'b0, exp_out[6]} + {1'b0, exp_out[7]};
+
+    // Stage 1 registers
+    reg [PAIR_WIDTH-1:0] pair_01_r, pair_23_r, pair_45_r, pair_67_r;
+    reg sum_stage1_valid;
+
+    // Stage 2: 4→1 final sum (combinational from registered pairs)
+    wire [PAIR_WIDTH:0] quad_0123 = {1'b0, pair_01_r} + {1'b0, pair_23_r};  // 21 bits
+    wire [PAIR_WIDTH:0] quad_4567 = {1'b0, pair_45_r} + {1'b0, pair_67_r};  // 21 bits
+    wire [SUM_WIDTH-1:0] exp_sum = {{(SUM_WIDTH-PAIR_WIDTH-2){1'b0}}, quad_0123} + 
+                                   {{(SUM_WIDTH-PAIR_WIDTH-2){1'b0}}, quad_4567};
+
+    // Pipeline register for final exp_sum (breaks accumulator critical path)
+    reg [SUM_WIDTH-1:0] exp_sum_r;
+    reg exp_sum_valid;
 
     // =========================================================================
     // EXP FIFO - buffer exp results between passes
     // =========================================================================
-    reg  [FIFO_WIDTH-1:0] fifo_din_reg;
-    reg                   fifo_wr_en_reg;
+    reg [FIFO_WIDTH-1:0] fifo_din_reg;
+    reg fifo_wr_en_reg;
     wire [FIFO_WIDTH-1:0] fifo_dout;
     wire fifo_full, fifo_empty;
     wire fifo_rd_en;
@@ -378,8 +394,9 @@ module softmax_unit #(
                     next_state = S_ACCUMULATE;
             end
             S_ACCUMULATE: begin
-                // Wait for all tokens processed AND exp_sum pipeline drained
-                if (tokens_processed >= num_tokens && !exp_sum_valid) next_state = S_CALC_RECIP;
+                // Wait for all tokens processed AND both pipeline stages drained
+                if (tokens_processed >= num_tokens && !sum_stage1_valid && !exp_sum_valid)
+                    next_state = S_CALC_RECIP;
             end
             S_CALC_RECIP: begin
                 // Wait for pipelined MSR to produce valid output (2 cycles after start)
@@ -413,6 +430,11 @@ module softmax_unit #(
             exp_pop_valid     <= 1'b0;
             exp_sum_r         <= {SUM_WIDTH{1'b0}};
             exp_sum_valid     <= 1'b0;
+            sum_stage1_valid  <= 1'b0;
+            pair_01_r         <= {PAIR_WIDTH{1'b0}};
+            pair_23_r         <= {PAIR_WIDTH{1'b0}};
+            pair_45_r         <= {PAIR_WIDTH{1'b0}};
+            pair_67_r         <= {PAIR_WIDTH{1'b0}};
             out_data_r        <= {AXIS_DATA_WIDTH{1'b0}};
             out_valid_r       <= 1'b0;
             out_last_r        <= 1'b0;
@@ -464,15 +486,29 @@ module softmax_unit #(
                 end
 
                 S_ACCUMULATE: begin
-                    // Stage 1: Register exp_sum when data is valid from exp_rom
+                    // =====================================================
+                    // 3-STAGE PIPELINED ACCUMULATION
+                    // =====================================================
+                    // Stage 1: Capture pairwise sums (8→4)
                     if (exp_out_valid_d2) begin
+                        pair_01_r <= pair_01;
+                        pair_23_r <= pair_23;
+                        pair_45_r <= pair_45;
+                        pair_67_r <= pair_67;
+                        sum_stage1_valid <= 1'b1;
+                    end else begin
+                        sum_stage1_valid <= 1'b0;
+                    end
+
+                    // Stage 2: Capture final exp_sum (4→1)
+                    if (sum_stage1_valid) begin
                         exp_sum_r     <= exp_sum;
                         exp_sum_valid <= 1'b1;
                     end else begin
                         exp_sum_valid <= 1'b0;
                     end
 
-                    // Stage 2: Add registered exp_sum to global_sum (pipelined)
+                    // Stage 3: Add to global_sum
                     if (exp_sum_valid) begin
                         global_sum       <= global_sum + exp_sum_r;
                         tokens_processed <= tokens_processed + LANES;

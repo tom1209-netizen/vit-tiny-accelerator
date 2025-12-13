@@ -547,6 +547,47 @@ end
 
 **Results:** 158.91 -> 163.13 MHz (+4.2 MHz)
 
+### Optimization 6: Pipelined Adder Tree
+
+**Problem:** The 8-lane exp_sum adder tree was still the critical path (10 logic levels, 7 CARRY4 + 3 LUTs).
+
+**Solution:** Split the 8-way combinational sum into a 2-stage pipelined tree:
+
+```
+Stage 1: 8 -> 4 pairwise additions (registered)
+         pair_01 = exp_out[0] + exp_out[1]
+         pair_23 = exp_out[2] + exp_out[3]
+         pair_45 = exp_out[4] + exp_out[5]
+         pair_67 = exp_out[6] + exp_out[7]
+         
+Stage 2: 4 -> 1 final sum (combinational, then registered)
+         quad_0123 = pair_01_r + pair_23_r
+         quad_4567 = pair_45_r + pair_67_r
+         exp_sum = quad_0123 + quad_4567
+```
+
+**Implementation:**
+```verilog
+// Stage 1: Pairwise sums (combinational)
+wire [PAIR_WIDTH-1:0] pair_01 = {1'b0, exp_out[0]} + {1'b0, exp_out[1]};
+wire [PAIR_WIDTH-1:0] pair_23 = {1'b0, exp_out[2]} + {1'b0, exp_out[3]};
+// ... (similar for pair_45, pair_67)
+
+// Stage 1 registers
+reg [PAIR_WIDTH-1:0] pair_01_r, pair_23_r, pair_45_r, pair_67_r;
+reg sum_stage1_valid;
+
+// Stage 2: Final sum from registered pairs
+wire [SUM_WIDTH-1:0] exp_sum = quad_0123 + quad_4567;
+```
+
+**S_ACCUMULATE now has 3 stages:**
+1. Capture pairwise sums (8→4)
+2. Capture final exp_sum (4→1)
+3. Add to global_sum
+
+**Results:** 163.13 -> 170.15 MHz (+7 MHz)
+
 ### Overall Optimization Summary
 
 | Optimization | Fmax | WNS | Change |
@@ -556,27 +597,28 @@ end
 | + Pipelined MSR Unit | ~140 MHz | ~-2.1 ns | (fixed MSR path) |
 | + DSP Input Retiming | 156.37 MHz | -1.395 ns | +16.4 MHz |
 | + Control Path | 158.91 MHz | -1.293 ns | +2.5 MHz |
-| **+ Pipelined Accumulator** | **163.13 MHz** | **-1.130 ns** | **+4.2 MHz** |
+| + Pipelined Accumulator | 163.13 MHz | -1.130 ns | +4.2 MHz |
+| **+ Pipelined Adder Tree** | **170.15 MHz** | **-0.877 ns** | **+7.0 MHz** |
 
-**Total Improvement:** 126.61 -> 163.13 MHz (+36.5 MHz, +28.8%)
+**Total Improvement:** 126.61 -> 170.15 MHz (+43.5 MHz, +34.4%)
 
-**Total Latency Impact:** +5-6 cycles across all optimizations
+**Total Latency Impact:** +6-7 cycles across all optimizations
 
 ### Remaining Critical Path
 
-After all optimizations, the critical path is the **8-lane exp_sum adder tree**:
+After all optimizations, the critical path is the **I/O path** (OOC constraint artifact):
 
 ```
-exp_rom[0]/dout -> 8×19-bit adder tree (7 CARRY4) -> exp_sum_r
+tokens_accepted_reg -> s_axis_tready (output port)
 ```
 
-- 10 logic levels (7 CARRY4 + 3 LUTs)
-- Data path: ~6.1 ns
+- 6 logic levels (4 CARRY4 + 2 LUTs)
+- This is a virtual constraint from OOC synthesis, not a real internal bottleneck
 
 **Potential future optimizations to reach 200 MHz:**
-- Tree-pipeline the 8-lane adder (add 2 more stages)
-- Use DSP48 for additions (each has 48-bit accumulator)
-- Reduce exp_out width if precision allows
+- Register s_axis_tready output
+- Adjust OOC I/O constraints
+- Use faster speed grade (-2 or -3 instead of -1)
 
 ## LUT Generation
 
