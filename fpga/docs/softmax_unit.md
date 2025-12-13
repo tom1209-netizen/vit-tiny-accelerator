@@ -374,39 +374,156 @@ end
 
 **Trade-off:** The optimization adds 1 extra cycle to the S_FIND_MAX phase.
 
-### Remaining Critical Paths
+### Optimization 2: Pipelined MSR Unit
 
-After the max tree optimization, two other paths limit further Fmax improvement:
+**Problem:** The MSR (Multiply-Shift-Round) unit computes `1/global_sum` using a fully combinational priority encoder, creating an 8-level LUT chain from `global_sum` to `msr_mult_r`.
 
-**1. ExpFIFO → DSP48 Path** (-2.142 ns worst)
-
+**Original Critical Path:**
 ```
-u_exp_fifo/rptr_reg → RAMD64E (distributed RAM) → LUT6 mux → DSP48E1/A[]
-```
-
-- Root cause: Distributed RAM has combinational read output
-- DSP48 A-port has ~3.7ns setup time, leaving only ~1.3ns for FIFO + routing
-- **Potential fix:** Enable DSP input registers (AREG/BREG) or convert FIFO to BRAM
-
-**2. global_sum → msr_mult_r Path** (-2.138 ns)
-
-```
-global_sum_reg → priority encoder (LUT chain) → LUT lookup → msr_mult_r_reg
+global_sum_reg → priority encoder (32-bit scan) → shift calculation → LUT lookup → msr_mult_r_reg
 ```
 
-- Root cause: `msr_unit.v` priority encoder is fully combinational (32-bit scan)
-- 8 logic levels through LUT chain
-- **Potential fix:** Pipeline the MSR unit into 2 stages
+**Solution:** Split `msr_unit.v` into a 2-stage pipeline:
 
-### Future Optimization Options
+| Cycle | Operation |
+|-------|-----------|
+| **Stage 1** | Priority encoder + shift calculation → register |
+| **Stage 2** | LUT lookup → output valid |
 
-| Option | Description | Latency Impact | Expected Gain |
-|--------|-------------|----------------|---------------|
-| **DSP Registers** | Enable AREG/BREG on DSP48 multipliers | +1 cycle in S_NORMALIZE | ~2 ns |
-| **Pipeline MSR** | Split priority encoder + LUT lookup | +1 cycle in transition | ~2 ns |
-| **BRAM FIFOs** | Convert distributed RAM to BRAM | Minimal (implicit register) | ~0.5-1 ns |
+**Pipelined Implementation:**
 
-Combined, these could push Fmax to ~200MHz with +2-3 cycles total latency increase.
+```verilog
+// Stage 1: Priority Encoder (combinational)
+always @(*) begin : find_msb
+    leading_one_pos = 0;
+    for (idx = SUM_WIDTH - 1; idx >= 0; idx = idx - 1) begin
+        if (sum_in[idx]) begin leading_one_pos = idx[5:0]; disable find_msb; end
+    end
+end
+
+// Pipeline Registers (Stage 1 → Stage 2)
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        stage1_valid <= 1'b0;
+    end else begin
+        stage1_valid <= start;
+        if (start) begin
+            sum_in_r     <= sum_in;
+            calc_shift_r <= calc_shift;
+        end
+    end
+end
+
+// Stage 2: LUT Lookup (from registered values)
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        valid <= 1'b0;
+    end else begin
+        valid <= stage1_valid;
+        if (stage1_valid) begin
+            recip_out   <= recip_lut[lut_index];
+            shift_alpha <= calc_shift_r;
+        end
+    end
+end
+```
+
+**State Machine Update:**
+
+S_CALC_RECIP now waits for MSR valid signal:
+
+```verilog
+S_CALC_RECIP: begin
+    if (msr_valid) next_state = S_NORMALIZE;
+end
+```
+
+### Optimization 3: DSP Input Retiming
+
+**Problem:** The ExpFIFO → DSP48 path has distributed RAM with combinational read output feeding directly into DSP48 A-port, which has ~3.7ns setup time.
+
+**Original Critical Path:**
+```
+u_exp_fifo/rptr_reg → RAMD64E → LUT6 mux → DSP48E1/A[]
+Data path: 3.8ns (only 1.3ns allowed for FIFO+routing)
+```
+
+**Solution:** Add explicit pipeline registers (`exp_pop_r`) between FIFO output and DSP multiply, creating a 3-stage normalization pipeline.
+
+**3-Stage Normalization Pipeline:**
+
+```
+Stage 0: FIFO read → exp_pop_r (register to break critical path)
+Stage 1: exp_pop_r × msr_mult_r → prod_reg
+Stage 2: shift/saturate → out_data_r
+```
+
+**Implementation:**
+
+```verilog
+// Stage 0 registers: capture FIFO output to break FIFO→DSP critical path
+reg [EXP_WIDTH-1:0] exp_pop_r[0:LANES-1];
+reg                 exp_pop_valid;
+
+S_NORMALIZE: begin
+    // Stage 0: FIFO → exp_pop_r
+    if (can_pop_fifo) begin
+        for (k = 0; k < LANES; k = k + 1) exp_pop_r[k] <= exp_pop[k];
+        exp_pop_valid <= 1'b1;
+    end else if (exp_pop_valid && !prod_valid) begin
+        exp_pop_valid <= 1'b0;
+    end
+
+    // Stage 1: exp_pop_r × msr_mult_r → prod_reg
+    if (exp_pop_valid && !prod_valid) begin
+        for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= exp_pop_r[k] * msr_mult_r;
+        prod_valid <= 1'b1;
+    end
+
+    // Stage 2: prod_reg → shift/saturate → out_data_r
+    if (prod_valid && out_ready_for_new) begin
+        out_data_r <= shift_data;
+        // ...
+    end
+end
+```
+
+**Results:**
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| WNS | -2.583 ns | -1.395 ns | +1.188 ns |
+| Fmax | 131.87 MHz | 156.37 MHz | +24.5 MHz |
+| Latency | N/8 + 2 | N/8 + 3 | +1 cycle |
+
+### Overall Optimization Summary
+
+| Optimization | Fmax | WNS | Change |
+|--------------|------|-----|--------|
+| Baseline (pre-optimization) | 126.61 MHz | -2.898 ns | - |
+| + Pipelined Max Tree | 140.02 MHz | -2.142 ns | +13.4 MHz |
+| + Pipelined MSR Unit | ~140 MHz | ~-2.1 ns | (fixed different path) |
+| **+ DSP Input Retiming** | **156.37 MHz** | **-1.395 ns** | **+24.5 MHz** |
+
+**Total Improvement:** 126.61 → 156.37 MHz (+29.76 MHz, +23.5%)
+
+**Total Latency Impact:** +3 cycles (1 max tree + 2 MSR/normalize)
+
+### Remaining Critical Path
+
+After all optimizations, the critical path is now **control logic**:
+
+```
+tokens_sent_reg → 32-bit adder → compare with num_tokens → out_last_r
+```
+
+- 12 logic levels (9 CARRY4 + 3 LUTs)
+- Calculates `last_for_output = (tokens_sent + LANES >= num_tokens)`
+
+**Potential future optimizations:**
+- Pre-compute last signal one cycle earlier
+- Use a down-counter instead of up-counter
+- Reduce counter width (12-bit for max 2048 tokens)
 
 ## LUT Generation
 

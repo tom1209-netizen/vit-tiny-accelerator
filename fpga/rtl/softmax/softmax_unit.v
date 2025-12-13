@@ -234,10 +234,12 @@ module softmax_unit #(
     );
 
     // =========================================================================
-    // MSR unit (reciprocal approximation)
+    // MSR unit (reciprocal approximation) - PIPELINED (2 cycles)
     // =========================================================================
     wire [RECIP_WIDTH-1:0] msr_mult;
     wire [4:0] msr_shift;
+    wire msr_valid;
+    reg msr_start;
 
     msr_unit #(
         .SUM_WIDTH  (SUM_WIDTH),
@@ -245,13 +247,21 @@ module softmax_unit #(
         .LUT_ADDR_W (6),
         .INIT_FILE  (RECIP_INIT_FILE)
     ) u_msr (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .start      (msr_start),
         .sum_in     (global_sum),
+        .valid      (msr_valid),
         .recip_out  (msr_mult),
         .shift_alpha(msr_shift)
     );
 
     // =========================================================================
-    // Normalization datapath
+    // Normalization datapath - 3-STAGE PIPELINE
+    // =========================================================================
+    // Stage 0: FIFO read → exp_pop_r (register DSP input for timing)
+    // Stage 1: exp_pop_r × msr_mult_r → prod_reg
+    // Stage 2: shift/saturate → out_data_r
     // =========================================================================
     wire [EXP_WIDTH-1:0] exp_pop[0:LANES-1];
     genvar u;
@@ -261,8 +271,12 @@ module softmax_unit #(
         end
     endgenerate
 
-    // Multiply pipeline
-    reg     [               35:0] prod_reg   [0:LANES-1];
+    // Stage 0 registers: capture FIFO output to break FIFO→DSP critical path
+    reg     [      EXP_WIDTH-1:0] exp_pop_r     [0:LANES-1];
+    reg                           exp_pop_valid;
+
+    // Stage 1: Multiply pipeline
+    reg     [               35:0] prod_reg      [0:LANES-1];
     reg                           prod_valid;
 
     // Shift + saturate
@@ -285,7 +299,8 @@ module softmax_unit #(
 
     wire handshake_out = out_valid_r && m_axis_tready;
     wire out_ready_for_new = (!out_valid_r) || handshake_out;
-    wire can_pop_fifo = (state == S_NORMALIZE) && !fifo_empty && out_ready_for_new && !prod_valid;
+    // can_pop_fifo: Pop FIFO when S_NORMALIZE, FIFO not empty, and exp_pop_r stage is empty (can receive)
+    wire can_pop_fifo = (state == S_NORMALIZE) && !fifo_empty && !exp_pop_valid;
     wire [31:0] tokens_sent_after_consume = tokens_sent + (handshake_out ? LANES : 0);
     wire last_for_output = (tokens_sent_after_consume + LANES >= num_tokens);
 
@@ -318,6 +333,18 @@ module softmax_unit #(
     end
 
     // =========================================================================
+    // MSR Start Pulse Generation (triggers on entry to S_CALC_RECIP)
+    // =========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            msr_start <= 1'b0;
+        end else begin
+            // Pulse msr_start when transitioning from S_ACCUMULATE to S_CALC_RECIP
+            msr_start <= (state == S_ACCUMULATE) && (next_state == S_CALC_RECIP);
+        end
+    end
+
+    // =========================================================================
     // State Machine
     // =========================================================================
     always @(posedge clk or negedge rst_n) begin
@@ -345,7 +372,8 @@ module softmax_unit #(
                     next_state = S_CALC_RECIP;
             end
             S_CALC_RECIP: begin
-                next_state = S_NORMALIZE;
+                // Wait for pipelined MSR to produce valid output (2 cycles after start)
+                if (msr_valid) next_state = S_NORMALIZE;
             end
             S_NORMALIZE: begin
                 if (handshake_out && out_last_r) next_state = S_IDLE;
@@ -371,12 +399,16 @@ module softmax_unit #(
             msr_mult_r       <= {RECIP_WIDTH{1'b0}};
             msr_shift_r      <= 5'd0;
             prod_valid       <= 1'b0;
+            exp_pop_valid    <= 1'b0;
             out_data_r       <= {AXIS_DATA_WIDTH{1'b0}};
             out_valid_r      <= 1'b0;
             out_last_r       <= 1'b0;
             done             <= 1'b0;
-            // Initialize prod_reg to prevent X propagation
-            for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= 36'd0;
+            // Initialize pipeline registers to prevent X propagation
+            for (k = 0; k < LANES; k = k + 1) begin
+                prod_reg[k]  <= 36'd0;
+                exp_pop_r[k] <= {EXP_WIDTH{1'b0}};
+            end
         end else begin
             done <= 1'b0;
 
@@ -425,8 +457,16 @@ module softmax_unit #(
                 end
 
                 S_CALC_RECIP: begin
-                    msr_mult_r  <= msr_mult;
-                    msr_shift_r <= msr_shift;
+                    // Trigger MSR on first cycle of this state
+                    // msr_start is set below based on state transition detection
+
+                    // Capture MSR outputs when valid (after 2-cycle pipeline)
+                    if (msr_valid) begin
+                        msr_mult_r  <= msr_mult;
+                        msr_shift_r <= msr_shift;
+                    end
+
+                    // Initialize for S_NORMALIZE
                     tokens_sent <= 32'd0;
                     out_valid_r <= 1'b0;
                     out_last_r  <= 1'b0;
@@ -434,19 +474,32 @@ module softmax_unit #(
                 end
 
                 S_NORMALIZE: begin
-                    // Stage A: FIFO -> multiply
+                    // Stage 0: FIFO → exp_pop_r (register to break critical path)
+                    // Pop FIFO when exp_pop_r is empty or being consumed by Stage 1
                     if (can_pop_fifo) begin
-                        for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= exp_pop[k] * msr_mult_r;
+                        for (k = 0; k < LANES; k = k + 1) exp_pop_r[k] <= exp_pop[k];
+                        exp_pop_valid <= 1'b1;
+                    end else if (exp_pop_valid && !prod_valid) begin
+                        // exp_pop_r consumed by Stage 1, clear valid
+                        exp_pop_valid <= 1'b0;
+                    end
+
+                    // Stage 1: exp_pop_r × msr_mult_r → prod_reg
+                    // Move data when prod_reg is empty (can receive)
+                    if (exp_pop_valid && !prod_valid) begin
+                        for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= exp_pop_r[k] * msr_mult_r;
                         prod_valid <= 1'b1;
                     end
 
-                    // Stage B: multiply result -> shift/saturate -> output reg
-                    if (out_ready_for_new && prod_valid) begin
+                    // Stage 2: prod_reg → shift/saturate → out_data_r
+                    // Move data when output is ready (empty or being consumed)
+                    if (prod_valid && out_ready_for_new) begin
                         out_data_r  <= shift_data;
                         out_valid_r <= 1'b1;
                         out_last_r  <= last_for_output;
-                        prod_valid  <= 1'b0;
-                    end else if (handshake_out && !prod_valid) begin
+                        prod_valid  <= 1'b0;  // Clear after consumption
+                    end else if (handshake_out) begin
+                        // Output consumed but no new data
                         out_valid_r <= 1'b0;
                         out_last_r  <= 1'b0;
                     end
