@@ -55,17 +55,17 @@ module softmax_unit #(
     reg [RECIP_WIDTH-1:0] msr_mult_r;
     reg [4:0] msr_shift_r;
 
-    // Exp pipeline registers
-    reg exp_sum_valid;
-    reg exp_out_valid;
+    // Exp pipeline valid (aligns FIFO read -> exp_rom -> accumulate/write)
+    reg exp_out_valid_d1;
+    reg exp_out_valid_d2;
 
     // =========================================================================
     // INPUT FIFO - buffer raw inputs during S_FIND_MAX for reuse in S_ACCUMULATE
     // =========================================================================
     wire [AXIS_DATA_WIDTH-1:0] input_fifo_dout;
     wire input_fifo_full, input_fifo_empty;
-    reg  input_fifo_wr_en;
-    reg  input_fifo_rd_en;
+    wire input_fifo_wr_en;
+    wire input_fifo_rd_en;
     wire input_fifo_clr = (state == S_IDLE) && start;
 
     softmax_fifo #(
@@ -140,29 +140,13 @@ module softmax_unit #(
         end
     endgenerate
 
-    // Sum of 8 exp results (combinational -> registered)
+    // Sum of 8 exp results (combinational)
     reg [SUM_WIDTH-1:0] exp_sum;
-    reg [SUM_WIDTH-1:0] exp_sum_reg;
     integer i;
     always @(*) begin
         exp_sum = {SUM_WIDTH{1'b0}};
         for (i = 0; i < LANES; i = i + 1) begin
             exp_sum = exp_sum + {{(SUM_WIDTH - EXP_WIDTH) {1'b0}}, exp_out[i]};
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            exp_sum_reg   <= {SUM_WIDTH{1'b0}};
-            exp_sum_valid <= 1'b0;
-        end else if (state == S_IDLE) begin
-            exp_sum_reg   <= {SUM_WIDTH{1'b0}};
-            exp_sum_valid <= 1'b0;
-        end else if (exp_out_valid) begin
-            exp_sum_reg   <= exp_sum;
-            exp_sum_valid <= 1'b1;
-        end else begin
-            exp_sum_valid <= 1'b0;
         end
     end
 
@@ -184,7 +168,7 @@ module softmax_unit #(
         end else if (state == S_IDLE) begin
             fifo_din_reg   <= {FIFO_WIDTH{1'b0}};
             fifo_wr_en_reg <= 1'b0;
-        end else if (state == S_ACCUMULATE && exp_out_valid && !fifo_full) begin
+        end else if (state == S_ACCUMULATE && exp_out_valid_d2 && !fifo_full) begin
             // Only write to exp_fifo during S_ACCUMULATE to prevent stale X writes
             for (p = 0; p < LANES; p = p + 1) fifo_din_reg[p*EXP_WIDTH+:EXP_WIDTH] <= exp_out[p];
             fifo_wr_en_reg <= 1'b1;
@@ -277,25 +261,18 @@ module softmax_unit #(
     // Control logic for input FIFO read during S_ACCUMULATE
     // =========================================================================
     wire accept_input_fifo = (state == S_ACCUMULATE) && !input_fifo_empty && !fifo_full;
-
-    // Pipeline: input_fifo_rd_en (cycle 0) → data_reg captures + exp_rom latches (cycle 1) → exp_out valid (cycle 2)
-    // Total: 2 cycles of latency
-    reg  input_fifo_rd_en_d1;  // Stage 1: data_reg captures, exp_rom latches
+    assign input_fifo_rd_en = accept_input_fifo;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            input_fifo_rd_en    <= 1'b0;
-            input_fifo_rd_en_d1 <= 1'b0;
-            exp_out_valid       <= 1'b0;
+            exp_out_valid_d1 <= 1'b0;
+            exp_out_valid_d2 <= 1'b0;
         end else if (state != S_ACCUMULATE) begin
-            // Clear pipeline when not in ACCUMULATE to prevent stale X values
-            input_fifo_rd_en    <= 1'b0;
-            input_fifo_rd_en_d1 <= 1'b0;
-            exp_out_valid       <= 1'b0;
+            exp_out_valid_d1 <= 1'b0;
+            exp_out_valid_d2 <= 1'b0;
         end else begin
-            input_fifo_rd_en    <= accept_input_fifo;
-            input_fifo_rd_en_d1 <= input_fifo_rd_en;
-            exp_out_valid       <= input_fifo_rd_en_d1;
+            exp_out_valid_d1 <= input_fifo_rd_en;
+            exp_out_valid_d2 <= exp_out_valid_d1;
         end
     end
 
@@ -321,7 +298,7 @@ module softmax_unit #(
                 if (tokens_accepted >= num_tokens) next_state = S_ACCUMULATE;
             end
             S_ACCUMULATE: begin
-                if (exp_sum_valid && (tokens_processed + LANES >= num_tokens))
+                if (exp_out_valid_d2 && (tokens_processed + LANES >= num_tokens))
                     next_state = S_CALC_RECIP;
             end
             S_CALC_RECIP: begin
@@ -338,6 +315,7 @@ module softmax_unit #(
     // Datapath Logic
     // =========================================================================
     wire accept_axi_input = (state == S_FIND_MAX) && s_axis_tvalid && s_axis_tready;
+    assign input_fifo_wr_en = accept_axi_input;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -353,7 +331,6 @@ module softmax_unit #(
             out_valid_r      <= 1'b0;
             out_last_r       <= 1'b0;
             done             <= 1'b0;
-            input_fifo_wr_en <= 1'b0;
             // Initialize prod_reg to prevent X propagation
             for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= 36'd0;
         end else begin
@@ -369,7 +346,6 @@ module softmax_unit #(
                     out_valid_r      <= 1'b0;
                     out_last_r       <= 1'b0;
                     prod_valid       <= 1'b0;
-                    input_fifo_wr_en <= 1'b0;
                     if (start && num_tokens == 0) begin
                         done <= 1'b1;
                     end
@@ -377,22 +353,17 @@ module softmax_unit #(
 
                 S_FIND_MAX: begin
                     if (accept_axi_input) begin
-                        // Write to input FIFO
-                        input_fifo_wr_en <= 1'b1;
-                        tokens_accepted  <= tokens_accepted + LANES;
+                        tokens_accepted <= tokens_accepted + LANES;
                         // Update global max
                         if (beat_max > global_max) begin
                             global_max <= beat_max;
                         end
-                    end else begin
-                        input_fifo_wr_en <= 1'b0;
                     end
                 end
 
                 S_ACCUMULATE: begin
-                    input_fifo_wr_en <= 1'b0;  // No more AXI writes
-                    if (exp_sum_valid) begin
-                        global_sum       <= global_sum + exp_sum_reg;
+                    if (exp_out_valid_d2) begin
+                        global_sum       <= global_sum + exp_sum;
                         tokens_processed <= tokens_processed + LANES;
                     end
                 end

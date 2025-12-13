@@ -2,6 +2,20 @@
 
 This document describes the hardware softmax implementation located under `fpga/rtl/softmax`. It covers the algorithm design, fixed-point representation, I/O interfaces, internal pipeline, and resource usage.
 
+## Where This Sits In TinyViT
+
+In TinyViT window attention, softmax is applied over the **key dimension** for each query:
+
+- Stage 1 & 3 window: `7×7 = 49` tokens (per head, per query row)
+- Stage 2 window: `14×14 = 196` tokens (per head, per query row)
+
+In hardware, `softmax_unit` is invoked **per query-row** of the attention-score matrix (e.g. for a `49×49` score tile, it runs 49 times). Because the datapath is `8 lanes/beat`, query rows are padded to a multiple of 8 tokens:
+
+- 49 → 56 tokens (7 beats)
+- 196 → 200 tokens (25 beats)
+
+Padding tokens represent “masked” keys and should be driven with a low logit so their probability is ~0.
+
 ## Module Overview
 
 The softmax unit computes the softmax function over a sequence of tokens using a **three-pass algorithm** with max-subtraction for numerical stability:
@@ -19,14 +33,17 @@ softmax(x_i) = exp(x_i - max(x)) / Σ exp(x_j - max(x))
 | **Pass 2** | `S_NORMALIZE` | Compute 1/sum via MSR, multiply buffered exp values |
 
 This approach provides:
+
 - **Numerical stability**: Max-subtraction ensures exp inputs are ≤ 0
 - **No division hardware**: Multiply-shift-round (MSR) approximation
 - **Efficient streaming**: 8 elements processed per cycle
 
 ## Block Diagram
 
+High-level datapath (one “transaction” = one softmax vector):
+
 > [!NOTE]
-> I will add in later
+> I will add later
 
 ## Parameterization
 
@@ -41,12 +58,37 @@ This approach provides:
 | `EXP_INIT_FILE` | `lut/exp_table_q4_16.hex` | Exponential LUT file |
 | `RECIP_INIT_FILE` | `lut/recip_lut.hex` | Reciprocal LUT file |
 
+## Interfaces (Ports)
+
+### Control
+
+| Port | Dir | Width | Description |
+|------|-----|-------|-------------|
+| `start` | in | 1 | Pulse in `S_IDLE` to begin a new softmax transaction (also clears FIFOs). |
+| `num_tokens` | in | 32 | Number of tokens in this softmax vector (must be multiple of 8 in current flow). |
+| `done` | out | 1 | Pulses when the final output beat is accepted. |
+
+### AXI4-Stream Input (`s_axis_*`)
+
+| Port | Dir | Width | Description |
+|------|-----|-------|-------------|
+| `s_axis_tdata` | in | `AXIS_DATA_WIDTH` | Packed INT8 logits, `LANES = AXIS_DATA_WIDTH/DATA_WIDTH` lanes (default 8). Lane `i` is `s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH]`. |
+| `s_axis_tvalid` | in | 1 | Input valid. |
+| `s_axis_tready` | out | 1 | Input ready (asserted only in `S_FIND_MAX` while accepting beats). |
+| `s_axis_tlast` | in | 1 | Present for AXI compliance; not used for control (the design uses `num_tokens`). |
+
+### AXI4-Stream Output (`m_axis_*`)
+
+| Port | Dir | Width | Description |
+|------|-----|-------|-------------|
+| `m_axis_tdata` | out | `AXIS_DATA_WIDTH` | Packed UINT8 probabilities (0..255), `LANES = AXIS_DATA_WIDTH/DATA_WIDTH` lanes (default 8). Lane `i` is `m_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH]`. |
+| `m_axis_tvalid` | out | 1 | Output valid. |
+| `m_axis_tready` | in | 1 | Output ready (backpressure supported). |
+| `m_axis_tlast` | out | 1 | Asserted on the final output beat for this transaction. |
+
 ## State Machine
 
 The softmax unit implements a **5-state FSM** with max-subtraction:
-
-> [!NOTE]
-> I will add in later
 
 | State | Duration | Description |
 |-------|----------|-------------|
@@ -56,6 +98,20 @@ The softmax unit implements a **5-state FSM** with max-subtraction:
 | `S_CALC_RECIP` | 1 cycle | MSR computes reciprocal approximation |
 | `S_NORMALIZE` | N/8 cycles | Pop exp_fifo, multiply, output results |
 
+### Transaction Rules
+
+- `start` is sampled in `S_IDLE`; a `start` pulse clears internal FIFOs and begins a new softmax transaction.
+- `num_tokens` defines the vector length; the current RTL assumes **beat-aligned** token counts (multiple of 8). In the accelerator flow, attention rows are padded accordingly (49→56, 196→200).
+- `s_axis_tlast` is not used for control; completion is determined from `num_tokens`.
+- `done` asserts when the **final output beat** is accepted (`m_axis_tvalid && m_axis_tready && m_axis_tlast`).
+
+### Per-State Behavior (Detailed)
+
+- `S_IDLE`: clears counters/flags; waits for `start`.
+- `S_FIND_MAX`: accepts `LANES` logits per beat, updates `global_max` (max-reduction tree), and writes each beat into `input_fifo`.
+- `S_ACCUMULATE`: reads beats back from `input_fifo`, computes `exp(x - global_max)` via `exp_rom`, accumulates `global_sum`, and writes the per-lane exp values into `exp_fifo` for the final pass.
+- `S_CALC_RECIP`: computes `msr_mult_r` and `msr_shift_r` from `global_sum` using `msr_unit`.
+- `S_NORMALIZE`: pops `exp_fifo` only when the output register is free (backpressure-safe), computes `(exp * msr_mult_r) >> msr_shift_r >> 7`, saturates to `8'hFF`, and streams results to `m_axis_*` with `m_axis_tlast` on the final beat.
 
 ## Internal Blocks
 
@@ -69,22 +125,27 @@ Output: Q4.16 unsigned fixed-point exp(x)
 ```
 
 **Implementation:**
+
 - 256-entry ROM (2^8 addresses)
 - 20-bit output width (Q4.16 format)
 - Synchronous read (1-cycle latency)
 - Pre-computed values from `lut/exp_table_q4_16.hex`
 
 **Fixed-Point Format:**
+
 ```
 Q4.16: 4 integer bits + 16 fractional bits
-Range: 0.0 to 15.9999... (sufficient for exp(-127) to exp(127))
+Range: 0.0 to 15.9999... (more than enough since exp(x-max) is in [0, 1])
 ```
+
+**Important:** in `softmax_unit`, the ROM is addressed with the **max-subtracted** value `(x - global_max)`, so the intended operating region is `<= 0` (exp outputs in `[0, 1]`).
 
 ### 2. Multiply-Shift-Round Unit (`msr_unit.v`)
 
 Computes an approximation of `1/global_sum` without division hardware.
 
 **Algorithm:**
+
 1. Find leading-one position (priority encoder)
 2. Normalize sum by right-shifting to get 6-bit mantissa
 3. Use mantissa as LUT index to get reciprocal approximation
@@ -97,6 +158,7 @@ Output: recip_out (Q1.15 reciprocal multiplier)
 ```
 
 **LUT Details:**
+
 - 64 entries (6-bit address)
 - 16-bit output (Q1.15 format)
 - Pre-computed from `lut/recip_lut.hex`
@@ -111,6 +173,7 @@ Buffers exp() results from Pass 1 for use in Pass 2.
 | `DEPTH` | 256 entries | Supports up to 2048 tokens |
 
 **Features:**
+
 - Synchronous clear (`clr` signal)
 - Full/empty status flags
 - Read-through (combinational output)
@@ -124,29 +187,34 @@ Stage A: exp_pop × msr_mult_r → prod_reg (36-bit)
 Stage B: (prod_reg >> msr_shift_r >> 7) → saturate → UINT8 output
 ```
 
+The output scale is **0..255**, representing an approximate probability (`p ≈ out/255`).
+
 ## Fixed-Point Number Formats
 
 | Value | Format | Bits | Range |
 |-------|--------|------|-------|
 | Input logit | INT8 | 8 | -128 to +127 |
 | exp(logit) | Q4.16 | 20 | 0.0 to ~15.99 |
-| global_sum | Q20.12 | 32 | Accumulated sum |
+| global_sum | Q?.16 (sum of Q4.16) | 32 | Depends on token count |
 | Reciprocal | Q1.15 | 16 | 0.0 to ~1.99 |
 | Product | Q5.31 | 36 | exp × recip |
 | Output | UINT8 | 8 | 0 to 255 (0.0 to 1.0) |
+
+For TinyViT attention rows, `exp(x-max) ≤ 1`, so `Σ exp ≤ num_tokens`. With `num_tokens ≤ 2048`, `global_sum` fits comfortably in 32 bits.
 
 ## Pipeline Latency
 
 | Phase | Latency (cycles) | Notes |
 |-------|------------------|-------|
 | Input to exp_out | 1 | ROM read latency |
-| exp_out to FIFO write | 1 | Registration |
+| FIFO read to exp_out valid | 2 | input_fifo capture + ROM latency |
 | CALC_RECIP | 1 | MSR combinational |
 | FIFO pop to output | 2 | Multiply + shift/sat |
 | **Total Pass 1** | N/8 + 2 | N = number of tokens |
 | **Total Pass 2** | N/8 + 2 | |
 
 **Example:** For 2048 tokens:
+
 - Pass 1: 256 + 2 = 258 cycles
 - Pass 2: 256 + 2 = 258 cycles
 - Total: ~516 cycles
@@ -194,10 +262,9 @@ softmax_unit #(
 
 ### Numerical Stability
 
-Unlike traditional softmax that subtracts max(x) for stability, this implementation:
-- Uses saturating arithmetic at output stage
-- Exp LUT handles the full INT8 range directly
-- Output clamps to [0, 255] (UINT8)
+This design implements the standard stability trick `x := x - max(x)` before exp.
+
+**Note on dynamic range:** the subtract `(x - global_max)` is currently done in `DATA_WIDTH` (8-bit signed). If inputs span a very wide range (e.g. `global_max≈127`, `x≈-128`), the 8-bit subtract can wrap. In the intended accelerator flow, attention logits are requantized into a small INT8 range and padding logits are chosen so the subtract remains in-range.
 
 ### Throughput
 
@@ -221,6 +288,7 @@ python lut_generator.py
 ```
 
 This produces:
+
 - `exp_table_q4_16.hex` - 256-entry exp(x) table
 - `recip_lut.hex` - 64-entry 1/x approximation table
 
@@ -241,13 +309,19 @@ fpga/
 ### Running Tests
 
 ```bash
-cd fpga/sim
-make clean && make all
+make -C fpga/sim clean build run TB_NAME=tb_softmax_unit
 ```
 
 ### Test Cases
 
-The testbench includes **8 distribution tests** plus **corner case tests**:
+The testbench exercises both:
+
+- **Single-beat correctness** (8-token vectors) with hand-computable distributions.
+- **TinyViT-realistic attention rows** (49/196 valid tokens padded to 56/200) with patterns that mimic relative-position bias and sparsity.
+
+All expected outputs are computed by a **hardware-matching golden model** inside the testbench using the *same LUT files* (`$readmemh`).
+
+#### A. 8-token distribution tests (1 beat)
 
 | Test | Distribution Type | Input Pattern | Expected Behavior |
 |------|-------------------|---------------|-------------------|
@@ -257,15 +331,63 @@ The testbench includes **8 distribution tests** plus **corner case tests**:
 | 4 | **All Same** | [10, 10, 10, 10, 10, 10, 10, 10] | Uniform 12.5% each (32) |
 | 5 | **All Negative** | [-5, -10, -15, -3, -20, -8, -12, -7] | Max-subtraction handles correctly |
 | 6 | **Bimodal** | [-20, -25, -22, -18, 20, 25, 22, 18] | High group dominates |
-| 7 | **High Variance** | [-100, 50, -80, 30, -60, 10, -40, 70] | Largest value dominates |
+| 7 | **High Variance** | [-60, 50, -40, 30, -20, 10, 0, 60] | Largest value dominates |
 | 8 | **Low Variance** | [0, 1, 2, 3, 1, 0, 2, 1] | Smooth distribution |
-| 9 | **Corner Cases** | Various edge cases | Boundary conditions |
+
+#### B. Corner-case smoke tests
+
+These are quick “doesn’t hang” checks (not full golden comparisons):
+
+- Single token transaction (exercise `start`/FSM behavior)
+- All-zero logits (flat distribution)
+- Max-ish logits (saturation/path sanity)
+
+#### C. TinyViT window-size attention tests (IDs 9–16)
+
+These run the softmax on **padded attention rows**:
+
+- `Stage 1/3`: 49 valid tokens padded to 56
+- `Stage 2`: 196 valid tokens padded to 200
+
+Each test samples **three query rows** (`query_idx` = 0, mid, last) to mimic per-query invocation.
+
+| Test ID | Window | `num_tokens` | Valid | Pattern |
+|---------|--------|--------------|-------|---------|
+| 9 | 7×7 (Stage 1/3) | 56 | 49 | Self-focus |
+| 10 | 7×7 (Stage 1/3) | 56 | 49 | Local attention |
+| 11 | 7×7 (Stage 1/3) | 56 | 49 | Sparse peak |
+| 12 | 7×7 (Stage 1/3) | 56 | 49 | Uniform |
+| 13 | 14×14 (Stage 2) | 200 | 196 | Self-focus |
+| 14 | 14×14 (Stage 2) | 200 | 196 | Local attention |
+| 15 | 14×14 (Stage 2) | 200 | 196 | Sparse peak |
+| 16 | 14×14 (Stage 2) | 200 | 196 | Uniform |
+
+Pattern types:
+
+- **Self-focus**: peak at the query’s own position, falloff with 2D distance
+- **Local attention**: smooth distance falloff (relative-position bias-like)
+- **Sparse peak**: one dominant key token + weak neighbors
+- **Uniform**: all valid logits equal
+
+#### D. Scaled distribution tests (IDs 17–19)
+
+These repeat an 8-token base pattern across a full row (56 or 200 tokens) and pad the remainder with `PADDING_VALUE` to validate:
+
+- correct accumulation over large `num_tokens`
+- correct handling of padded lanes (probability near 0)
+- stable behavior across beat boundaries
+
+| Test ID | Description | `num_tokens` | Valid | Base pattern |
+|---------|-------------|--------------|-------|--------------|
+| 17 | One-hot @ Stage 1/3 | 56 | 49 | Test 2 |
+| 18 | Bimodal @ Stage 2 | 200 | 196 | Test 6 |
+| 19 | High variance @ Stage 1/3 | 56 | 49 | Test 7 |
 
 ### Verification Approach
 
 1. **Golden Model Comparison**: Each test computes expected output using a software model with the same max-subtraction algorithm
 2. **Tolerance Check**: Allows ±1 difference for fixed-point approximation errors  
-3. **X Value Detection**: Uses `$isunknown()` to detect and fail tests with undefined outputs
+3. **X/Z Detection**: Uses a portable reduction-XOR check (`^token === 1'bx`) to fail on unknown outputs
 4. **AXI-Stream Protocol**: Verifies `tvalid`, `tready`, `tlast` handshaking
 
 ### Testbench Key Functions
@@ -279,25 +401,38 @@ The testbench includes **8 distribution tests** plus **corner case tests**:
 | `monitor_output_stream()` | Captures output and compares against expected |
 | `run_distribution_test()` | Runs a single 8-token distribution test |
 | `run_corner_cases()` | Tests boundary conditions |
+| `generate_vit_attention_pattern()` | Generates TinyViT-like attention score rows (2D window distance patterns + padding) |
+| `run_vit_stage_test()` | Runs padded-window tests (56/200 tokens), sampling multiple query rows |
+| `run_scaled_distribution_test()` | Scales 8-token patterns to 56/200 token rows + padding |
 
 ### Software Golden Model
 
-The testbench implements the same algorithm as hardware for verification:
+The testbench matches the RTL datapath, including the LUT-based reciprocal approximation:
 
 ```verilog
-// 1. Find global max
-global_max = input_logits[0];
-for (i = 1; i < num_tokens; i = i + 1)
-    if (input_logits[i] > global_max) global_max = input_logits[i];
+// 1) Find global max
+global_max = -128;
+for (i = 0; i < num_tokens; i = i + 1)
+  if ($signed(input_logits[i]) > global_max) global_max = $signed(input_logits[i]);
 
-// 2. Compute exp(x - max) and sum
+// 2) Compute sum of exp(x-max) using exp_rom LUT
+fixed_sum = 0;
 for (i = 0; i < num_tokens; i = i + 1) begin
-    shifted = input_logits[i] - global_max;  // Always <= 0
-    exp_val = exp_rom[shifted & 8'hFF];      // LUT lookup
-    exp_sum = exp_sum + exp_val;
+  shifted = $signed(input_logits[i]) - global_max;
+  idx = (shifted < 0) ? (shifted + 256) : shifted;
+  fixed_exp[i] = exp_rom[idx];
+  fixed_sum = fixed_sum + fixed_exp[i];
 end
 
-// 3. Normalize to UINT8
-for (i = 0; i < num_tokens; i = i + 1)
-    expected_output[i] = (exp_val[i] * 255) / exp_sum;
+// 3) MSR reciprocal approximation (matches msr_unit)
+shift_amount = leading_one_pos(fixed_sum) > 5 ? (leading_one_pos(fixed_sum) - 5) : 0;
+lut_index = fixed_sum >> shift_amount;  // clamp to 0..63
+recip_val = recip_lut[lut_index];
+
+// 4) Normalize each exp to UINT8 (matches softmax_unit shift path)
+for (i = 0; i < num_tokens; i = i + 1) begin
+  prod = fixed_exp[i] * recip_val;
+  scaled = (prod >> shift_amount) >> 7;
+  expected_output[i] = (scaled > 255) ? 255 : scaled[7:0];
+end
 ```
