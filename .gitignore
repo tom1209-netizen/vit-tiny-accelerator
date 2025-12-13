@@ -10,6 +10,7 @@ work/
 transcript
 compile.log
 modelsim.ini
+clockInfo.txt
 
 # Models folder
 .venv/

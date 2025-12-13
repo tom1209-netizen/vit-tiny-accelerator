@@ -43,10 +43,13 @@ module softmax_unit #(
     reg [2:0] state, next_state;
 
     // Counters and accumulators
+    // NOTE: Counter width reduced from 32 to 12 bits (max 4096 tokens) for timing
+    localparam COUNTER_WIDTH = 12;  // Supports up to 4096 tokens
+
     reg        [      SUM_WIDTH-1:0] global_sum;
-    reg        [               31:0] tokens_accepted;
-    reg        [               31:0] tokens_processed;
-    reg        [               31:0] tokens_sent;
+    reg        [  COUNTER_WIDTH-1:0] tokens_accepted;  // Count up during S_FIND_MAX
+    reg        [  COUNTER_WIDTH-1:0] tokens_processed;  // Count up during S_ACCUMULATE
+    reg        [  COUNTER_WIDTH-1:0] tokens_remaining;  // Count DOWN during S_NORMALIZE
 
     // Max value for numerical stability (signed)
     reg signed [     DATA_WIDTH-1:0] global_max;
@@ -181,7 +184,7 @@ module softmax_unit #(
         end
     endgenerate
 
-    // Sum of 8 exp results (combinational)
+    // Sum of 8 exp results (combinational) - PIPELINED for timing
     reg [SUM_WIDTH-1:0] exp_sum;
     integer i;
     always @(*) begin
@@ -190,6 +193,10 @@ module softmax_unit #(
             exp_sum = exp_sum + {{(SUM_WIDTH - EXP_WIDTH) {1'b0}}, exp_out[i]};
         end
     end
+
+    // Pipeline register for exp_sum to break accumulator critical path
+    reg  [ SUM_WIDTH-1:0] exp_sum_r;
+    reg                   exp_sum_valid;
 
     // =========================================================================
     // EXP FIFO - buffer exp results between passes
@@ -301,8 +308,11 @@ module softmax_unit #(
     wire out_ready_for_new = (!out_valid_r) || handshake_out;
     // can_pop_fifo: Pop FIFO when S_NORMALIZE, FIFO not empty, and exp_pop_r stage is empty (can receive)
     wire can_pop_fifo = (state == S_NORMALIZE) && !fifo_empty && !exp_pop_valid;
-    wire [31:0] tokens_sent_after_consume = tokens_sent + (handshake_out ? LANES : 0);
-    wire last_for_output = (tokens_sent_after_consume + LANES >= num_tokens);
+
+    // Pre-computed and registered last signal (A1/A4: pipeline the compare)
+    // last_for_output_r is set when tokens_remaining will become <= LANES after current output
+    reg last_for_output_r;
+    wire is_last_beat = (tokens_remaining <= LANES);  // Simple compare, no adder chain
 
     assign m_axis_tdata = out_data_r;
     assign m_axis_tvalid = out_valid_r;
@@ -368,8 +378,8 @@ module softmax_unit #(
                     next_state = S_ACCUMULATE;
             end
             S_ACCUMULATE: begin
-                if (exp_out_valid_d2 && (tokens_processed + LANES >= num_tokens))
-                    next_state = S_CALC_RECIP;
+                // Wait for all tokens processed AND exp_sum pipeline drained
+                if (tokens_processed >= num_tokens && !exp_sum_valid) next_state = S_CALC_RECIP;
             end
             S_CALC_RECIP: begin
                 // Wait for pipelined MSR to produce valid output (2 cycles after start)
@@ -389,21 +399,24 @@ module softmax_unit #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            global_sum       <= {SUM_WIDTH{1'b0}};
-            global_max       <= 8'h80;  // -128 (minimum signed value)
-            beat_max_r       <= {DATA_WIDTH{1'b0}};
-            beat_max_valid   <= 1'b0;
-            tokens_accepted  <= 32'd0;
-            tokens_processed <= 32'd0;
-            tokens_sent      <= 32'd0;
-            msr_mult_r       <= {RECIP_WIDTH{1'b0}};
-            msr_shift_r      <= 5'd0;
-            prod_valid       <= 1'b0;
-            exp_pop_valid    <= 1'b0;
-            out_data_r       <= {AXIS_DATA_WIDTH{1'b0}};
-            out_valid_r      <= 1'b0;
-            out_last_r       <= 1'b0;
-            done             <= 1'b0;
+            global_sum        <= {SUM_WIDTH{1'b0}};
+            global_max        <= 8'h80;  // -128 (minimum signed value)
+            beat_max_r        <= {DATA_WIDTH{1'b0}};
+            beat_max_valid    <= 1'b0;
+            tokens_accepted   <= {COUNTER_WIDTH{1'b0}};
+            tokens_processed  <= {COUNTER_WIDTH{1'b0}};
+            tokens_remaining  <= {COUNTER_WIDTH{1'b0}};
+            last_for_output_r <= 1'b0;
+            msr_mult_r        <= {RECIP_WIDTH{1'b0}};
+            msr_shift_r       <= 5'd0;
+            prod_valid        <= 1'b0;
+            exp_pop_valid     <= 1'b0;
+            exp_sum_r         <= {SUM_WIDTH{1'b0}};
+            exp_sum_valid     <= 1'b0;
+            out_data_r        <= {AXIS_DATA_WIDTH{1'b0}};
+            out_valid_r       <= 1'b0;
+            out_last_r        <= 1'b0;
+            done              <= 1'b0;
             // Initialize pipeline registers to prevent X propagation
             for (k = 0; k < LANES; k = k + 1) begin
                 prod_reg[k]  <= 36'd0;
@@ -414,16 +427,17 @@ module softmax_unit #(
 
             case (state)
                 S_IDLE: begin
-                    global_sum       <= {SUM_WIDTH{1'b0}};
-                    global_max       <= 8'h80;  // Reset to minimum
-                    beat_max_r       <= {DATA_WIDTH{1'b0}};
-                    beat_max_valid   <= 1'b0;
-                    tokens_accepted  <= 32'd0;
-                    tokens_processed <= 32'd0;
-                    tokens_sent      <= 32'd0;
-                    out_valid_r      <= 1'b0;
-                    out_last_r       <= 1'b0;
-                    prod_valid       <= 1'b0;
+                    global_sum        <= {SUM_WIDTH{1'b0}};
+                    global_max        <= 8'h80;  // Reset to minimum
+                    beat_max_r        <= {DATA_WIDTH{1'b0}};
+                    beat_max_valid    <= 1'b0;
+                    tokens_accepted   <= {COUNTER_WIDTH{1'b0}};
+                    tokens_processed  <= {COUNTER_WIDTH{1'b0}};
+                    tokens_remaining  <= num_tokens[COUNTER_WIDTH-1:0];  // Init down-counter
+                    last_for_output_r <= 1'b0;
+                    out_valid_r       <= 1'b0;
+                    out_last_r        <= 1'b0;
+                    prod_valid        <= 1'b0;
                     if (start && num_tokens == 0) begin
                         done <= 1'b1;
                     end
@@ -450,8 +464,17 @@ module softmax_unit #(
                 end
 
                 S_ACCUMULATE: begin
+                    // Stage 1: Register exp_sum when data is valid from exp_rom
                     if (exp_out_valid_d2) begin
-                        global_sum       <= global_sum + exp_sum;
+                        exp_sum_r     <= exp_sum;
+                        exp_sum_valid <= 1'b1;
+                    end else begin
+                        exp_sum_valid <= 1'b0;
+                    end
+
+                    // Stage 2: Add registered exp_sum to global_sum (pipelined)
+                    if (exp_sum_valid) begin
+                        global_sum       <= global_sum + exp_sum_r;
                         tokens_processed <= tokens_processed + LANES;
                     end
                 end
@@ -466,8 +489,7 @@ module softmax_unit #(
                         msr_shift_r <= msr_shift;
                     end
 
-                    // Initialize for S_NORMALIZE
-                    tokens_sent <= 32'd0;
+                    // Initialize for S_NORMALIZE (tokens_remaining already set in S_IDLE)
                     out_valid_r <= 1'b0;
                     out_last_r  <= 1'b0;
                     prod_valid  <= 1'b0;
@@ -494,18 +516,21 @@ module softmax_unit #(
                     // Stage 2: prod_reg → shift/saturate → out_data_r
                     // Move data when output is ready (empty or being consumed)
                     if (prod_valid && out_ready_for_new) begin
-                        out_data_r  <= shift_data;
+                        out_data_r <= shift_data;
                         out_valid_r <= 1'b1;
-                        out_last_r  <= last_for_output;
-                        prod_valid  <= 1'b0;  // Clear after consumption
+                        out_last_r <= is_last_beat;  // Use simple compare
+                        prod_valid <= 1'b0;  // Clear after consumption
+                        // Pre-compute next last signal (A4: pipeline compare)
+                        last_for_output_r <= (tokens_remaining <= (LANES + LANES));
                     end else if (handshake_out) begin
                         // Output consumed but no new data
                         out_valid_r <= 1'b0;
                         out_last_r  <= 1'b0;
                     end
 
+                    // Decrement tokens_remaining on handshake (A2: down-counter)
                     if (handshake_out) begin
-                        tokens_sent <= tokens_sent_after_consume;
+                        tokens_remaining <= tokens_remaining - LANES;
                         if (out_last_r) begin
                             done        <= 1'b1;
                             out_valid_r <= 1'b0;

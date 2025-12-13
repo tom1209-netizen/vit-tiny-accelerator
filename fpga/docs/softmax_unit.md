@@ -496,34 +496,87 @@ end
 | Fmax | 131.87 MHz | 156.37 MHz | +24.5 MHz |
 | Latency | N/8 + 2 | N/8 + 3 | +1 cycle |
 
+### Optimization 4: Control Path
+
+**Problem:** The `tokens_sent -> 32-bit adder -> compare -> out_last_r` path had 12 logic levels.
+
+**Solution:** Applied three optimizations:
+
+1. **Reduced counter width**: Changed from 32-bit to 12-bit counters (supports up to 4096 tokens)
+2. **Down-counter**: Replaced `tokens_sent` with `tokens_remaining` that counts down
+3. **Simple compare**: `is_last_beat = (tokens_remaining <= LANES)` instead of `tokens_sent + LANES >= num_tokens`
+
+```verilog
+// Before: 32-bit up-counter with complex compare
+wire last_for_output = (tokens_sent + LANES >= num_tokens);
+
+// After: 12-bit down-counter with simple compare
+localparam COUNTER_WIDTH = 12;
+reg [COUNTER_WIDTH-1:0] tokens_remaining;  // Counts DOWN
+wire is_last_beat = (tokens_remaining <= LANES);
+```
+
+**Results:** 156.37 -> 158.91 MHz (+2.5 MHz)
+
+### Optimization 5: Pipelined Accumulator
+
+**Problem:** The `global_sum` accumulation combined 8-lane exp_sum addition + 32-bit accumulator add in one cycle (12 logic levels).
+
+**Solution:** Register `exp_sum` before adding to `global_sum`, creating a 2-stage accumulation pipeline.
+
+```verilog
+// Pipeline register for exp_sum
+reg [SUM_WIDTH-1:0] exp_sum_r;
+reg                 exp_sum_valid;
+
+S_ACCUMULATE: begin
+    // Stage 1: Register 8-lane sum
+    if (exp_out_valid_d2) begin
+        exp_sum_r     <= exp_sum;
+        exp_sum_valid <= 1'b1;
+    end else begin
+        exp_sum_valid <= 1'b0;
+    end
+    
+    // Stage 2: Add to global_sum (pipelined)
+    if (exp_sum_valid) begin
+        global_sum <= global_sum + exp_sum_r;
+    end
+end
+```
+
+**Results:** 158.91 -> 163.13 MHz (+4.2 MHz)
+
 ### Overall Optimization Summary
 
 | Optimization | Fmax | WNS | Change |
 |--------------|------|-----|--------|
 | Baseline (pre-optimization) | 126.61 MHz | -2.898 ns | - |
 | + Pipelined Max Tree | 140.02 MHz | -2.142 ns | +13.4 MHz |
-| + Pipelined MSR Unit | ~140 MHz | ~-2.1 ns | (fixed different path) |
-| **+ DSP Input Retiming** | **156.37 MHz** | **-1.395 ns** | **+24.5 MHz** |
+| + Pipelined MSR Unit | ~140 MHz | ~-2.1 ns | (fixed MSR path) |
+| + DSP Input Retiming | 156.37 MHz | -1.395 ns | +16.4 MHz |
+| + Control Path | 158.91 MHz | -1.293 ns | +2.5 MHz |
+| **+ Pipelined Accumulator** | **163.13 MHz** | **-1.130 ns** | **+4.2 MHz** |
 
-**Total Improvement:** 126.61 → 156.37 MHz (+29.76 MHz, +23.5%)
+**Total Improvement:** 126.61 -> 163.13 MHz (+36.5 MHz, +28.8%)
 
-**Total Latency Impact:** +3 cycles (1 max tree + 2 MSR/normalize)
+**Total Latency Impact:** +5-6 cycles across all optimizations
 
 ### Remaining Critical Path
 
-After all optimizations, the critical path is now **control logic**:
+After all optimizations, the critical path is the **8-lane exp_sum adder tree**:
 
 ```
-tokens_sent_reg → 32-bit adder → compare with num_tokens → out_last_r
+exp_rom[0]/dout -> 8×19-bit adder tree (7 CARRY4) -> exp_sum_r
 ```
 
-- 12 logic levels (9 CARRY4 + 3 LUTs)
-- Calculates `last_for_output = (tokens_sent + LANES >= num_tokens)`
+- 10 logic levels (7 CARRY4 + 3 LUTs)
+- Data path: ~6.1 ns
 
-**Potential future optimizations:**
-- Pre-compute last signal one cycle earlier
-- Use a down-counter instead of up-counter
-- Reduce counter width (12-bit for max 2048 tokens)
+**Potential future optimizations to reach 200 MHz:**
+- Tree-pipeline the 8-lane adder (add 2 more stages)
+- Use DSP48 for additions (each has 48-bit accumulator)
+- Reduce exp_out width if precision allows
 
 ## LUT Generation
 
