@@ -8,10 +8,13 @@ module tb_gemm_core_top;
     parameter AXIS_DATA_WIDTH = 64;
     parameter CLK_PERIOD = 10;  // 100 MHz
 
+    // NOTE: Uses 2-stage pipelined MAC processing elements
+    // Additional latency added per PE for pipeline stages
+
     localparam TOTAL_RESULTS = ARRAY_SIZE * ARRAY_SIZE;
     localparam VALUES_PER_BEAT = AXIS_DATA_WIDTH / ACC_WIDTH;  // 2
     localparam TOTAL_BEATS = TOTAL_RESULTS / VALUES_PER_BEAT;  // 32
-    localparam MAX_CYCLES = 10000;
+    localparam MAX_CYCLES = 15000;  // Increased for pipelined timing
 
     // Signals
     // Clock / reset

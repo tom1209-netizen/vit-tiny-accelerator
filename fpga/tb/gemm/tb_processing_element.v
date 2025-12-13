@@ -6,6 +6,14 @@ module tb_processing_element;
     parameter ARRAY_SIZE = 8;
     parameter CLK_PERIOD = 10;
 
+    // NOTE: With DSP48E1 internal pipelining (AREG=1, BREG=1, MREG=1, PREG=1)
+    // there is 3-cycle latency from input valid to accumulator output:
+    //   Cycle 0: Input captured by AREG/BREG
+    //   Cycle 1: Multiply result in MREG
+    //   Cycle 2: Add result in PREG, accumulator updated
+    //   Cycle 3: acc_out visible
+    // Total: 4 cycles from valid to acc_out visible
+
     reg                          clk;
     reg                          rst_n;
 
@@ -59,6 +67,7 @@ module tb_processing_element;
     initial begin
         $display("========================================");
         $display("Processing Element Testbench");
+        $display("(2-Stage Pipelined MAC Version)");
         $display("Time: %0t", $time);
         $display("========================================");
 
@@ -85,6 +94,8 @@ module tb_processing_element;
         @(posedge clk);
         a_valid_in = 0;
         b_valid_in = 0;
+        // Wait for 2-stage pipeline: +1 cycle for product_r, +1 for acc update
+        @(posedge clk);
         @(posedge clk);
         @(posedge clk);
         check_acc(32'd6);
@@ -101,6 +112,7 @@ module tb_processing_element;
         b_valid_in = 0;
         @(posedge clk);
         @(posedge clk);
+        @(posedge clk);
         check_acc(32'd26);
 
         // Test 3
@@ -115,6 +127,7 @@ module tb_processing_element;
         b_valid_in = 0;
         @(posedge clk);
         @(posedge clk);
+        @(posedge clk);
         check_acc(32'd20);
 
         // Test 4
@@ -123,6 +136,8 @@ module tb_processing_element;
         clear_acc = 1;
         @(posedge clk);
         clear_acc = 0;
+        // Wait for pipelined clear to take effect
+        @(posedge clk);
         @(posedge clk);
         @(posedge clk);
         check_acc(32'd0);
@@ -137,6 +152,7 @@ module tb_processing_element;
         @(posedge clk);
         @(posedge clk);
         @(posedge clk);
+        @(posedge clk);
         check_acc(32'd0);
 
         // Test 6
@@ -145,7 +161,7 @@ module tb_processing_element;
         clear_acc = 1;
         @(posedge clk);
         clear_acc = 0;
-
+        @(posedge clk);
         @(posedge clk);
 
         a_valid_in = 1;
@@ -157,6 +173,8 @@ module tb_processing_element;
         end
         a_valid_in = 0;
         b_valid_in = 0;
+        // Wait for pipeline to drain
+        @(posedge clk);
         @(posedge clk);
         @(posedge clk);
         check_acc(32'd55);  // 1+4+9+16+25 = 55
@@ -168,6 +186,7 @@ module tb_processing_element;
         @(posedge clk);
         clear_acc = 0;
         @(posedge clk);
+        @(posedge clk);
         a_in = 8'sd127;
         b_in = 8'sd127;
         a_valid_in = 1;
@@ -175,6 +194,7 @@ module tb_processing_element;
         @(posedge clk);
         a_valid_in = 0;
         b_valid_in = 0;
+        @(posedge clk);
         @(posedge clk);
         @(posedge clk);
         check_acc(32'd16129);
@@ -186,6 +206,7 @@ module tb_processing_element;
         @(posedge clk);
         clear_acc = 0;
         @(posedge clk);
+        @(posedge clk);
         a_in = -8'sd128;
         b_in = -8'sd128;
         a_valid_in = 1;
@@ -193,6 +214,7 @@ module tb_processing_element;
         @(posedge clk);
         a_valid_in = 0;
         b_valid_in = 0;
+        @(posedge clk);
         @(posedge clk);
         @(posedge clk);
         check_acc(32'd16384);
@@ -204,6 +226,7 @@ module tb_processing_element;
         @(posedge clk);
         clear_acc = 0;
         @(posedge clk);
+        @(posedge clk);
         a_in = 8'sd127;
         b_in = -8'sd128;
         a_valid_in = 1;
@@ -211,6 +234,7 @@ module tb_processing_element;
         @(posedge clk);
         a_valid_in = 0;
         b_valid_in = 0;
+        @(posedge clk);
         @(posedge clk);
         @(posedge clk);
         check_acc(-32'sd16256);
@@ -221,6 +245,7 @@ module tb_processing_element;
         clear_acc = 1;
         @(posedge clk);
         clear_acc = 0;
+        @(posedge clk);
         @(posedge clk);
         // Staggered a and b valid signals
         a_in = 8'sd10;
@@ -234,6 +259,7 @@ module tb_processing_element;
         a_valid_in = 0;
         b_valid_in = 0;
         @(posedge clk);
+        @(posedge clk);
         check_acc(32'd0);
 
         // Test 11: Reset during accumulation
@@ -243,14 +269,16 @@ module tb_processing_element;
         @(posedge clk);
         clear_acc = 0;
         @(posedge clk);
+        @(posedge clk);
         a_in = 8'd5;
         b_in = 8'd5;
         a_valid_in = 1;
         b_valid_in = 1;
-        @(posedge clk);  // acc = 25
+        @(posedge clk);  // valid applied
         a_in = 8'd2;
         b_in = 8'd2;
-        @(posedge clk);  // acc = 25 + 4 = 29
+        @(posedge clk);  // second valid
+        @(posedge clk);  // pipeline draining
         // Assert reset
         rst_n = 0;
         @(posedge clk);
@@ -259,10 +287,11 @@ module tb_processing_element;
         b_valid_in = 0;
         @(posedge clk);
         @(posedge clk);
+        @(posedge clk);
         check_acc(32'd0);  // Should be 0 after reset
 
         $display("\n========================================");
-        $display("TEST SUMMARY - PE");
+        $display("TEST SUMMARY - PE (2-Stage Pipeline)");
         $display("========================================");
         if (errors == 0) begin
             $display("*** ALL TESTS PASSED! ***");
@@ -293,3 +322,4 @@ module tb_processing_element;
     end
 
 endmodule
+

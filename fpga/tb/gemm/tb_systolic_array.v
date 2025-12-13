@@ -395,9 +395,12 @@ module tb_systolic_array;
     endtask
 
     task run_computation;
-        localparam NUM_CYCLES = ARRAY_SIZE * 3 + 10;
+        // Increased NUM_CYCLES for 2-stage pipelined MAC (extra cycle per PE)
+        localparam NUM_CYCLES = ARRAY_SIZE * 3 + 15;
         begin
             clear_acc = 1;
+            @(posedge clk);
+            // Wait for pipelined clear to propagate
             @(posedge clk);
             clear_acc = 0;
 
@@ -407,7 +410,8 @@ module tb_systolic_array;
             end
 
             set_inputs(999);
-            repeat (5) @(posedge clk);
+            // Extra wait cycles for 2-stage pipeline to drain
+            repeat (10) @(posedge clk);
         end
     endtask
 

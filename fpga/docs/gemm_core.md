@@ -107,3 +107,182 @@ The output collector scans the accumulated matrix `C` in row-major order and pac
 
 - `fpga/tb/gemm/tb_gemm_core_top.v` demonstrates the wavefront generator, handshake behavior, and end-to-end result checking for an 8×8 tile.
 - Additional targeted benches (`fpga/tb/gemm/tb_input_buffer_controller.v`, etc.) can be used to understand individual modules in isolation.
+
+## Timing Optimization
+
+This section documents the optimization journey to achieve high-frequency operation on Zynq-7020.
+
+### Target and Constraints
+
+| Parameter | Value |
+|-----------|-------|
+| Target FPGA | Zynq-7020 (xc7z020clg400-1) |
+| Speed Grade | -1 (slowest) |
+| Target Frequency | 200 MHz (5.0 ns period) |
+| Achieved Frequency | **196.23 MHz** (5.096 ns) |
+
+### Optimization History
+
+#### Phase 1: Baseline Analysis (138 MHz)
+
+The original single-cycle MAC design achieved only ~138 MHz:
+
+```
+Critical Path: a_in → DSP multiply → add → accumulator register
+Logic Levels: 13 (using LUT-based multiplication)
+WNS: -0.742 ns at 125 MHz target
+```
+
+**Issue:** Xilinx Vivado was using LUTs instead of dedicated DSP48E1 slices for multiplication.
+
+#### Phase 2: DSP48E1 Inference (138 MHz)
+
+Added synthesis directive to force DSP usage:
+
+```verilog
+(* use_dsp = "yes" *)
+wire signed [ACC_WIDTH-1:0] product;
+assign product = a_in * b_in;
+```
+
+**Result:** Logic levels reduced from 13 to 2, but timing only marginally improved because the full MAC operation still happened in one cycle.
+
+#### Phase 3: 2-Stage MAC Pipeline (196 MHz)
+
+Broke the critical path by adding a pipeline register between multiply and accumulate:
+
+```
+Stage 1: a_in × b_in → product_r (registered)
+Stage 2: accumulator + product_r → accumulator
+```
+
+**Implementation in `processing_element.v`:**
+```verilog
+// Stage 1: Multiply
+(* use_dsp = "yes" *)
+wire signed [ACC_WIDTH-1:0] product;
+assign product = a_in * b_in;
+
+reg signed [ACC_WIDTH-1:0] product_r;
+always @(posedge clk) product_r <= product;
+
+// Stage 2: Accumulate  
+wire signed [ACC_WIDTH-1:0] next_acc;
+assign next_acc = accumulator + product_r;
+```
+
+**Result:** Achieved 196.23 MHz (WNS = -0.096 ns)
+
+### Critical Path Analysis
+
+After 2-stage pipeline optimization, the critical path shifted to **inter-PE data routing**:
+
+```mermaid
+graph LR
+    %% 1. Define Nodes first
+    subgraph PE_Col1 [PE Row 2 / Col 1]
+        direction TB
+        SRC_REG[a_out_reg<br/>Bit 7]
+    end
+
+    subgraph PE_Col2 [PE Row 2 / Col 2]
+        direction TB
+        DEST_DSP[DSP48E1<br/>Input: A 20]
+    end
+
+    %% 2. Define Connections
+    SRC_REG -- "Routing: 0.83 ns" --> DEST_DSP
+    DEST_DSP -.- TIME_NOTE(DSP Setup: -3.722 ns)
+
+    %% 4. Apply Styles
+    class SRC_REG reg
+    class DEST_DSP dsp
+    class TIME_NOTE delay
+```
+
+The DSP48E1's A-input has a strict setup requirement of 3.722 ns, leaving only ~1.3 ns for register propagation and routing.
+
+### TPU-Style Systolic Array Experiment
+
+We investigated whether Google TPU-style inter-PE pipelining could improve timing.
+
+#### TPU Design Pattern
+
+In Google's TPU v1, every inter-PE connection is registered:
+
+```mermaid
+graph LR
+    %% 1. Define Nodes First
+    PE1[PE]
+    REG1[[REG]]
+
+    %% 2. Subgraph for the internal view
+    subgraph PE2_Wrapper [PE]
+        direction LR
+        Ain(a_in_r)
+        DSP[DSP Unit]
+        Ain --> DSP
+    end
+
+    REG2[[REG]]
+    PE3[PE]
+
+    %% 3. Define Connections
+    PE1 --> REG1
+    REG1 --> Ain
+    DSP --> REG2
+    REG2 --> PE3
+
+    %% 4. Apply Styles
+    class PE1,PE3 pe
+    class REG1,REG2 reg
+    class Ain,DSP internal
+```
+
+Each PE has an **input capture register** (`a_in_r`) that:
+1. Provides registered input to DSP (decouples routing from compute)
+2. Enables scalability to large arrays without timing degradation
+
+#### Implementation Attempt
+
+Added input capture registers to create 3-stage pipeline:
+- Stage 1: Input capture (`a_in → a_in_r`)
+- Stage 2: Multiply (`a_in_r × b_in_r → product_r`)
+- Stage 3: Accumulate (`product_r + accumulator`)
+
+#### Result: No Improvement (195 MHz)
+
+The TPU-style design achieved **194.70 MHz**, slightly *worse* than the simpler 2-stage design.
+
+**Why it didn't help:**
+
+1. **Same routing distance**: On our small 8×8 array, intra-PE routing (fabric register → DSP) is essentially the same distance as inter-PE routing.
+
+2. **Bottleneck is DSP setup time**: Both designs hit the same fundamental limit:
+   ```
+   DSP48E1 A-input setup time = -3.722 ns
+   Available budget after clock overhead = ~1.3 ns
+   ```
+   Adding more fabric registers doesn't reduce DSP setup requirements.
+
+3. **Vivado placement is already optimal**: The small array fits compactly, so inter-PE wires are short.
+
+#### When TPU-Style Would Help
+
+| Scenario | TPU-Style Beneficial? |
+|----------|----------------------|
+| Large array (64×64+) | Yes - inter-PE wires become long |
+| Cross-chip routing | Yes - registers break timing domains |
+| Manual floorplanning | Yes - if PEs are placed far apart |
+| Small array, auto-placed | No - routing is already short |
+
+### Final Design Choice
+
+The **2-stage pipeline** (Stage 1: Multiply → Stage 2: Accumulate) provides the best trade-off:
+
+| Metric | 2-Stage Pipeline |
+|--------|------------------|
+| Fmax | 196.23 MHz |
+| Latency | 2 cycles (input to acc_out) |
+| Resource overhead | 1 register per PE (product_r) |
+| Scalability | Good for 8×8, may need TPU-style for larger |

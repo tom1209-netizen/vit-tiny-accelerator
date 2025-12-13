@@ -13,42 +13,23 @@ set_msg_config -severity INFO -suppress
 file mkdir $build_dir
 
 # Design settings
-set top_module      "riscv_core"
+set top_module      "gemm_core_top"
 set fpga_part       "xc7z020clg400-1"
-set constraint_file [file join $constraints_dir "arty_z7.xdc"]
+set constraint_file [file join $constraints_dir "gemm_core.xdc"]
 
 # Reports
 set synth_log       [file join $build_dir "synth.log"]
 set impl_log        [file join $build_dir "impl.log"]
-set timing_rpt      [file join $build_dir "post_route_timing.rpt"]
-set fmax_report     [file join $build_dir "fmax_report.txt"]
+set timing_rpt      [file join $build_dir "${top_module}_post_route_timing.rpt"]
+set fmax_report     [file join $build_dir "${top_module}_fmax_report.txt"]
 
-# Source Files
+# Source Files - GEMM Core
 set rtl_files [list \
-    "$rtl_dir/cpu_core/if/pc_reg.v" \
-    "$rtl_dir/cpu_core/if/if_stage.v" \
-    "$rtl_dir/cpu_core/if/if_id_reg.v" \
-    "$rtl_dir/cpu_core/id/imm_gen.v" \
-    "$rtl_dir/cpu_core/id/control.v" \
-    "$rtl_dir/cpu_core/id/reg_file.v" \
-    "$rtl_dir/cpu_core/id/id_ex_reg.v" \
-    "$rtl_dir/cpu_core/id/id_stage.v" \
-    "$rtl_dir/cpu_core/ex/divider_16stage.v" \
-    "$rtl_dir/cpu_core/ex/divu_iter.v" \
-    "$rtl_dir/cpu_core/ex/mul_div.v" \
-    "$rtl_dir/cpu_core/ex/kogge_stone_adder.v" \
-    "$rtl_dir/cpu_core/ex/alu.v" \
-    "$rtl_dir/cpu_core/ex/scoreboard.v" \
-    "$rtl_dir/cpu_core/ex/ex_mem_reg.v" \
-    "$rtl_dir/cpu_core/ex/ex_stage.v" \
-    "$rtl_dir/cpu_core/mem/mem_stage.v" \
-    "$rtl_dir/cpu_core/mem/mem_wb_reg.v" \
-    "$rtl_dir/cpu_core/wb/wb_stage.v" \
-    "$rtl_dir/memory/instr_mem.v" \
-    "$rtl_dir/memory/data_mem.v" \
-    "$rtl_dir/csr_file.v" \
-    "$rtl_dir/hazard_unit.v" \
-    "$rtl_dir/riscv_core.v" \
+    "$rtl_dir/gemm/processing_element.v" \
+    "$rtl_dir/gemm/systolic_array.v" \
+    "$rtl_dir/gemm/input_buffer_controller.v" \
+    "$rtl_dir/gemm/output_collector.v" \
+    "$rtl_dir/gemm/gemm_core_top.v" \
 ]
 
 # Read Sources
@@ -65,9 +46,9 @@ set_property include_dirs [file join $rtl_dir "defines"] [current_fileset]
 # Read Constraints
 read_xdc $constraint_file
 
-# Synthesis
-puts "Starting Synthesis..."
-synth_design -top $top_module -part $fpga_part
+# Synthesis (Out-of-Context mode for IP/module timing analysis)
+puts "Starting Synthesis (Out-of-Context)..."
+synth_design -top $top_module -part $fpga_part -mode out_of_context
 write_checkpoint -force [file join $build_dir "post_synth.dcp"]
 report_timing_summary -file [file join $build_dir "post_synth_timing.rpt"]
 
@@ -94,7 +75,7 @@ if {[llength $worst_path_ops] == 0} {
     set worst_path [lindex $worst_path_ops 0]
     set wns [get_property SLACK $worst_path]
     # Use the known clock name from XDC
-    set clk_period [get_property PERIOD [get_clocks sys_clk_pin]]
+    set clk_period [get_property PERIOD [get_clocks aclk]]
 }
 
 # Calculate Fmax

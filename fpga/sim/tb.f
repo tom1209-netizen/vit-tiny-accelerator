@@ -8,11 +8,6 @@
 // Residual addition module
 ../tb/residual/tb_residual_add.v
 
-// MLP module
-// ../tb/mlp/tb_mlp_block_top.v
-../tb/mlp/tb_relu_unit.v
-../tb/mlp/tb_norm_unit.v
-// ../tb/mlp/tb_mlp_controller.v
-// ../tb/mlp/tb_weight_buffer.v
+// Softmax module
+../tb/softmax/tb_softmax_unit.v
 
-// Requant module

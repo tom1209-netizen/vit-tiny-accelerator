@@ -23,21 +23,45 @@ module processing_element #(
     output reg signed [ACC_WIDTH-1:0] acc_out,
     output reg                        acc_done
 );
+    // =========================================================================
+    // 2-STAGE MAC PIPELINE for High-Frequency Operation (~196 MHz)
+    // 
+    // This design breaks the MAC path into two stages:
+    //   Stage 1: Multiply -> product registered in product_r
+    //   Stage 2: Accumulate -> product_r added to accumulator
+    //
+    // See fpga/docs/gemm_core.md for detailed timing analysis.
+    // =========================================================================
+
     localparam integer COUNT_WIDTH = $clog2(ARRAY_SIZE + 1);
     localparam [COUNT_WIDTH-1:0] ONE = {{COUNT_WIDTH - 1{1'b0}}, 1'b1};
     localparam [COUNT_WIDTH-1:0] ARRAY_SIZE_COUNT = ARRAY_SIZE;
 
-    reg signed  [  ACC_WIDTH-1:0] accumulator;
-    reg         [COUNT_WIDTH-1:0] mac_count;
+    reg signed [ACC_WIDTH-1:0] accumulator;
+    reg [COUNT_WIDTH-1:0] mac_count;
 
-    wire signed [  ACC_WIDTH-1:0] product;
-    wire signed [  ACC_WIDTH-1:0] next_acc;
+    // Stage 1: Multiply with pipeline register (DSP48E1 inference)
+    (* use_dsp = "yes" *)
+    wire signed [ACC_WIDTH-1:0] product;
+    assign product = a_in * b_in;
 
-    // Calculate product and next accumulator value combinationally
-    assign product  = a_in * b_in;
-    assign next_acc = accumulator + product;
+    reg signed [ACC_WIDTH-1:0] product_r;
+    reg                        mac_valid_r;
 
-    // Accumulator logic and completion tracking
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            product_r   <= {ACC_WIDTH{1'b0}};
+            mac_valid_r <= 1'b0;
+        end else begin
+            product_r   <= product;
+            mac_valid_r <= (a_valid_in && b_valid_in) && !clear_acc;
+        end
+    end
+
+    // Stage 2: Accumulator
+    wire signed [ACC_WIDTH-1:0] next_acc;
+    assign next_acc = accumulator + product_r;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             accumulator <= {ACC_WIDTH{1'b0}};
@@ -48,7 +72,7 @@ module processing_element #(
                 accumulator <= {ACC_WIDTH{1'b0}};
                 mac_count   <= {COUNT_WIDTH{1'b0}};
                 acc_done    <= 1'b0;
-            end else if (a_valid_in && b_valid_in) begin
+            end else if (mac_valid_r) begin
                 accumulator <= next_acc;
                 if (!acc_done) begin
                     mac_count <= mac_count + ONE;
@@ -58,36 +82,30 @@ module processing_element #(
         end
     end
 
-    // Pipelining logic for A and B paths
+    // Inter-PE Data Propagation (1 cycle delay)
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            a_out <= {DATA_WIDTH{1'b0}};
-            b_out <= {DATA_WIDTH{1'b0}};
+            a_out       <= {DATA_WIDTH{1'b0}};
+            b_out       <= {DATA_WIDTH{1'b0}};
             a_valid_out <= 1'b0;
             b_valid_out <= 1'b0;
         end else begin
-            // Pass 'A' data and valid to the right
-            a_out <= a_in;
+            a_out       <= a_in;
             a_valid_out <= a_valid_in;
-
-            // Pass 'B' data and valid down
-            b_out <= b_in;
+            b_out       <= b_in;
             b_valid_out <= b_valid_in;
         end
     end
 
-    // Accumulator output register
-    // Make acc_out reflect the just-updated sum when a MAC happens.
+    // Accumulator Output
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             acc_out <= {ACC_WIDTH{1'b0}};
         end else if (clear_acc) begin
             acc_out <= {ACC_WIDTH{1'b0}};
-        end else if (a_valid_in && b_valid_in) begin
-            // Use next_acc so acc_out aligns with acc_done on the next cycle
+        end else if (mac_valid_r) begin
             acc_out <= next_acc;
         end
-        // else: hold previous acc_out
     end
 
 endmodule
