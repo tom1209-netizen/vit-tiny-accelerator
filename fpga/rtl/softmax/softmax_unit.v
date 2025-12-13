@@ -43,26 +43,30 @@ module softmax_unit #(
     reg [2:0] state, next_state;
 
     // Counters and accumulators
-    reg [SUM_WIDTH-1:0] global_sum;
-    reg [31:0] tokens_accepted;
-    reg [31:0] tokens_processed;
-    reg [31:0] tokens_sent;
+    reg        [      SUM_WIDTH-1:0] global_sum;
+    reg        [               31:0] tokens_accepted;
+    reg        [               31:0] tokens_processed;
+    reg        [               31:0] tokens_sent;
 
     // Max value for numerical stability (signed)
-    reg signed [DATA_WIDTH-1:0] global_max;
+    reg signed [     DATA_WIDTH-1:0] global_max;
+
+    // Pipeline the per-beat max to break the input->global_max critical path.
+    reg signed [     DATA_WIDTH-1:0] beat_max_r;
+    reg                              beat_max_valid;
 
     // MSR results latched for pass 2
-    reg [RECIP_WIDTH-1:0] msr_mult_r;
-    reg [4:0] msr_shift_r;
+    reg        [    RECIP_WIDTH-1:0] msr_mult_r;
+    reg        [                4:0] msr_shift_r;
 
     // Exp pipeline valid (aligns FIFO read -> exp_rom -> accumulate/write)
-    reg exp_out_valid_d1;
-    reg exp_out_valid_d2;
+    reg                              exp_out_valid_d1;
+    reg                              exp_out_valid_d2;
 
     // =========================================================================
     // INPUT FIFO - buffer raw inputs during S_FIND_MAX for reuse in S_ACCUMULATE
     // =========================================================================
-    wire [AXIS_DATA_WIDTH-1:0] input_fifo_dout;
+    wire       [AXIS_DATA_WIDTH-1:0] input_fifo_dout;
     wire input_fifo_full, input_fifo_empty;
     wire input_fifo_wr_en;
     wire input_fifo_rd_en;
@@ -83,8 +87,18 @@ module softmax_unit #(
         .empty(input_fifo_empty)
     );
 
+    // Accept AXI input when in S_FIND_MAX state, valid data, and FIFO not full
+    // (Declared early because needed by pipelined max tree)
+    wire accept_axi_input = (state == S_FIND_MAX) && s_axis_tvalid && s_axis_tready;
+
     // =========================================================================
-    // MAX-FINDING TREE (8 lanes -> 1 max value)
+    // MAX-FINDING TREE (8 lanes -> 1 max value) - 2-STAGE PIPELINED
+    // =========================================================================
+    // Stage 1: 8 inputs -> 4 intermediate max values (combinational)
+    // Stage 2: 4 -> 2 -> 1 max value (combinational after register)
+    //
+    // This breaks the input->beat_max_r critical path by adding an intermediate
+    // register stage, trading 1 cycle latency for improved Fmax.
     // =========================================================================
     wire signed [DATA_WIDTH-1:0] lane_in[0:LANES-1];
     genvar gl;
@@ -94,13 +108,40 @@ module softmax_unit #(
         end
     endgenerate
 
-    // Tree reduction to find max of 8 signed values
+    // Stage 1: 8 -> 4 reduction (combinational)
     wire signed [DATA_WIDTH-1:0] max_01 = (lane_in[0] > lane_in[1]) ? lane_in[0] : lane_in[1];
     wire signed [DATA_WIDTH-1:0] max_23 = (lane_in[2] > lane_in[3]) ? lane_in[2] : lane_in[3];
     wire signed [DATA_WIDTH-1:0] max_45 = (lane_in[4] > lane_in[5]) ? lane_in[4] : lane_in[5];
     wire signed [DATA_WIDTH-1:0] max_67 = (lane_in[6] > lane_in[7]) ? lane_in[6] : lane_in[7];
-    wire signed [DATA_WIDTH-1:0] max_0123 = (max_01 > max_23) ? max_01 : max_23;
-    wire signed [DATA_WIDTH-1:0] max_4567 = (max_45 > max_67) ? max_45 : max_67;
+
+    // Pipeline registers for Stage 1 results
+    reg signed [DATA_WIDTH-1:0] max_01_r, max_23_r, max_45_r, max_67_r;
+    reg max_stage1_valid;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            max_01_r <= {DATA_WIDTH{1'b0}};
+            max_23_r <= {DATA_WIDTH{1'b0}};
+            max_45_r <= {DATA_WIDTH{1'b0}};
+            max_67_r <= {DATA_WIDTH{1'b0}};
+            max_stage1_valid <= 1'b0;
+        end else if (state == S_IDLE) begin
+            max_stage1_valid <= 1'b0;
+        end else if (accept_axi_input) begin
+            // Capture Stage 1 results when input is accepted
+            max_01_r <= max_01;
+            max_23_r <= max_23;
+            max_45_r <= max_45;
+            max_67_r <= max_67;
+            max_stage1_valid <= 1'b1;
+        end else begin
+            max_stage1_valid <= 1'b0;
+        end
+    end
+
+    // Stage 2: 4 -> 1 reduction (combinational from registered values)
+    wire signed [DATA_WIDTH-1:0] max_0123 = (max_01_r > max_23_r) ? max_01_r : max_23_r;
+    wire signed [DATA_WIDTH-1:0] max_4567 = (max_45_r > max_67_r) ? max_45_r : max_67_r;
     wire signed [DATA_WIDTH-1:0] beat_max = (max_0123 > max_4567) ? max_0123 : max_4567;
 
     // =========================================================================
@@ -294,8 +335,10 @@ module softmax_unit #(
                 end
             end
             S_FIND_MAX: begin
-                // Transition when all tokens accepted into input_fifo
-                if (tokens_accepted >= num_tokens) next_state = S_ACCUMULATE;
+                // Transition when all tokens accepted AND max pipeline has drained.
+                // Wait for beat_max_valid to go low after processing the last beat.
+                if (tokens_accepted >= num_tokens && !max_stage1_valid && !beat_max_valid)
+                    next_state = S_ACCUMULATE;
             end
             S_ACCUMULATE: begin
                 if (exp_out_valid_d2 && (tokens_processed + LANES >= num_tokens))
@@ -314,13 +357,14 @@ module softmax_unit #(
     // =========================================================================
     // Datapath Logic
     // =========================================================================
-    wire accept_axi_input = (state == S_FIND_MAX) && s_axis_tvalid && s_axis_tready;
     assign input_fifo_wr_en = accept_axi_input;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             global_sum       <= {SUM_WIDTH{1'b0}};
             global_max       <= 8'h80;  // -128 (minimum signed value)
+            beat_max_r       <= {DATA_WIDTH{1'b0}};
+            beat_max_valid   <= 1'b0;
             tokens_accepted  <= 32'd0;
             tokens_processed <= 32'd0;
             tokens_sent      <= 32'd0;
@@ -340,6 +384,8 @@ module softmax_unit #(
                 S_IDLE: begin
                     global_sum       <= {SUM_WIDTH{1'b0}};
                     global_max       <= 8'h80;  // Reset to minimum
+                    beat_max_r       <= {DATA_WIDTH{1'b0}};
+                    beat_max_valid   <= 1'b0;
                     tokens_accepted  <= 32'd0;
                     tokens_processed <= 32'd0;
                     tokens_sent      <= 32'd0;
@@ -352,13 +398,23 @@ module softmax_unit #(
                 end
 
                 S_FIND_MAX: begin
-                    if (accept_axi_input) begin
-                        tokens_accepted <= tokens_accepted + LANES;
-                        // Update global max
-                        if (beat_max > global_max) begin
-                            global_max <= beat_max;
+                    // Update global_max using the previous cycle's beat_max.
+                    if (beat_max_valid) begin
+                        if (beat_max_r > global_max) begin
+                            global_max <= beat_max_r;
                         end
                     end
+
+                    // Count tokens when AXI input is accepted (Stage 0)
+                    if (accept_axi_input) begin
+                        tokens_accepted <= tokens_accepted + LANES;
+                    end
+
+                    // Capture beat_max when Stage 1 results are valid (1 cycle after input)
+                    if (max_stage1_valid) begin
+                        beat_max_r <= beat_max;
+                    end
+                    beat_max_valid <= max_stage1_valid;
                 end
 
                 S_ACCUMULATE: begin

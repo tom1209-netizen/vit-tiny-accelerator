@@ -278,6 +278,136 @@ This design implements the standard stability trick `x := x - max(x)` before exp
 - Maximum: 2048 (256 × 8, limited by FIFO_DEPTH)
 - Requirement: Must be multiple of 8
 
+## Timing Optimization
+
+This section documents the timing analysis methodology and optimizations applied to achieve higher Fmax targets.
+
+### Timing Analysis Methodology
+
+The softmax unit uses **Out-of-Context (OOC)** synthesis for timing analysis, consistent with the GEMM core methodology. This enables accurate internal timing characterization without I/O routing constraints.
+
+**Key Files:**
+
+| File | Purpose |
+|------|---------|
+| `constraints/softmax_unit.xdc` | OOC timing constraints (200MHz target) |
+| `scripts/run_timing_softmax.tcl` | Vivado batch timing script |
+
+**Running Timing Analysis:**
+
+```bash
+cd fpga
+vivado -mode batch -source scripts/run_timing_softmax.tcl
+# Results written to build/softmax_post_route_fmax.txt
+```
+
+**Fmax Calculation:**
+
+```
+Effective Period = Clock Period - WNS (Worst Negative Slack)
+Fmax = 1000 / Effective Period  (in MHz)
+```
+
+### Optimization 1: Pipelined Max-Finding Tree
+
+**Problem:** The original 8-way max reduction tree created a long combinational path from input to `beat_max_r` register with 10 logic levels (4 CARRY4 + 6 LUTs), resulting in a data path delay of ~7.8ns.
+
+**Original Critical Path:**
+```
+s_axis_tdata → lane unpack → max_01/23/45/67 → max_0123/4567 → beat_max → beat_max_r
+                              (8→4 compare)     (4→2 compare)  (2→1 compare)
+```
+
+**Solution:** Split the tree into a 2-stage pipeline with intermediate registers after the 8→4 reduction.
+
+**Pipelined Implementation:**
+
+```verilog
+// Stage 1: 8 → 4 reduction (combinational)
+wire signed [DATA_WIDTH-1:0] max_01 = (lane_in[0] > lane_in[1]) ? lane_in[0] : lane_in[1];
+wire signed [DATA_WIDTH-1:0] max_23 = (lane_in[2] > lane_in[3]) ? lane_in[2] : lane_in[3];
+wire signed [DATA_WIDTH-1:0] max_45 = (lane_in[4] > lane_in[5]) ? lane_in[4] : lane_in[5];
+wire signed [DATA_WIDTH-1:0] max_67 = (lane_in[6] > lane_in[7]) ? lane_in[6] : lane_in[7];
+
+// Pipeline registers for Stage 1 results
+reg signed [DATA_WIDTH-1:0] max_01_r, max_23_r, max_45_r, max_67_r;
+reg max_stage1_valid;
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        max_01_r <= 0; max_23_r <= 0; max_45_r <= 0; max_67_r <= 0;
+        max_stage1_valid <= 1'b0;
+    end else if (accept_axi_input) begin
+        max_01_r <= max_01; max_23_r <= max_23;
+        max_45_r <= max_45; max_67_r <= max_67;
+        max_stage1_valid <= 1'b1;
+    end else begin
+        max_stage1_valid <= 1'b0;
+    end
+end
+
+// Stage 2: 4 → 1 reduction (from registered values)
+wire signed [DATA_WIDTH-1:0] max_0123 = (max_01_r > max_23_r) ? max_01_r : max_23_r;
+wire signed [DATA_WIDTH-1:0] max_4567 = (max_45_r > max_67_r) ? max_45_r : max_67_r;
+wire signed [DATA_WIDTH-1:0] beat_max = (max_0123 > max_4567) ? max_0123 : max_4567;
+```
+
+**State Machine Update:**
+
+The S_FIND_MAX→S_ACCUMULATE transition now waits for the pipeline to drain:
+
+```verilog
+S_FIND_MAX: begin
+    // Wait for pipeline to drain before transitioning
+    if (tokens_accepted >= num_tokens && !max_stage1_valid && !beat_max_valid)
+        next_state = S_ACCUMULATE;
+end
+```
+
+**Results:**
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| WNS | -2.898 ns | -2.142 ns | +0.756 ns |
+| Fmax | 126.61 MHz | 140.02 MHz | +13.4 MHz |
+| Latency | N/8 cycles | N/8 + 1 cycle | +1 cycle |
+
+**Trade-off:** The optimization adds 1 extra cycle to the S_FIND_MAX phase.
+
+### Remaining Critical Paths
+
+After the max tree optimization, two other paths limit further Fmax improvement:
+
+**1. ExpFIFO → DSP48 Path** (-2.142 ns worst)
+
+```
+u_exp_fifo/rptr_reg → RAMD64E (distributed RAM) → LUT6 mux → DSP48E1/A[]
+```
+
+- Root cause: Distributed RAM has combinational read output
+- DSP48 A-port has ~3.7ns setup time, leaving only ~1.3ns for FIFO + routing
+- **Potential fix:** Enable DSP input registers (AREG/BREG) or convert FIFO to BRAM
+
+**2. global_sum → msr_mult_r Path** (-2.138 ns)
+
+```
+global_sum_reg → priority encoder (LUT chain) → LUT lookup → msr_mult_r_reg
+```
+
+- Root cause: `msr_unit.v` priority encoder is fully combinational (32-bit scan)
+- 8 logic levels through LUT chain
+- **Potential fix:** Pipeline the MSR unit into 2 stages
+
+### Future Optimization Options
+
+| Option | Description | Latency Impact | Expected Gain |
+|--------|-------------|----------------|---------------|
+| **DSP Registers** | Enable AREG/BREG on DSP48 multipliers | +1 cycle in S_NORMALIZE | ~2 ns |
+| **Pipeline MSR** | Split priority encoder + LUT lookup | +1 cycle in transition | ~2 ns |
+| **BRAM FIFOs** | Convert distributed RAM to BRAM | Minimal (implicit register) | ~0.5-1 ns |
+
+Combined, these could push Fmax to ~200MHz with +2-3 cycles total latency increase.
+
 ## LUT Generation
 
 The `lut/lut_generator.py` script generates the lookup tables:

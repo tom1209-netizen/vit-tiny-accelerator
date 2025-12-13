@@ -16,7 +16,9 @@ module softmax_fifo #(
 );
     localparam integer PTR_W = $clog2(DEPTH);
 
-    reg [WIDTH-1:0] mem[0:DEPTH-1];
+    // NOTE: Keep the RAM write logic in a clocked block without async reset so
+    // Vivado can infer LUTRAM/BRAM. Pointer/count reset stays separate.
+    (* ram_style = "auto" *) reg [WIDTH-1:0] mem[0:DEPTH-1];
     reg [PTR_W:0] count;
     reg [PTR_W-1:0] wptr;
     reg [PTR_W-1:0] rptr;
@@ -29,6 +31,13 @@ module softmax_fifo #(
     assign empty = (count == 0);
     assign dout  = mem[rptr];
 
+    // Memory write port (no reset/clear to preserve RAM inference)
+    always @(posedge clk) begin
+        if (valid_write) begin
+            mem[wptr] <= din;
+        end
+    end
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             count <= {(PTR_W + 1) {1'b0}};
@@ -39,11 +48,8 @@ module softmax_fifo #(
             wptr  <= {PTR_W{1'b0}};
             rptr  <= {PTR_W{1'b0}};
         end else begin
-            // write path
-            if (valid_write) begin
-                mem[wptr] <= din;
-                wptr      <= wptr + 1'b1;
-            end
+            // write pointer update
+            if (valid_write) wptr <= wptr + 1'b1;
 
             // read path
             if (valid_read) begin

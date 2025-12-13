@@ -7,6 +7,9 @@ program_board:
 timing:
 	vivado -mode batch -source run_timing.tcl
 
+timing_softmax:
+	vivado -mode batch -source run_timing_softmax.tcl
+
 xsim:
 	vivado -mode batch -source run_xsim.tcl
 
