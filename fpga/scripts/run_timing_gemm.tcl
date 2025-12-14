@@ -1,3 +1,8 @@
+# =============================================================================
+# GEMM Core - Out-of-Context Timing Analysis Script
+# Target: Arty Z7-20 (xc7z020clg400-1) @ 200 MHz
+# =============================================================================
+
 # Setup paths
 set script_dir       [file dirname [file normalize [info script]]]
 set project_root     [file dirname $script_dir]

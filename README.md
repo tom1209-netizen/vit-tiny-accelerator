@@ -998,7 +998,7 @@ The Layer Norm unit uses a **dual-FIFO streaming architecture** to compute stati
 | 3 | Stats Buffer | FIFO to decouple accumulator from downstream |
 | 4 | Avg/Var Calc | Computes mean and variance from accumulated sums |
 | 5 | Recip Sqrt | LUT-based 1/sqrt(var) using Peano approximation (12-bit mantissa) |
-| 6 | Final Norm Calc | Applies (x - mean) * inv_sqrt * gamma + beta, requantizes to INT8 |
+| 6 | Final Norm Calc | Applies (x - mean) *inv_sqrt* gamma + beta, requantizes to INT8 |
 | 7 | Output FIFO | Buffers output for back-pressure handling |
 
 **Implementation Details:**

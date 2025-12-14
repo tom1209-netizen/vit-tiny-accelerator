@@ -4,11 +4,14 @@ build:
 program_board:
 	vivado -mode batch -source program_board.tcl
 
-timing:
-	vivado -mode batch -source run_timing.tcl
+timing_gemm:
+	vivado -mode batch -source run_timing_gemm.tcl
 
 timing_softmax:
 	vivado -mode batch -source run_timing_softmax.tcl
+
+timing_depthwise_conv:
+	vivado -mode batch -source run_timing_depthwise_conv.tcl
 
 xsim:
 	vivado -mode batch -source run_xsim.tcl
@@ -29,12 +32,12 @@ clean:
 
 help:
 	@echo ""
-	@echo "**************************************************"
+	@echo "****************************************************"
 	@echo "******* ViT Tiny FPGA Build System Makefile ********"
-	@echo "**************************************************"
-	@echo "** make build         : build the FPGA bitstream"
-	@echo "** make timing        : Run Synthesis & Implementation and report Fmax"
-	@echo "** make xsim          : Run Vivado simulation with UNISIM (DSP48E1)"
-	@echo "** make program_board : program the FPGA board"
-	@echo "** make clean         : clean all generated files"
-	@echo "**************************************************"
+	@echo "****************************************************"
+	@echo "** make build           : build the FPGA bitstream"
+	@echo "** make timing_{module} : Run Synthesis & Implementation and report Fmax for module"
+	@echo "** make xsim            : Run Vivado simulation with UNISIM (DSP48E1)"
+	@echo "** make program_board   : program the FPGA board"
+	@echo "** make clean           : clean all generated files"
+	@echo "****************************************************"

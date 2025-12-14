@@ -1,5 +1,5 @@
 # =============================================================================
-# Depthwise Softmax Unit - Out-of-Context Timing Analysis Script
+# Depthwise Conv Unit - Out-of-Context Timing Analysis Script
 # Target: Arty Z7-20 (xc7z020clg400-1) @ 200 MHz
 # =============================================================================
 
@@ -14,28 +14,25 @@ set_msg_config -severity INFO -suppress
 
 file mkdir $build_dir
 
-# Direct OOC synthesis on softmax_unit (no wrapper needed)
-set top_module      "softmax_unit"
+# Direct OOC synthesis on depthwise_conv_unit (no wrapper needed)
+set top_module      "depthwise_conv_unit"
 set fpga_part       "xc7z020clg400-1"
-set constraint_file [file join $constraints_dir "softmax_unit.xdc"]
+set constraint_file [file join $constraints_dir "depthwise_conv_unit.xdc"]
 set clock_name      "clk"
 
 # Report output files
-set synth_dcp       [file join $build_dir "softmax_post_synth.dcp"]
-set impl_dcp        [file join $build_dir "softmax_post_route.dcp"]
-set post_synth_rpt  [file join $build_dir "softmax_post_synth_timing.rpt"]
-set post_route_sum  [file join $build_dir "softmax_post_route_timing_summary.rpt"]
-set post_route_set  [file join $build_dir "softmax_post_route_setup.rpt"]
-set post_route_hold [file join $build_dir "softmax_post_route_hold.rpt"]
-set util_rpt        [file join $build_dir "softmax_post_route_util.rpt"]
-set fmax_report     [file join $build_dir "softmax_post_route_fmax.txt"]
+set synth_dcp       [file join $build_dir "depthwise_conv_post_synth.dcp"]
+set impl_dcp        [file join $build_dir "depthwise_conv_post_route.dcp"]
+set post_synth_rpt  [file join $build_dir "depthwise_conv_post_synth_timing.rpt"]
+set post_route_sum  [file join $build_dir "depthwise_conv_post_route_timing_summary.rpt"]
+set post_route_set  [file join $build_dir "depthwise_conv_post_route_setup.rpt"]
+set post_route_hold [file join $build_dir "depthwise_conv_post_route_hold.rpt"]
+set util_rpt        [file join $build_dir "depthwise_conv_post_route_util.rpt"]
+set fmax_report     [file join $build_dir "depthwise_conv_post_route_fmax.txt"]
 
 # RTL source files (no wrapper needed for OOC)
 set rtl_files [list \
-    [file join $rtl_dir "softmax" "exp_rom.v"] \
-    [file join $rtl_dir "softmax" "msr_unit.v"] \
-    [file join $rtl_dir "softmax" "softmax_fifo.v"] \
-    [file join $rtl_dir "softmax" "softmax_unit.v"] \
+    [file join $rtl_dir "depthwise_conv" "depthwise_conv_unit.v"] \
 ]
 
 foreach rtl_file $rtl_files {
@@ -109,7 +106,7 @@ set fmax_mhz [expr {1000.0 / $effective_period}]
 # Write Fmax report
 set fp [open $fmax_report "w"]
 puts $fp "================================================================"
-puts $fp " Softmax Unit Timing Analysis (Out-of-Context)"
+puts $fp " Depthwise Conv Unit Timing Analysis (Out-of-Context)"
 puts $fp "================================================================"
 puts $fp [format "Clock:               %s" $clock_name]
 puts $fp [format "Target Clock Period: %.3f ns (%.1f MHz)" $clk_period [expr {1000.0 / $clk_period}]]

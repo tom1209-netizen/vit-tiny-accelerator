@@ -27,3 +27,6 @@ build
 
 # Junk Folders
 test_files/
+
+# Github junk
+.github/
