@@ -1032,23 +1032,8 @@ Mapping depthwise to an 8×8 systolic array wastes 87.5% of compute resources. A
 
 **Architecture:**
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    DEPTHWISE CONV UNIT                              │
-│                                                                     │
-│   ┌─────────┐    ┌──────────────┐    ┌─────────┐    ┌──────────┐   │
-│   │ Line    │───►│ 3×3 Window   │───►│ 8-Lane  │───►│ Requant  │───│──► Output
-│   │ Buffers │    │ Extraction   │    │ MAC     │    │ Unit     │   │
-│   │ (2 rows)│    └──────────────┘    └─────────┘    └──────────┘   │
-│   └────▲────┘           ▲                 ▲                        │
-│        │                │                 │                        │
-│   ┌────┴────┐    ┌──────┴──────┐   ┌─────┴─────┐                   │
-│   │ Input   │    │ Padding     │   │ Kernel    │                   │
-│   │ Stream  │    │ Logic       │   │ Bank      │                   │
-│   └─────────┘    └─────────────┘   │ (8 × 9)   │                   │
-│                                     └───────────┘                   │
-└─────────────────────────────────────────────────────────────────────┘
-```
+> [!NOTE]
+> Will add later, drawing
 
 **5-State FSM:**
 
@@ -1075,6 +1060,8 @@ Mapping depthwise to an 8×8 systolic array wastes 87.5% of compute resources. A
 | BRAM | 2-4 | Line buffers (width × channels) |
 | LUT | ~500 | Control + adder trees |
 | FF | ~800 | Pipeline registers |
+
+More details in [Depthwise Conv documentation](./fpga/docs/depthwise_conv_unit.md).
 
 ## 7. Operation Sequencing
 
