@@ -42,7 +42,9 @@
     - [4.2 Numerics \& Data Representation](#42-numerics--data-representation)
     - [4.3 Interface Standards](#43-interface-standards)
   - [5. Accelerator Architecture (PL)](#5-accelerator-architecture-pl)
-    - [5.1 Module Inventory](#51-module-inventory)
+    - [5.1 Design Principles](#51-design-principles)
+    - [5.2 Module Inventory](#52-module-inventory)
+    - [5.3 Central Interconnect Routing](#53-central-interconnect-routing)
   - [6. Functional Block Descriptions](#6-functional-block-descriptions)
     - [6.1 AXI Lite Register](#61-axi-lite-register)
     - [6.2 Scheduler Tiler](#62-scheduler-tiler)
@@ -51,21 +53,19 @@
     - [6.5 GEMM Core](#65-gemm-core)
     - [6.6 Residual](#66-residual)
     - [6.7 Requant Unit](#67-requant-unit)
-  - [7. Attention Block](#7-attention-block)
-    - [7.1 Interfaces](#71-interfaces)
-    - [7.2 Phase map](#72-phase-map)
-    - [7.3 Control FSM](#73-control-fsm)
-  - [8. MLP Block](#8-mlp-block)
-    - [8.1 Interfaces](#81-interfaces)
-    - [8.2 Phase map](#82-phase-map)
-    - [8.3 Control FSM](#83-control-fsm)
-  - [9. Dataflow \& Pipeline](#9-dataflow--pipeline)
-  - [10. Verification Plan](#10-verification-plan)
-    - [10.1 Unit Tests](#101-unit-tests)
-    - [10.2 Integration Tests](#102-integration-tests)
-    - [10.3 System Tests](#103-system-tests)
-  - [11. Risks \& Mitigations](#11-risks--mitigations)
-  - [12. Tools \& Environment](#12-tools--environment)
+    - [6.8 Softmax Unit](#68-softmax-unit)
+    - [6.9 ReLU Unit](#69-relu-unit)
+    - [6.10 Layer Norm Unit](#610-layer-norm-unit)
+  - [7. Operation Sequencing](#7-operation-sequencing)
+    - [7.1 Attention Phase Sequence](#71-attention-phase-sequence)
+    - [7.2 MLP Phase Sequence](#72-mlp-phase-sequence)
+  - [8. Dataflow \& Pipeline](#8-dataflow--pipeline)
+  - [9. Verification Plan](#9-verification-plan)
+    - [9.1 Unit Tests](#91-unit-tests)
+    - [9.2 Integration Tests](#92-integration-tests)
+    - [9.3 System Tests](#93-system-tests)
+  - [10. Risks \& Mitigations](#10-risks--mitigations)
+  - [11. Tools \& Environment](#11-tools--environment)
   - [Appendix A. Requantization Details](#appendix-a-requantization-details)
   - [Appendix B. Signal Dictionary (excerpt)](#appendix-b-signal-dictionary-excerpt)
 
@@ -389,17 +389,48 @@ The PL contains the custom hardware for the ViT computation.
 ## 5. Accelerator Architecture (PL)
 
 ![ViT PL Block Diagram](./figure/block_diagram/vit_pl.png)
-*Figure 2: ViT PL Block Diagram, you can look at more detailed version at [google drive](https://drive.google.com/file/d/162GrEpLs2getctECauzURsrsy7bRrSK8/view?usp=sharing)*
+*Figure 2: ViT PL Block Diagram - Central Interconnect Architecture*
 
-### 5.1 Module Inventory
+The accelerator uses a **Central Interconnect** architecture where a unified **Scheduler/Tiler** FSM directly coordinates all compute modules. This replaces the previous hierarchical Attention Block / MLP Block design, simplifying control flow and improving resource sharing.
 
-- **axi_lite_regs** – CSR bank (config, status, perf counters).  
-- **scheduler_tiler** – master FSM: tiling loops, op sequencing.
-- **axi_dma_shim** – DMA command/stream bridge; sustains >= 80% bus bandwidth.  
-- **gemm_core** – 8×8 INT8 MAC systolic array (INT32 accumulate).  
-- **requant_unit** – INT32->INT8 conversion.
-- **residual** - Adds two INT8 vectors, handling potential differences in quantization scales before saturation.
-- **attention_block**, **mlp_block** – integrators that sequence shared kernels.
+> [!NOTE]
+> There are some signal I still haven't connected in the figure above. But since most of them are from the AXI lite reg to the scheduler, it should be easy to add them later.
+
+### 5.1 Design Principles
+
+1. **Centralized Control:** The Scheduler/Tiler FSM orchestrates all operations (Q/K/V projection, QK^T, Softmax, MLP, etc.) without intermediate block controllers.
+2. **Unified Data Routing:** The Central Interconnect routes AXI-Streams between modules based on the current operation class.
+3. **On-chip Buffering:** The Buffer Bank stores intermediate tiles (activations, Q/K/V matrices) to minimize DDR bandwidth.
+4. **ReLU Activation:** ReLU is used instead of GELU for MLP activation. For INT8 quantized inputs, the behavioral difference is minimal while significantly reducing hardware complexity.
+
+### 5.2 Module Inventory
+
+| Module | Status | Description |
+|--------|--------|-------------|
+| **axi_lite_regs** | Implemented | CSR bank (config, status, perf counters) |
+| **scheduler_tiler** | Planned | Master FSM: tiling loops, operation sequencing |
+| **central_interconnect** | Planned | AXI-Stream routing hub between all modules |
+| **buffer_bank** | Planned | On-chip tile storage (dual-read, single-write BRAM) |
+| **dma_engine** | Implemented | DMA command/stream bridge via AXI DMA IP |
+| **gemm_core** | Implemented | 8×8 INT8 MAC systolic array (INT32 accumulate) |
+| **requant_unit** | Planned | INT32→INT8 conversion with scale/shift/saturate |
+| **softmax_unit** | Implemented | Attention probability computation |
+| **layer_norm** | Implemented | Token normalization with mean/variance |
+| **relu_unit** | Implemented | ReLU activation for MLP (replaces GELU) |
+| **residual_add** | Implemented | Saturating INT8 addition for skip connections |
+
+### 5.3 Central Interconnect Routing
+
+The Central Interconnect routes data based on the `op_class` field in `TILE_CFG`:
+
+| Operation Class | GEMM A Source | GEMM B Source | Result Destination |
+|-----------------|---------------|---------------|-------------------|
+| `000` Q/K/V Projection | Buffer Bank (tokens) | DMA (weights) | Requant → Buffer Bank |
+| `001` QK^T | Buffer Bank (Q) | Buffer Bank (K) | Softmax |
+| `010` Softmax×V | Softmax output | Buffer Bank (V) | Requant → Buffer Bank |
+| `011` MLP FC1 | Buffer Bank (tokens) | DMA (weights) | Requant → ReLU → Buffer Bank |
+| `100` MLP FC2 | Buffer Bank (activated) | DMA (weights) | Requant → Residual Add |
+| `101` Residual | N/A | N/A | Buffer Bank → DDR |
 
 ## 6. Functional Block Descriptions
 
@@ -802,6 +833,8 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 - **Data Output:** Produces an AXI-Stream (axis_0) containing the INT32 accumulator results, which is fed to the requant_in_mux.
 - **Synchronization:** Asserts tile_done to the gemm_done_demux once it has finished processing the current tile, signaling it is ready for new data.
 
+More detailed implementation documentation can be found in [GEMM docs](./fpga/docs/gemm_core.md)
+
 ### 6.6 Residual
 
 **Purpose:** Performs the element-wise addition required for skip connections ($X_{out} = \text{Layer}(X_{in}) + X_{in}$).
@@ -843,115 +876,180 @@ Once triggered, the AXI DMA autonomously manages the entire transfer:
 - **Saturation:** Saturates the result to the valid INT8 range (e.g., -128 to 127).
 - **Data Output:** Emits the final AXI-Stream (axis_out) of requantized INT8 data to the requant_out_demux.
 
-## 7. Attention Block
+### 6.8 Softmax Unit
 
-![Attention Block](./figure/block_diagram/attention_block.png)
+**Purpose:** Computes the softmax probability distribution over attention scores. Implements numerically stable softmax using max-subtraction and a multi-pass architecture for FPGA efficiency.
 
-**Role:** orchestrates Q/K/V projections on shared `gemm_core`, computes QKᵀ -> Softmax -> Attn×V; owns tile buffers for Q/K/V and uses `norm_unit`, `softmax_unit`.
+**Interface:**
 
-### 7.1 Interfaces
+| **Signal Name** | **Signal Width** | **Direction** | **Source/Destination** | **Description** |
+|-----------------|------------------|---------------|------------------------|-----------------|
+| **Control** | | | | |
+| `start` | 1 bit | Input | `scheduler_tiler` | Start pulse to begin softmax computation |
+| `num_tokens[31:0]` | 32 bits | Input | `scheduler_tiler` | Number of tokens in the sequence (must be multiple of 8) |
+| `done` | 1 bit | Output | `scheduler_tiler` | Completion flag, asserted for one cycle |
+| **AXI-Stream Input** | | | | |
+| `s_axis_tdata[63:0]` | 64 bits | Input | `central_interconnect` | INT8 logits (8 lanes packed) |
+| `s_axis_tvalid` | 1 bit | Input | `central_interconnect` | Input data valid |
+| `s_axis_tlast` | 1 bit | Input | `central_interconnect` | Last beat of input sequence |
+| `s_axis_tready` | 1 bit | Output | `central_interconnect` | Ready to accept input |
+| **AXI-Stream Output** | | | | |
+| `m_axis_tdata[63:0]` | 64 bits | Output | `central_interconnect` | UINT8 probabilities (8 lanes, 0-255 scale) |
+| `m_axis_tvalid` | 1 bit | Output | `central_interconnect` | Output data valid |
+| `m_axis_tlast` | 1 bit | Output | `central_interconnect` | Last beat of output sequence |
+| `m_axis_tready` | 1 bit | Input | `central_interconnect` | Downstream ready |
 
-| **Signal Name**                       | **Signal Width** | **Direction** | **Source/Destination**                   | **Description**                                                          |
-| ------------------------------------- | ---------------- | ------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
-| `compute_start_op`                    | 1 bit            | Input         | `scheduler_tiler`                        | Start trigger for Attention block execution.                             |
-| `compute_op_select[3:0]`              | 4 bits           | Input         | `scheduler_tiler`                        | Operation selector defining sub-operation (Q, K, V, Softmax, etc.).      |
-| `axis_data_0[66:0]`                   | 67 bits          | Input         | `dma_demux`                              | Input token feature stream loaded from DDR via DMA.                      |
-| `axis_requant_a[66:0]`                | 67 bits          | Input         | `requant_out_demux`                      | Requantized feature input (e.g., for Softmax or output normalization).   |
-| `done_out_0`                          | 1 bit            | Input         | `gemm_done_demux`                        | Completion signal from GEMM indicating that Attention GEMM tile is done. |
-| `attn_block_op_done`                  | 1 bit            | Output        | `scheduler_tiler`                        | Attention block operation completion flag.                               |
-| `axis_0[66:0]`                        | 67 bits          | Output        | `gemm_a_mux`, `residual_in_b_mux`        | Output data stream (Q×Kᵀ or Attention-weighted values) for next GEMM.    |
-| `axis_1[66:0]`                        | 67 bits          | Output        | `gemm_b_mux`                             | Secondary output stream for V-matrix or attention value propagation.     |
-| `start_in_0`                          | 1 bit            | Output        | `gemm_start_mux`                         | Internal start signal routed to GEMM Start Mux.                          |
+**5-State FSM:**
 
-### 7.2 Phase map
+| **State** | **Description** |
+|-----------|-----------------|
+| `S_IDLE` | Wait for `start` pulse; initialize counters and FIFOs |
+| `S_FIND_MAX` | Pass 1: Stream input through max-finding tree, buffer in FIFO |
+| `S_ACCUMULATE` | Pass 2: Read FIFO, compute exp(x - max), accumulate sum |
+| `S_CALC_RECIP` | Compute 1/sum using MSR (Multiply-Shift-Reciprocal) LUT |
+| `S_NORMALIZE` | Pass 3: Read exp FIFO, multiply by reciprocal, output UINT8 |
 
-| **Phase**      | **DMA mode (`dma_mode`)** | **A-side (`axis_0`)** | **B-side (`axis_1`)** | **Requant-A usage**            |
-| -------------- | ------------------------- | --------------------- | --------------------- | ------------------------------ |
-| **Q-proj**     | 0 = tokens                | `norm_out`            | `axis_wgt` (Wq)       | `cap_en=1, cap=Q`              |
-| **K-proj**     | 0 = tokens                | `norm_out`            | `axis_wgt` (Wk)       | `cap_en=1, cap=K`              |
-| **V-proj**     | 0 = tokens                | `norm_out`            | `axis_wgt` (Wv)       | `cap_en=1, cap=V`              |
-| **QKᵀ**        | (no DMA)                  | `Q_buf`               | `Kᵀ` (from buf)       | `sfm_en=1` -> **Softmax**      |
-| **Attn×V**     | (no DMA)                  | `softmax_out`         | `V` (from buf)        | normal requant -> residual     |
+**Key Functionality:**
 
-> Implementation note: Q/K/V projection phases stream **tokens (A)** against **weights (B)**; intermediate Q & K are captured into tile buffers. QKᵀ result goes through `softmax_unit`; the softmax output tiles multiply **V** to produce the head output (then residual path).  
+- **Numerical Stability:** Subtracts global maximum from all logits before exponentiation to prevent overflow.
+- **LUT-based Exponentiation:** Uses 8 parallel exp ROMs (Q4.16 format) for hardware-efficient exp() approximation.
+- **MSR Reciprocal:** Computes 1/sum using LUT + shift normalization (2-cycle pipeline).
+- **Pipelined Datapath:** 3-stage normalize pipeline (FIFO read, multiply, shift/saturate) for improved Fmax.
+- **Back-pressure:** Full AXI-Stream handshaking with internal FIFOs to handle stalls.
 
-### 7.3 Control FSM
+More detailed implementation documentation can be found in [Softmax docs](./fpga/docs/softmax_unit.md)
 
-1. **Normalize** tokens -> enable Q/K/V projections (three GEMM jobs).  
-2. **Sync** when Q/K buffers ready -> schedule **QKᵀ** matmul; gate to Softmax.  
-3. **Schedule** **Softmax×V** GEMM; write tiles to output/residual mux.  
-4. **Assert** `attn_block_op_done`.
+### 6.9 ReLU Unit
 
-## 8. MLP Block
+**Purpose:** Applies the Rectified Linear Unit activation function to INT8 data. Used in MLP blocks as a hardware-efficient approximation of GELU.
 
-![MLP Block](./figure/block_diagram/mlp_block.png)
+**Design Decision:** ReLU is used instead of GELU because for INT8 quantized inputs, the behavioral difference is minimal (primarily affects small negative values near zero), while ReLU requires zero clock cycles and zero DSP resources.
 
-Two GEMM stages with `gelu_pwl` between them, plus optional residual add. Uses weight buffer and tile buffer; orchestrated by local FSM and `scheduler_tiler`.
+**Interface:**
 
-### 8.1 Interfaces
+| **Signal Name** | **Signal Width** | **Direction** | **Source/Destination** | **Description** |
+|-----------------|------------------|---------------|------------------------|-----------------|
+| `s_axis_tdata[63:0]` | 64 bits | Input | `central_interconnect` | INT8 input (8 lanes packed) |
+| `s_axis_tvalid` | 1 bit | Input | `central_interconnect` | Input data valid |
+| `s_axis_tlast` | 1 bit | Input | `central_interconnect` | Last beat of sequence |
+| `s_axis_tready` | 1 bit | Output | `central_interconnect` | Ready (pass-through from downstream) |
+| `m_axis_tdata[63:0]` | 64 bits | Output | `central_interconnect` | INT8 output (8 lanes) |
+| `m_axis_tvalid` | 1 bit | Output | `central_interconnect` | Output valid (pass-through) |
+| `m_axis_tlast` | 1 bit | Output | `central_interconnect` | Last beat (pass-through) |
+| `m_axis_tready` | 1 bit | Input | `central_interconnect` | Downstream ready |
 
-| **Signal Name**          | **Signal Width** | **Direction** | **Source/Destination**                   | **Description**                                                                  |
-| ------------------------ | ---------------- | ------------- | ---------------------------------------- | -------------------------------------------------------------------------------- |
-| `compute_start_op`       | 1 bit            | Input         | `scheduler_tiler`                        | Start trigger for MLP computation sequence (activates linear layers and GELU).   |
-| `compute_op_select[3:0]` | 4 bits           | Input         | `scheduler_tiler`                        | Operation selector defining which sublayer is active: Linear1, GELU, or Linear2. |
-| `axis_data_1[66:0]`      | 67 bits          | Input         | `dma_demux`                              | Input feature stream for MLP (from previous layer normalization or attention).   |
-| `axis_requant_b[66:0]`   | 67 bits          | Input         | `requant_out_demux`                      | Requantized feature input stream for MLP layer.                                  |
-| `done_out_1`             | 1 bit            | Input         | `gemm_done_demux`                        | Completion signal from GEMM indicating that MLP GEMM tile is done.               |
-| `mlp_block_op_done`      | 1 bit            | Output        | `scheduler_tiler`                        | MLP block operation completion flag (end of feedforward computation).            |
-| `axis_0[66:0]`           | 67 bits          | Output        | `gemm_a_mux`                             | Primary output stream (e.g., Linear1 or GELU output) routed to GEMM A input.     |
-| `axis_1[66:0]`           | 67 bits          | Output        | `gemm_b_mux`, `residual_in_b_mux`        | Secondary output stream (e.g., Linear2 output) routed to GEMM or Residual path.  |
-| `start_in_0`             | 1 bit            | Output        | `gemm_start_mux`                         | Internal start signal routed to GEMM Start Mux (initiates GEMM operation).       |
+**Mathematical Operation:**
 
-### 8.2 Phase map
+For each INT8 element in the 8-lane beat:
+$$y_i = \max(0, x_i) = \begin{cases} x_i & \text{if } x_i \geq 0 \\ 0 & \text{if } x_i < 0 \end{cases}$$
 
-| **Phase**         | **DMA mode (`dma_mode`)** | **A-side (`axis_0`)**        | **B-side (`axis_1`)**         | **Requant-A usage**              |
-| ----------------- | ------------------------- | ---------------------------- | ----------------------------- | -------------------------------- |
-| **GEMM1**         | 0 = tokens                | `axis_wgt` (W1)              | `axis_1` (input data)         | `cap_en=1, cap=GEMM1`            |
-| **GELU**          | (no DMA)                  | `gemm1_out`                  | (N/A)                         | `sfm_en=0`                       |
-| **GEMM2**         | 0 = tokens                | `axis_wgt` (W2)              | `gemm1_out`                   | `cap_en=1, cap=GEMM2`            |
-| **Residual**      | (no DMA)                  | `gemm2_out`                  | (Residual data)               | normal requant -> residual       |
+**Implementation Details:**
 
-> **Implementation note:** The MLP block operates with two **GEMM** phases where the first GEMM computes the transformation of input data (`axis_1`) with the first weight matrix (`axis_wgt` for W1). The result goes through **GELU** activation. The second GEMM phase computes the transformation with the second weight matrix (`axis_wgt` for W2) and adds the optional residual. The result from **GEMM2** can optionally be passed to the residual add phase.
+- **Zero Latency:** Pure combinational logic with no pipeline registers.
+- **Sign Bit Check:** Each lane checks MSB (bit 7) of the signed INT8 value. If MSB=1 (negative), output is forced to zero.
+- **Pass-through Handshaking:** `tvalid`, `tlast`, and `tready` signals pass through unchanged.
+- **Resource Usage:** 8 multiplexers only; no DSP, no BRAM, no registers.
 
-### 8.3 Control FSM
+### 6.10 Layer Norm Unit
 
-1. **Normalize** input tokens -> enable **GEMM1** computation.
-2. **Schedule** **GEMM1** -> output result to **GELU** activation.
-3. **Schedule** **GEMM2** with **GELU** output -> write the result to output or residual mux.
-4. **Assert** `mlp_block_op_done`.
+**Purpose:** Performs Layer Normalization on token sequences. Computes mean and variance across the embedding dimension, then normalizes and applies learned affine parameters (gamma, beta).
 
-## 9. Dataflow & Pipeline
+**Mathematical Operation:**
 
-1. **DDR -> DMA (MM2S)** streams tokens/weights to tile buffers.  
-2. **Scheduler** kicks **Attention** phases per §6.2, then **MLP**.  
-3. **GEMM** outputs (INT32) -> **requant_unit** -> INT8.  
-4. **Residual add** and write-back via **DMA (S2MM)** to DDR.  
-5. **PS** reads logits, computes argmax.
+For input vector $x$ with $N$ elements:
+$$\mu = \frac{1}{N} \sum_{i=1}^{N} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=1}^{N} x_i^2 - \mu^2$$
+$$y_i = \gamma \cdot \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$$
 
-## 10. Verification Plan
+**Interface:**
 
-### 10.1 Unit Tests
+| **Signal Name** | **Signal Width** | **Direction** | **Source/Destination** | **Description** |
+|-----------------|------------------|---------------|------------------------|-----------------|
+| `s_axis_tdata[63:0]` | 64 bits | Input | `central_interconnect` | INT8 input tokens (8 lanes) |
+| `s_axis_tvalid` | 1 bit | Input | `central_interconnect` | Input valid |
+| `s_axis_tlast` | 1 bit | Input | `central_interconnect` | Last beat of token sequence |
+| `s_axis_tready` | 1 bit | Output | `central_interconnect` | Ready (stalls if internal FIFOs full) |
+| `cfg_gamma[31:0]` | 32 bits | Input | `scheduler_tiler` | Affine scale parameter (Q16.16) |
+| `cfg_beta[31:0]` | 32 bits | Input | `scheduler_tiler` | Affine offset parameter (Q16.16) |
+| `m_axis_tdata[63:0]` | 64 bits | Output | `central_interconnect` | INT8 normalized output (8 lanes) |
+| `m_axis_tvalid` | 1 bit | Output | `central_interconnect` | Output valid |
+| `m_axis_tlast` | 1 bit | Output | `central_interconnect` | Last beat of output |
+| `m_axis_tready` | 1 bit | Input | `central_interconnect` | Downstream ready |
+
+**Architecture:**
+
+The Layer Norm unit uses a **dual-FIFO streaming architecture** to compute statistics and apply normalization in a single pass through the data
+
+**Pipeline Stages:**
+
+| **Stage** | **Module** | **Function** |
+|-----------|------------|--------------|
+| 1 | Input Splitter | Writes input to both Stats FIFO and Data FIFO simultaneously |
+| 2 | Accumulator | 5-stage pipelined adder tree: computes sum and sum-of-squares per sequence |
+| 3 | Stats Buffer | FIFO to decouple accumulator from downstream |
+| 4 | Avg/Var Calc | Computes mean and variance from accumulated sums |
+| 5 | Recip Sqrt | LUT-based 1/sqrt(var) using Peano approximation (12-bit mantissa) |
+| 6 | Final Norm Calc | Applies (x - mean) * inv_sqrt * gamma + beta, requantizes to INT8 |
+| 7 | Output FIFO | Buffers output for back-pressure handling |
+
+**Implementation Details:**
+
+- **FIFO Depth:** 512 beats (supports sequences up to 4096 tokens at 8 tokens/beat).
+- **Fixed-Point Precision:** Internal computations use Q16.16 format (32-bit).
+- **Pipelined Accumulator:** 5-stage pipeline with DSP48 multipliers for sum-of-squares.
+- **Synchronization:** Mean is delayed by 2 cycles to align with Recip Sqrt output.
+- **Built-in Requantization:** Final stage clamps output to INT8 range [-128, 127].
+
+## 7. Operation Sequencing
+
+### 7.1 Attention Phase Sequence
+
+1. **Layer Norm** → normalize input tokens
+2. **Q/K/V Projection** → three GEMM operations with projection weights
+3. **QK^T** → GEMM between Q and K tiles
+4. **Softmax** → compute attention probabilities
+5. **Softmax×V** → GEMM to apply attention to V
+6. **Residual Add** → add skip connection
+
+### 7.2 MLP Phase Sequence
+
+1. **Layer Norm** → normalize post-attention tokens
+2. **MLP FC1** → GEMM with expansion weights (C → 4C)
+3. **ReLU** → activation function
+4. **MLP FC2** → GEMM with contraction weights (4C → C)
+5. **Residual Add** → add skip connection
+
+## 8. Dataflow & Pipeline
+
+1. **DDR → DMA (MM2S)** streams tokens/weights to Buffer Bank.  
+2. **Scheduler/Tiler** sequences operations: Attention phases → MLP phases per §7.  
+3. **GEMM** outputs (INT32) → **requant_unit** → INT8.  
+4. **ReLU** applied after MLP FC1; **Residual add** after blocks.  
+5. **DMA (S2MM)** writes results to DDR; **PS** reads logits, computes argmax.
+
+## 9. Verification Plan
+
+### 9.1 Unit Tests
 
 - **gemm_core:** vector tests vs NumPy golden; stall + back-pressure.  
 - **requant_unit:** exhaustive sweep for rounding/saturation edges.  
 - **softmax_unit:** L1 error <=1.5% vs FP target; sum≈1.0 (quantized).  
-- **elementwise_ops:** GELU <=2 LSB; Norm cosine sim >=0.995.
+- **relu_unit:** verify max(0, x) for INT8 range; Norm cosine sim >=0.995.
 
-### 10.2 Integration Tests
+### 9.2 Integration Tests
 
-- **attention_block / mlp_block:** end-to-end match vs PyTorch INT8 tensors within MSE tolerance.
+- End-to-end Attention/MLP phases vs PyTorch INT8 tensors within MSE tolerance.
 
-### 10.3 System Tests
+### 9.3 System Tests
 
 - DMA loopback; GEMM microbenchmark; PS<->PL regression.
 
-## 11. Risks & Mitigations
+## 10. Risks & Mitigations
 
 - **DDR bandwidth bottleneck:** double-buffering, larger bursts, on-chip reuse.  
 - **Timing closure @ 180–200 MHz:** extra pipelining, floorplanning, temp smaller PE array.  
 - **Quantization accuracy:** per-channel scales, larger LUTs, post-quant calibration.
 
-## 12. Tools & Environment
+## 11. Tools & Environment
 
 Vivado/Vitis 2024.x, Verilator/xsim, Python 3.10 reference model; Arty Z7-20 board; XDC constraints.
 
