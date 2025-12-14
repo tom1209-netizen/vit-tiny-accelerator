@@ -56,6 +56,7 @@
     - [6.8 Softmax Unit](#68-softmax-unit)
     - [6.9 ReLU Unit](#69-relu-unit)
     - [6.10 Layer Norm Unit](#610-layer-norm-unit)
+    - [6.11 Depthwise Conv Unit](#611-depthwise-conv-unit)
   - [7. Operation Sequencing](#7-operation-sequencing)
     - [7.1 Attention Phase Sequence](#71-attention-phase-sequence)
     - [7.2 MLP Phase Sequence](#72-mlp-phase-sequence)
@@ -418,6 +419,7 @@ The accelerator uses a **Central Interconnect** architecture where a unified **S
 | **layer_norm** | Implemented | Token normalization with mean/variance |
 | **relu_unit** | Implemented | ReLU activation for MLP (replaces GELU) |
 | **residual_add** | Implemented | Saturating INT8 addition for skip connections |
+| **depthwise_conv_unit** | Implemented | 3x3 depthwise convolution for MBConv/LocalConv |
 
 ### 5.3 Central Interconnect Routing
 
@@ -998,6 +1000,81 @@ The Layer Norm unit uses a **dual-FIFO streaming architecture** to compute stati
 - **Pipelined Accumulator:** 5-stage pipeline with DSP48 multipliers for sum-of-squares.
 - **Synchronization:** Mean is delayed by 2 cycles to align with Recip Sqrt output.
 - **Built-in Requantization:** Final stage clamps output to INT8 range [-128, 127].
+
+### 6.11 Depthwise Conv Unit
+
+**Purpose:** Applies depthwise 3x3 convolution where each input channel is convolved independently with its own 3×3 kernel. Used in MBConv blocks (Stage 1) and LocalConv (after attention).
+
+**Why Not Use GEMM Core?**
+
+Standard GEMM operates on dense matrices where every output depends on all inputs. Depthwise convolution is inherently sparse - each output channel depends on only ONE input channel:
+
+| Operation | Weight Matrix | GEMM Utilization |
+|-----------|---------------|------------------|
+| Standard Conv (3×3, Cin→Cout) | Dense (Cout × 9×Cin) | 100% |
+| FC / Linear | Dense (Dout × Din) | 100% |
+| Depthwise Conv (3×3) | Diagonal (C × 9) | 12.5% (1/8 PEs active) |
+
+Mapping depthwise to an 8×8 systolic array wastes 87.5% of compute resources. A dedicated unit with 8 parallel MAC units is much more efficient.
+
+**Interface:**
+
+| **Signal Name** | **Signal Width** | **Direction** | **Description** |
+|-----------------|------------------|---------------|-----------------|
+| `start` | 1 bit | Input | Start convolution |
+| `done` | 1 bit | Output | Convolution complete |
+| `cfg_height[15:0]` | 16 bits | Input | Image height (rows) |
+| `cfg_width[15:0]` | 16 bits | Input | Image width (columns) |
+| `cfg_channels[15:0]` | 16 bits | Input | Number of channels (multiple of 8) |
+| `axis_kernel_in_*` | AXI-Stream (64-bit) | Input | 3×3×C kernel weights (8 × INT8) |
+| `axis_data_in_*` | AXI-Stream (64-bit) | Input | Input feature map (8 × INT8) |
+| `axis_data_out_*` | AXI-Stream (256-bit) | Output | Output accumulators (8 × INT32) → requant_unit |
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DEPTHWISE CONV UNIT                              │
+│                                                                     │
+│   ┌─────────┐    ┌──────────────┐    ┌─────────┐    ┌──────────┐   │
+│   │ Line    │───►│ 3×3 Window   │───►│ 8-Lane  │───►│ Requant  │───│──► Output
+│   │ Buffers │    │ Extraction   │    │ MAC     │    │ Unit     │   │
+│   │ (2 rows)│    └──────────────┘    └─────────┘    └──────────┘   │
+│   └────▲────┘           ▲                 ▲                        │
+│        │                │                 │                        │
+│   ┌────┴────┐    ┌──────┴──────┐   ┌─────┴─────┐                   │
+│   │ Input   │    │ Padding     │   │ Kernel    │                   │
+│   │ Stream  │    │ Logic       │   │ Bank      │                   │
+│   └─────────┘    └─────────────┘   │ (8 × 9)   │                   │
+│                                     └───────────┘                   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**5-State FSM:**
+
+| **State** | **Description** |
+|-----------|-----------------|
+| `S_IDLE` | Wait for `start`; latch configuration |
+| `S_LOAD_KERNEL` | Stream in 3×3 kernel weights for all channels |
+| `S_FILL_LINES` | Fill line buffers with first 2 rows |
+| `S_PROCESS` | Sliding window convolution with output streaming |
+| `S_DONE` | Assert `done` signal |
+
+**Key Functionality:**
+
+- **Line Buffers:** Two circular BRAM rows store previous rows for 3×3 window access.
+- **8-Lane Parallel MAC:** Each lane computes one channel independently (9 multiplies + adder tree).
+- **Zero Padding:** Handles image borders with zero values.
+- **INT32 Output:** Outputs raw 256-bit (8 × INT32) accumulators to external `requant_unit` via Central Interconnect.
+
+**Resource Estimate:**
+
+| Resource | Count | Notes |
+|----------|-------|-------|
+| DSP48 | 8-16 | 8 MAC units |
+| BRAM | 2-4 | Line buffers (width × channels) |
+| LUT | ~500 | Control + adder trees |
+| FF | ~800 | Pipeline registers |
 
 ## 7. Operation Sequencing
 

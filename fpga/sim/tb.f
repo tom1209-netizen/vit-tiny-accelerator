@@ -11,3 +11,5 @@
 // Softmax module
 ../tb/softmax/tb_softmax_unit.v
 
+// Depthwise convolution module
+../tb/depthwise_conv/tb_depthwise_conv_unit.v

@@ -1,6 +1,6 @@
 #Define variables
-TESTNAME 	?= tb_softmax_unit
-TB_NAME 	?= tb_softmax_unit
+TESTNAME 	?= tb_depthwise_conv_unit
+TB_NAME 	?= tb_depthwise_conv_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
 

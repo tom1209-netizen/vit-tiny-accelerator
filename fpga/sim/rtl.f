@@ -13,3 +13,6 @@
 ../rtl/softmax/msr_unit.v
 ../rtl/softmax/softmax_fifo.v
 ../rtl/softmax/softmax_unit.v
+
+// Depthwise convolution module
+../rtl/depthwise_conv/depthwise_conv_unit.v
