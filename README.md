@@ -943,7 +943,10 @@ More detailed implementation documentation can be found in [Softmax docs](./fpga
 **Mathematical Operation:**
 
 For each INT8 element in the 8-lane beat:
-$$y_i = \max(0, x_i) = \begin{cases} x_i & \text{if } x_i \geq 0 \\ 0 & \text{if } x_i < 0 \end{cases}$$
+
+$$
+y_i = \max(0, x_i) = \begin{cases} x_i & \text{if } x_i \geq 0 \\ 0 & \text{if } x_i < 0 \end{cases}
+$$
 
 **Implementation Details:**
 
@@ -959,7 +962,9 @@ $$y_i = \max(0, x_i) = \begin{cases} x_i & \text{if } x_i \geq 0 \\ 0 & \text{if
 **Mathematical Operation:**
 
 For input vector $x$ with $N$ elements:
+
 $$\mu = \frac{1}{N} \sum_{i=1}^{N} x_i, \quad \sigma^2 = \frac{1}{N} \sum_{i=1}^{N} x_i^2 - \mu^2$$
+
 $$y_i = \gamma \cdot \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$$
 
 **Interface:**
