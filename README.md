@@ -944,9 +944,12 @@ More detailed implementation documentation can be found in [Softmax docs](./fpga
 
 For each INT8 element in the 8-lane beat:
 
-$$
-y_i = \max(0, x_i) = \begin{cases} x_i & \text{if } x_i \geq 0 \\ 0 & \text{if } x_i < 0 \end{cases}
-$$
+```math
+y_i = \max(0, x_i) = \begin{cases} 
+   x_i & \text{if } x_i \geq 0 \\ 
+   0 & \text{if } x_i < 0 
+\end{cases}
+```
 
 **Implementation Details:**
 

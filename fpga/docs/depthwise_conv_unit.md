@@ -159,12 +159,6 @@ The depthwise conv unit implements a **4-state FSM**:
 ### State Transitions
 
 ```mermaid
----
-config:
-  layout: dagre
-  theme: neutral
-  look: neo
----
 stateDiagram
   direction TB
   [*] --> S_IDLE
