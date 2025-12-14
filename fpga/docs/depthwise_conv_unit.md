@@ -34,9 +34,9 @@ The depthwise convolution unit applies a separate 3×3 filter to each input chan
 
 for each channel $c$:
 
-$$
+```math
 \text{output}[row, col, c] = \sum_{i=-1}^{1} \sum_{j=-1}^{1} \left( \text{input}[row+i, col+j, c] \times \text{kernel}[c, i, j] \right)
-$$
+```
 
 ### Key Features
 
@@ -120,7 +120,7 @@ Total kernel beats = (num_channels / 8) × 9
 
 Data is streamed **row-by-row**, with channels grouped into beats:
 
-```
+```text
 For image H×W×C:
 
 Row 0:
@@ -138,7 +138,7 @@ Total input beats = H × W × (C / 8)
 
 Same layout as input, but each element is INT32:
 
-```
+```text
 axis_data_out_tdata[31:0]   = output[row, col, chan+0]  (INT32)
 axis_data_out_tdata[63:32]  = output[row, col, chan+1]  (INT32)
 ...
@@ -202,7 +202,8 @@ For each output pixel at (out_row, out_col), extract a 3×3 window:
 Two-stage pipelined computation:
 
 **Stage 1: Multiplication**
-```
+
+```text
 prod[0] = win_row0[0] * kernel[0]  // top-left
 prod[1] = win_row0[1] * kernel[1]  // top-center
 prod[2] = win_row0[2] * kernel[2]  // top-right
@@ -216,9 +217,9 @@ prod[8] = win_row2[2] * kernel[8]  // bot-right
 
 **Stage 2: Adder Tree**
 
-$$
+```math
 \text{mac\_result} = \sum_{i=0}^{8} \text{prod}[i]
-$$
+```
 
 ## Pipeline Latency
 
@@ -231,6 +232,7 @@ $$
 | **Total per pixel** | 2-3 | Window → Output |
 
 **Example:** For 28×28×128 input:
+
 - Kernel loading: 16 × 9 = 144 cycles
 - Processing: 28 × 28 × 16 = 12,544 cycles
 - Total: ~12,700 cycles
@@ -305,6 +307,7 @@ graph LR
 ```
 
 The scheduler:
+
 1. Loads kernel weights via `axis_kernel_in`
 2. Configures dimensions
 3. Asserts `start`
