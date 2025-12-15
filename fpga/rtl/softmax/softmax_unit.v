@@ -322,13 +322,23 @@ module softmax_unit #(
 
     wire handshake_out = out_valid_r && m_axis_tready;
     wire out_ready_for_new = (!out_valid_r) || handshake_out;
-    // can_pop_fifo: Pop FIFO when S_NORMALIZE, FIFO not empty, and exp_pop_r stage is empty (can receive)
-    wire can_pop_fifo = (state == S_NORMALIZE) && !fifo_empty && !exp_pop_valid;
+
+    // Pipeline flow control
+    wire stage1_ready = !prod_valid || out_ready_for_new;
+    wire stage0_ready = !exp_pop_valid || stage1_ready;
+
+    // can_pop_fifo: Pop FIFO when S_NORMALIZE, FIFO not empty, and exp_pop_r stage is ready
+    wire can_pop_fifo = (state == S_NORMALIZE) && !fifo_empty && stage0_ready;
 
     // Pre-computed and registered last signal (A1/A4: pipeline the compare)
     // last_for_output_r is set when tokens_remaining will become <= LANES after current output
     reg last_for_output_r;
-    wire is_last_beat = (tokens_remaining <= LANES);  // Simple compare, no adder chain
+
+    // Fix for 1-cycle throughput: Account for the token batch successfully leaving
+    // in the current cycle (handshake_out) when determining if the *incoming*
+    // batch (entering out_data_r) is the last one.
+    wire is_last_beat = handshake_out ? (tokens_remaining <= (LANES + LANES)) 
+                                      : (tokens_remaining <= LANES);
 
     assign m_axis_tdata = out_data_r;
     assign m_axis_tvalid = out_valid_r;
@@ -532,36 +542,36 @@ module softmax_unit #(
                 end
 
                 S_NORMALIZE: begin
-                    // Stage 0: FIFO → exp_pop_r (register to break critical path)
+                    // Stage 0: FIFO -> exp_pop_r (register to break critical path)
                     // Pop FIFO when exp_pop_r is empty or being consumed by Stage 1
                     if (can_pop_fifo) begin
                         for (k = 0; k < LANES; k = k + 1) exp_pop_r[k] <= exp_pop[k];
                         exp_pop_valid <= 1'b1;
-                    end else if (exp_pop_valid && !prod_valid) begin
+                    end else if (exp_pop_valid && stage1_ready) begin
                         // exp_pop_r consumed by Stage 1, clear valid
                         exp_pop_valid <= 1'b0;
                     end
 
-                    // Stage 1: exp_pop_r × msr_mult_r → prod_reg
-                    // Move data when prod_reg is empty (can receive)
-                    if (exp_pop_valid && !prod_valid) begin
-                        for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= exp_pop_r[k] * msr_mult_r;
-                        prod_valid <= 1'b1;
-                    end
-
-                    // Stage 2: prod_reg → shift/saturate → out_data_r
+                    // Stage 2: prod_reg -> shift/saturate -> out_data_r
                     // Move data when output is ready (empty or being consumed)
                     if (prod_valid && out_ready_for_new) begin
                         out_data_r <= shift_data;
                         out_valid_r <= 1'b1;
                         out_last_r <= is_last_beat;  // Use simple compare
-                        prod_valid <= 1'b0;  // Clear after consumption
+                        prod_valid <= 1'b0;  // Clear after consumption (can be overridden by Stage 1)
                         // Pre-compute next last signal (A4: pipeline compare)
                         last_for_output_r <= (tokens_remaining <= (LANES + LANES));
                     end else if (handshake_out) begin
                         // Output consumed but no new data
                         out_valid_r <= 1'b0;
                         out_last_r  <= 1'b0;
+                    end
+
+                    // Stage 1: exp_pop_r * msr_mult_r -> prod_reg
+                    // Move data when prod_reg is empty (can receive)
+                    if (exp_pop_valid && stage1_ready) begin
+                        for (k = 0; k < LANES; k = k + 1) prod_reg[k] <= exp_pop_r[k] * msr_mult_r;
+                        prod_valid <= 1'b1;
                     end
 
                     // Decrement tokens_remaining on handshake (A2: down-counter)

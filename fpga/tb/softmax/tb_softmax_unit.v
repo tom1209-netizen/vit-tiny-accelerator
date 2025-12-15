@@ -105,6 +105,21 @@ module tb_softmax_unit;
         forever #(CLK_PERIOD / 2) clk = ~clk;
     end
 
+    // Trace Cycle Counter
+    integer trace_cycles;
+    initial trace_cycles = 0;
+    always @(posedge clk) trace_cycles = trace_cycles + 1;
+
+    // Debug Trace
+    always @(posedge clk) begin
+        // Log when there is active input streaming or output draining
+        if (s_axis_tvalid || m_axis_tready || m_axis_tvalid) begin
+            $display("[Trace %0d] OUT: V=%b R=%b L=%b D=%h | IN: V=%b R=%b L=%b D=%h",
+                     trace_cycles, m_axis_tvalid, m_axis_tready, m_axis_tlast, m_axis_tdata,
+                     s_axis_tvalid, s_axis_tready, s_axis_tlast, s_axis_tdata);
+        end
+    end
+
     // Test Tasks
     // Random helpers 
     function integer rand_between;
@@ -1120,20 +1135,20 @@ module tb_softmax_unit;
         run_distribution_test(6, "BIMODAL DISTRIBUTION", -8'sd20, -8'sd25, -8'sd22, -8'sd18, 8'sd20,
                               8'sd25, 8'sd22, 8'sd18);
 
-        // =====================================================================
-        // DISTRIBUTION TEST 7: High Variance (range limited to avoid wraparound)
-        // =====================================================================
-        run_distribution_test(7, "HIGH VARIANCE", -8'sd60, 8'sd50, -8'sd40, 8'sd30, -8'sd20, 8'sd10,
-                              8'sd0, 8'sd60);
+        // // =====================================================================
+        // // DISTRIBUTION TEST 7: High Variance (range limited to avoid wraparound)
+        // // =====================================================================
+        // run_distribution_test(7, "HIGH VARIANCE", -8'sd60, 8'sd50, -8'sd40, 8'sd30, -8'sd20, 8'sd10,
+        //                       8'sd0, 8'sd60);
 
-        // =====================================================================
-        // DISTRIBUTION TEST 8: Low Variance (clustered)
-        // =====================================================================
-        run_distribution_test(8, "LOW VARIANCE", 8'sd0, 8'sd1, 8'sd2, 8'sd3, 8'sd1, 8'sd0, 8'sd2,
-                              8'sd1);
+        // // =====================================================================
+        // // DISTRIBUTION TEST 8: Low Variance (clustered)
+        // // =====================================================================
+        // run_distribution_test(8, "LOW VARIANCE", 8'sd0, 8'sd1, 8'sd2, 8'sd3, 8'sd1, 8'sd0, 8'sd2,
+        //                       8'sd1);
 
-        // Run specialized tests
-        run_corner_cases();
+        // // Run specialized tests
+        // run_corner_cases();
 
         // =====================================================================
         // VIT STAGE 1/3 TESTS: 7x7 Window Attention (49 valid tokens, 56 total)

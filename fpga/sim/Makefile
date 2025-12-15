@@ -1,6 +1,6 @@
 #Define variables
-TESTNAME 	?= tb_gemm_core_top
-TB_NAME 	?= tb_gemm_core_top
+TESTNAME 	?= tb_softmax_unit
+TB_NAME 	?= tb_softmax_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
 
