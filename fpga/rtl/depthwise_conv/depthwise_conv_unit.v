@@ -157,24 +157,33 @@ module depthwise_conv_unit #(
     // =========================================================================
     // Window Extraction Registers (filled over 3 fetch cycles)
     // =========================================================================
-    reg [INPUT_WIDTH-1:0] win_word_row0[0:2];
-    reg [INPUT_WIDTH-1:0] win_word_row1[0:2];
-    reg [INPUT_WIDTH-1:0] win_word_row2[0:2];
+    reg [INPUT_WIDTH-1:0] win_word_row0                                              [0:2];
+    reg [INPUT_WIDTH-1:0] win_word_row1                                              [0:2];
+    reg [INPUT_WIDTH-1:0] win_word_row2                                              [0:2];
 
     // Latched metadata for current window being fetched
-    reg [15:0] fetch_chan_beat;
-    reg fetch_is_last;
+    reg [           15:0] fetch_chan_beat;
+    reg                   fetch_is_last;
     reg is_top_row_r, is_bottom_row_r, is_left_col_r, is_right_col_r;
     reg [1:0] row_above_idx_r, row_center_idx_r, row_below_idx_r;
     reg [15:0] beat_left_r, beat_center_r, beat_right_r;
 
     // =========================================================================
-    // MAC Pipeline
+    // MAC Pipeline - Time-Shared DSP Design
     // =========================================================================
-    reg signed [2*DATA_WIDTH-1:0] prod[0:KERNEL_SIZE-1][0:LANES-1];
-    reg prod_valid;
-    reg prod_last;
+    // Uses 8 DSPs (one per lane) instead of 72, cycling through 9 kernel positions
+    // This reduces DSP usage by 9x with ~1.8x throughput reduction
 
+    // Window and kernel data storage (captured from fetch)
+    reg signed [DATA_WIDTH-1:0] win_data[0:KERNEL_SIZE-1][0:LANES-1];  // 9 positions × 8 lanes
+    reg signed [DATA_WIDTH-1:0] ker_data[0:KERNEL_SIZE-1][0:LANES-1];  // 9 positions × 8 lanes
+    reg mac_data_valid;  // Window/kernel data is ready
+    reg mac_data_last;  // Last beat flag
+
+    // MAC running flag (used for flow control)
+    reg mac_running;
+
+    // Final result
     reg signed [ACC_WIDTH-1:0] mac_result[0:LANES-1];
     reg mac_valid;
     reg mac_last;
@@ -200,11 +209,14 @@ module depthwise_conv_unit #(
     // Accept input during PROCESS and FETCH states (overlap input with window extraction)
     // Flow control: With 3 line buffers, processing row R needs rows R-1, R, R+1.
     // Row R+2 would overwrite R-1, so input must stay at most 1 row ahead.
+    // NOTE: This comparison MUST be combinational (not registered) to prevent
+    // line buffer overwrites. The 16-bit comparison is acceptable here since
+    // it only affects input_tready, not the main processing path.
     wire in_fetch_states = (state == S_FETCH_LEFT) || (state == S_FETCH_CTR) || (state == S_FETCH_RIGHT);
-    wire input_not_too_far = (in_row <= out_row + 1);
+    wire input_within_safe_row = (in_row <= out_row + 1);  // Prevent line buffer overwrite
     assign axis_data_in_tready = ((state == S_PROCESS) || in_fetch_states) && 
                                   (!out_valid_reg || output_handshake) &&
-                                  input_not_too_far;
+                                  input_within_safe_row;
 
     assign axis_data_out_tdata = out_data_reg;
     assign axis_data_out_tvalid = out_valid_reg;
@@ -511,6 +523,28 @@ module depthwise_conv_unit #(
     end
 
     // =========================================================================
+    // Pre-computed Row Comparison Flags
+    // These flags avoid 16-bit carry chains in the critical path by registering
+    // the comparison results. They are 1 cycle old but we account for this
+    // with the pipeline_countdown mechanism.
+    // =========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            in_row_gt_out_row_plus1 <= 1'b0;
+            in_row_eq_out_row_plus1 <= 1'b0;
+            in_row_gt_out_row       <= 1'b0;
+            in_row_eq_out_row       <= 1'b1;  // Both start at 0
+        end else begin
+            // Simply register the comparison results from current values
+            // These will be 1 cycle old, but pipeline_countdown handles this
+            in_row_gt_out_row_plus1 <= (in_row > out_row + 1);
+            in_row_eq_out_row_plus1 <= (in_row == out_row + 1);
+            in_row_gt_out_row       <= (in_row > out_row);
+            in_row_eq_out_row       <= (in_row == out_row);
+        end
+    end
+
+    // =========================================================================
     // Output Position & Processing Enable
     // =========================================================================
     always @(posedge clk or negedge rst_n) begin
@@ -762,111 +796,243 @@ module depthwise_conv_unit #(
 
     wire mac_trigger = mac_trigger_d;
 
-    // MAC Stage 1: Multiply
-    integer mi;
+    // =========================================================================
+    // Time-Shared MAC: Stage 1 - Capture Window and Kernel Data
+    // =========================================================================
+    // When mac_trigger fires, capture all 9 window positions and kernel coefficients
+    integer ci;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            prod_valid <= 1'b0;
-            prod_last  <= 1'b0;
-            for (mi = 0; mi < LANES; mi = mi + 1) begin
-                prod[0][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[1][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[2][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[3][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[4][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[5][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[6][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[7][mi] <= {(2 * DATA_WIDTH) {1'b0}};
-                prod[8][mi] <= {(2 * DATA_WIDTH) {1'b0}};
+            mac_data_valid <= 1'b0;
+            mac_data_last  <= 1'b0;
+            for (ci = 0; ci < LANES; ci = ci + 1) begin
+                win_data[0][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[0][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[1][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[1][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[2][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[2][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[3][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[3][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[4][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[4][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[5][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[5][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[6][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[6][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[7][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[7][ci] <= {DATA_WIDTH{1'b0}};
+                win_data[8][ci] <= {DATA_WIDTH{1'b0}};
+                ker_data[8][ci] <= {DATA_WIDTH{1'b0}};
             end
-        end else if (mac_trigger) begin
-            prod_valid <= 1'b1;
-            prod_last  <= fetch_is_last;
+        end else if (mac_trigger && !mac_running) begin
+            // Only capture new data when not already running a MAC operation
+            mac_data_valid <= 1'b1;
+            mac_data_last  <= fetch_is_last;
 
-            for (mi = 0; mi < LANES; mi = mi + 1) begin
+            for (ci = 0; ci < LANES; ci = ci + 1) begin
                 // Kernel mapping: [row][col] -> index
                 // [0][0]=0, [0][1]=1, [0][2]=2
                 // [1][0]=3, [1][1]=4, [1][2]=5
                 // [2][0]=6, [2][1]=7, [2][2]=8
 
                 // Row 0: above
-                prod[0][mi] <= $signed(
-                    win_word_row0[0][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(0*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[0][ci] <= $signed(win_word_row0[0][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[0][ci] <= $signed(
+                    kernel_data_q[(0*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
-                prod[1][mi] <= $signed(
-                    win_word_row0[1][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(1*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[1][ci] <= $signed(win_word_row0[1][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[1][ci] <= $signed(
+                    kernel_data_q[(1*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
-                prod[2][mi] <= $signed(
-                    win_word_row0[2][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(2*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[2][ci] <= $signed(win_word_row0[2][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[2][ci] <= $signed(
+                    kernel_data_q[(2*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
 
                 // Row 1: center
-                prod[3][mi] <= $signed(
-                    win_word_row1[0][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(3*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[3][ci] <= $signed(win_word_row1[0][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[3][ci] <= $signed(
+                    kernel_data_q[(3*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
-                prod[4][mi] <= $signed(
-                    win_word_row1[1][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(4*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[4][ci] <= $signed(win_word_row1[1][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[4][ci] <= $signed(
+                    kernel_data_q[(4*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
-                prod[5][mi] <= $signed(
-                    win_word_row1[2][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(5*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[5][ci] <= $signed(win_word_row1[2][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[5][ci] <= $signed(
+                    kernel_data_q[(5*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
 
                 // Row 2: below
-                prod[6][mi] <= $signed(
-                    win_word_row2[0][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(6*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[6][ci] <= $signed(win_word_row2[0][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[6][ci] <= $signed(
+                    kernel_data_q[(6*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
-                prod[7][mi] <= $signed(
-                    win_word_row2[1][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(7*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[7][ci] <= $signed(win_word_row2[1][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[7][ci] <= $signed(
+                    kernel_data_q[(7*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
-                prod[8][mi] <= $signed(
-                    win_word_row2[2][mi*DATA_WIDTH+:DATA_WIDTH]
-                ) * $signed(
-                    kernel_data_q[(8*INPUT_WIDTH)+(mi*DATA_WIDTH)+:DATA_WIDTH]
+                win_data[8][ci] <= $signed(win_word_row2[2][ci*DATA_WIDTH+:DATA_WIDTH]);
+                ker_data[8][ci] <= $signed(
+                    kernel_data_q[(8*INPUT_WIDTH)+(ci*DATA_WIDTH)+:DATA_WIDTH]
                 );
             end
         end else begin
-            prod_valid <= 1'b0;
-            prod_last  <= 1'b0;
+            mac_data_valid <= 1'b0;
         end
     end
 
-    // MAC Stage 2: Adder Tree
-    integer ai;
+    // =========================================================================
+    // Time-Shared MAC: Simplified Sequential Implementation
+    // =========================================================================
+    // This uses a simple FSM to process all 9 positions sequentially
+    // 
+    // States: IDLE -> MULT(0-8) -> DONE
+    // Each MULT state: multiply one position and accumulate the previous result
+
+    localparam MAC_IDLE = 2'd0;
+    localparam MAC_MULT = 2'd1;  // Multiply and accumulate
+    localparam MAC_DONE = 2'd2;
+
+    reg [1:0] mac_state;
+    reg [3:0] mac_cnt;  // Position counter 0-8
+    reg mac_last_saved;
+
+    // Current operands for multiply
+    reg signed [DATA_WIDTH-1:0] cur_win[0:LANES-1];
+    reg signed [DATA_WIDTH-1:0] cur_ker[0:LANES-1];
+
+    // Product register
+    (* use_dsp = "yes" *) reg signed [2*DATA_WIDTH-1:0] prod[0:LANES-1];
+
+    // Accumulator
+    reg signed [ACC_WIDTH-1:0] mac_acc[0:LANES-1];
+
+    // Pipeline register for product valid
+    reg prod_done;
+
+    integer mi;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mac_state <= MAC_IDLE;
+            mac_cnt <= 4'd0;
+            mac_running <= 1'b0;
+            mac_last_saved <= 1'b0;
+            prod_done <= 1'b0;
+            for (mi = 0; mi < LANES; mi = mi + 1) begin
+                cur_win[mi] <= {DATA_WIDTH{1'b0}};
+                cur_ker[mi] <= {DATA_WIDTH{1'b0}};
+                prod[mi] <= {(2 * DATA_WIDTH) {1'b0}};
+                mac_acc[mi] <= {ACC_WIDTH{1'b0}};
+            end
+        end else begin
+            prod_done <= 1'b0;
+
+            case (mac_state)
+                MAC_IDLE: begin
+                    if (mac_data_valid) begin
+                        mac_state <= MAC_MULT;
+                        mac_cnt <= 4'd0;
+                        mac_running <= 1'b1;
+                        mac_last_saved <= mac_data_last;
+                        // Clear accumulator
+                        for (mi = 0; mi < LANES; mi = mi + 1) begin
+                            mac_acc[mi] <= {ACC_WIDTH{1'b0}};
+                        end
+                        // Load first position
+                        for (mi = 0; mi < LANES; mi = mi + 1) begin
+                            cur_win[mi] <= win_data[0][mi];
+                            cur_ker[mi] <= ker_data[0][mi];
+                        end
+                    end
+                end
+
+                MAC_MULT: begin
+                    // Multiply current position
+                    for (mi = 0; mi < LANES; mi = mi + 1) begin
+                        prod[mi] <= cur_win[mi] * cur_ker[mi];
+                    end
+
+                    // Next cycle: accumulate this product and load next position
+                    if (mac_cnt < 4'd8) begin
+                        mac_cnt <= mac_cnt + 1;
+                        // Load next position
+                        for (mi = 0; mi < LANES; mi = mi + 1) begin
+                            case (mac_cnt)
+                                4'd0: begin
+                                    cur_win[mi] <= win_data[1][mi];
+                                    cur_ker[mi] <= ker_data[1][mi];
+                                end
+                                4'd1: begin
+                                    cur_win[mi] <= win_data[2][mi];
+                                    cur_ker[mi] <= ker_data[2][mi];
+                                end
+                                4'd2: begin
+                                    cur_win[mi] <= win_data[3][mi];
+                                    cur_ker[mi] <= ker_data[3][mi];
+                                end
+                                4'd3: begin
+                                    cur_win[mi] <= win_data[4][mi];
+                                    cur_ker[mi] <= ker_data[4][mi];
+                                end
+                                4'd4: begin
+                                    cur_win[mi] <= win_data[5][mi];
+                                    cur_ker[mi] <= ker_data[5][mi];
+                                end
+                                4'd5: begin
+                                    cur_win[mi] <= win_data[6][mi];
+                                    cur_ker[mi] <= ker_data[6][mi];
+                                end
+                                4'd6: begin
+                                    cur_win[mi] <= win_data[7][mi];
+                                    cur_ker[mi] <= ker_data[7][mi];
+                                end
+                                4'd7: begin
+                                    cur_win[mi] <= win_data[8][mi];
+                                    cur_ker[mi] <= ker_data[8][mi];
+                                end
+                                default: ;
+                            endcase
+                        end
+                    end else begin
+                        // Last multiply done, move to DONE state to output
+                        mac_state <= MAC_DONE;
+                    end
+                end
+
+                MAC_DONE: begin
+                    // Accumulate the last product
+                    for (mi = 0; mi < LANES; mi = mi + 1) begin
+                        mac_acc[mi] <= mac_acc[mi] + {{(ACC_WIDTH-2*DATA_WIDTH){prod[mi][2*DATA_WIDTH-1]}}, prod[mi]};
+                    end
+                    prod_done   <= 1'b1;
+                    mac_running <= 1'b0;
+                    mac_state   <= MAC_IDLE;
+                end
+            endcase
+
+            // Accumulate products (one cycle after multiply)
+            if (mac_state == MAC_MULT && mac_cnt > 4'd0) begin
+                for (mi = 0; mi < LANES; mi = mi + 1) begin
+                    mac_acc[mi] <= mac_acc[mi] + {{(ACC_WIDTH-2*DATA_WIDTH){prod[mi][2*DATA_WIDTH-1]}}, prod[mi]};
+                end
+            end
+        end
+    end
+
+    // Output result
+    integer ri;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             mac_valid <= 1'b0;
             mac_last  <= 1'b0;
-            for (ai = 0; ai < LANES; ai = ai + 1) mac_result[ai] <= {ACC_WIDTH{1'b0}};
-        end else if (prod_valid) begin
+            for (ri = 0; ri < LANES; ri = ri + 1) mac_result[ri] <= {ACC_WIDTH{1'b0}};
+        end else if (prod_done) begin
             mac_valid <= 1'b1;
-            mac_last  <= prod_last;
-            for (ai = 0; ai < LANES; ai = ai + 1) begin
-                mac_result[ai] <=
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[0][ai][2*DATA_WIDTH-1]}}, prod[0][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[1][ai][2*DATA_WIDTH-1]}}, prod[1][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[2][ai][2*DATA_WIDTH-1]}}, prod[2][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[3][ai][2*DATA_WIDTH-1]}}, prod[3][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[4][ai][2*DATA_WIDTH-1]}}, prod[4][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[5][ai][2*DATA_WIDTH-1]}}, prod[5][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[6][ai][2*DATA_WIDTH-1]}}, prod[6][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[7][ai][2*DATA_WIDTH-1]}}, prod[7][ai]} +
-                    {{(ACC_WIDTH-2*DATA_WIDTH){prod[8][ai][2*DATA_WIDTH-1]}}, prod[8][ai]};
+            mac_last  <= mac_last_saved;
+            for (ri = 0; ri < LANES; ri = ri + 1) begin
+                mac_result[ri] <= mac_acc[ri];
             end
         end else begin
             mac_valid <= 1'b0;

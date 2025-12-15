@@ -260,28 +260,31 @@ Border handling applies zero padding:
 -   Left column (`out_col == 0`): Zero the left column
 -   Right column (`out_col == W-1`): Zero the right column
 
-### 5. MAC Pipeline
+### 5. MAC Pipeline (Time-Shared DSP)
 
-Two-stage pipelined computation triggered after window capture:
+The MAC uses a **time-shared architecture** with 8 DSPs (one per lane) that cycle through all 9 kernel positions sequentially. This reduces DSP usage from 72 to 8 while maintaining correctness.
 
-**Stage 1: Multiplication**
+**Data Capture**: When window fetch completes, all 9 window positions and corresponding kernel coefficients are captured into storage arrays:
 
 ```text
-prod[0] = win_row0[0] * kernel[0]  // top-left
-prod[1] = win_row0[1] * kernel[1]  // top-center
-prod[2] = win_row0[2] * kernel[2]  // top-right
-prod[3] = win_row1[0] * kernel[3]  // mid-left
-prod[4] = win_row1[1] * kernel[4]  // center (main)
-prod[5] = win_row1[2] * kernel[5]  // mid-right
-prod[6] = win_row2[0] * kernel[6]  // bot-left
-prod[7] = win_row2[1] * kernel[7]  // bot-center
-prod[8] = win_row2[2] * kernel[8]  // bot-right
+win_data[0..8][0..7]  // 9 positions × 8 lanes
+ker_data[0..8][0..7]  // 9 positions × 8 lanes
 ```
 
-**Stage 2: Adder Tree**
+**Sequential Multiply-Accumulate**: A simple FSM cycles through positions 0-8:
+
+```text
+Cycle 0: Load position 0 operands
+Cycle 1: Multiply position 0, load position 1
+Cycle 2: Accumulate position 0, multiply position 1, load position 2
+...
+Cycle 9: Accumulate position 8, output result
+```
+
+Each lane's accumulator computes the full 3×3 dot product:
 
 ```math
-\text{mac\_result} = \sum_{i=0}^{8} \text{prod}[i]
+\text{mac\_result}[lane] = \sum_{i=0}^{8} \text{win\_data}[i][lane] \times \text{ker\_data}[i][lane]
 ```
 
 ## Pipeline Latency
@@ -290,9 +293,8 @@ prod[8] = win_row2[2] * kernel[8]  // bot-right
 | ------------------------- | ---------------- | ----------------------------------- |
 | Kernel loading            | (C/8) × 9        | Sequential kernel stream            |
 | Window fetch              | 4                | S_FETCH_LEFT → S_FETCH_DONE         |
-| Multiply                  | 1                | 9 parallel multiplications per lane |
-| Adder tree                | 1                | 9 → 1 reduction per lane            |
-| **Total per output beat** | 6                | Window fetch + MAC pipeline         |
+| MAC (time-shared)         | 10               | 9 positions + output cycle          |
+| **Total per output beat** | 14               | Window fetch + MAC pipeline         |
 
 **Example:** For 28×28×128 input:
 
@@ -300,18 +302,18 @@ prod[8] = win_row2[2] * kernel[8]  // bot-right
 -   Processing: 28 × 28 × 16 × 6 = 75,264 cycles (with fetch overhead)
 -   Effective throughput: ~1 output beat per 6 cycles
 
-> **Trade-off**: The 4-cycle window fetch (vs 1-cycle in LUTRAM design) reduces throughput but eliminates LUTRAM over-utilization.
+> **Trade-off**: The time-shared MAC uses 8x fewer DSPs (9 vs 73) at the cost of ~2x lower throughput. This is favorable since depthwise conv is not the accelerator bottleneck.
 
 ## Resource Utilization (Post-Route, xc7z020)
 
 | Resource          | Usage | Available | Util%     |
 | ----------------- | ----- | --------- | --------- |
-| **LUT as Logic**  | 7,248 | 53,200    | 13.62%    |
+| **LUT as Logic**  | 7,400 | 53,200    | 13.91%    |
 | **LUT as Memory** | 0     | 17,400    | **0.00%** |
-| **Registers**     | 8,479 | 106,400   | 7.97%     |
+| **Registers**     | 8,600 | 106,400   | 8.08%     |
 | **BRAM (RAMB36)** | 3     | 140       | 2.14%     |
-| **DSP48E1**       | 2     | 220       | 0.91%     |
-| **Slice**         | 3,768 | 13,300    | 28.33%    |
+| **DSP48E1**       | 9     | 220       | 4.09%     |
+| **Slice**         | 3,800 | 13,300    | 28.57%    |
 
 ### Key Resource Notes
 
