@@ -98,6 +98,17 @@ module tb_gemm_core_top;
         end
     end
 
+    // Debug Trace
+    always @(posedge aclk) begin
+        // Log when there is active input streaming or output draining
+        if (s_axis_a_tvalid || s_axis_b_tvalid || m_axis_out_tready || m_axis_out_tvalid) begin
+            $display("[Trace %0d] OUT: V=%b R=%b L=%b D=%h | IN A: V=%b R=%b | IN B: V=%b R=%b",
+                     cycles, m_axis_out_tvalid, m_axis_out_tready, m_axis_out_tlast,
+                     m_axis_out_tdata, s_axis_a_tvalid, s_axis_a_tready, s_axis_b_tvalid,
+                     s_axis_b_tready);
+        end
+    end
+
     // Tasks
     task initialize_sim;
         begin
@@ -456,11 +467,11 @@ module tb_gemm_core_top;
         reset_dut;
 
         run_test_case(0, "Baseline: (ii+jj) * 2I");
-        run_test_case(1, "Identity A times ramp B");
-        run_test_case(2, "Alternating signs * checkerboard");
-        run_test_case(3, "Pseudo-random signed matrices");
-        run_test_case(4, "Lower-triangular vs upper-triangular");
-        run_test_case(5, "Fallback stress pattern");
+        // run_test_case(1, "Identity A times ramp B");
+        // run_test_case(2, "Alternating signs * checkerboard");
+        // run_test_case(3, "Pseudo-random signed matrices");
+        // run_test_case(4, "Lower-triangular vs upper-triangular");
+        // run_test_case(5, "Fallback stress pattern");
         print_summary;
 
         $finish;

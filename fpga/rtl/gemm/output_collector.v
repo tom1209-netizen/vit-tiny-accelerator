@@ -168,6 +168,8 @@ module output_collector #(
     reg [3:0] col_idx;
     reg       active;
 
+    reg       start_pending;
+
     // Function to select a value by (row, col)
     function [ACC_WIDTH-1:0] get_acc;
         input [3:0] r;
@@ -403,12 +405,22 @@ module output_collector #(
             col_idx       <= 4'd0;
             active        <= 1'b0;
             done          <= 1'b0;
+            start_pending <= 1'b0;
         end else begin
-            if (start_output && !active) begin
-                active  <= 1'b1;
-                row_idx <= 4'd0;
-                col_idx <= 4'd0;
-                done    <= 1'b0;
+            // Capture the start request in a register
+            if (start_output) start_pending <= 1'b1;
+
+            // The "Watermark Trigger":
+            //    Only go active if we have a pending request AND PE(0,4) is finished.
+            //    PE(0,4) is the halfway point. Waiting for it gives us a perfect safety buffer.
+            // Without this, we risk starting to read out results before they are ready and add a 
+            // stall in the output stream for the first row.
+            if ((start_output || start_pending) && !active && acc_done_0_4) begin
+                active        <= 1'b1;
+                start_pending <= 1'b0;  // Clear the pending flag
+                row_idx       <= 4'd0;
+                col_idx       <= 4'd0;
+                done          <= 1'b0;
             end
 
             if (active) begin

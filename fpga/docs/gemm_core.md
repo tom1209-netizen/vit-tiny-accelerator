@@ -49,9 +49,11 @@ Each stream feeds an `input_buffer_controller` that contains a one-beat skid buf
 
 ## Output Stream Behavior
 
-Outputs are produced as soon as the corresponding accumulators finish. Every processing element counts its own MACs and raises an `acc_done` flag once it has consumed `ARRAY_SIZE` operand pairs. The output collector monitors those flags and only emits a beat when all values packed in that beat are marked done. Because the collector arms itself at `start_tile`, it can begin streaming the top-left entries while the rest of the systolic wave is still propagating, overlapping compute and drain without reading partial sums.
+Outputs are produced as soon as the corresponding accumulators finish, subject to a "watermark" start condition. Every processing element counts its own MACs and raises an `acc_done` flag once it has consumed `ARRAY_SIZE` operand pairs.
 
-The output collector scans the accumulated matrix `C` in row-major order and packs `VALUES_PER_BEAT = AXIS_DATA_WIDTH / ACC_WIDTH` results per beat (2 × 32-bit values for the default configuration):
+The output collector monitors those flags but **waits until the halfway point of the first row (PE 0,4) is finished** before starting the output stream. This initial delay acts as a safety buffer to prevent the collector from "catching up" to the systolic wavefront and stalling (inserting bubbles) in the output stream. Without this delay, the collector would consume the first few beats of row 0 faster than the array produces them, causing a single-cycle bubble. By waiting for the halfway point, we ensure the array has enough lead time to support a continuous 100% utilization output stream.
+
+Once active, the collector scans the accumulated matrix `C` in row-major order and packs `VALUES_PER_BEAT = AXIS_DATA_WIDTH / ACC_WIDTH` results per beat (2 × 32-bit values for the default configuration):
 
 - `m_axis_tdata[31:0]` carries `C[row][col]`.
 - `m_axis_tdata[63:32]` carries `C[row][col+1]`, zero padded when the row has an odd number of elements.
@@ -127,7 +129,7 @@ This section documents the optimization journey to achieve high-frequency operat
 
 The original single-cycle MAC design achieved only ~138 MHz:
 
-```
+```text
 Critical Path: a_in → DSP multiply → add → accumulator register
 Logic Levels: 13 (using LUT-based multiplication)
 WNS: -0.742 ns at 125 MHz target
@@ -151,12 +153,13 @@ assign product = a_in * b_in;
 
 Broke the critical path by adding a pipeline register between multiply and accumulate:
 
-```
+```text
 Stage 1: a_in × b_in → product_r (registered)
 Stage 2: accumulator + product_r → accumulator
 ```
 
 **Implementation in `processing_element.v`:**
+
 ```verilog
 // Stage 1: Multiply
 (* use_dsp = "yes" *)
@@ -240,12 +243,14 @@ graph LR
 ```
 
 Each PE has an **input capture register** (`a_in_r`) that:
+
 1. Provides registered input to DSP (decouples routing from compute)
 2. Enables scalability to large arrays without timing degradation
 
 #### Implementation Attempt
 
 Added input capture registers to create 3-stage pipeline:
+
 - Stage 1: Input capture (`a_in → a_in_r`)
 - Stage 2: Multiply (`a_in_r × b_in_r → product_r`)
 - Stage 3: Accumulate (`product_r + accumulator`)
@@ -259,10 +264,12 @@ The TPU-style design achieved **194.70 MHz**, slightly *worse* than the simpler 
 1. **Same routing distance**: On our small 8×8 array, intra-PE routing (fabric register → DSP) is essentially the same distance as inter-PE routing.
 
 2. **Bottleneck is DSP setup time**: Both designs hit the same fundamental limit:
-   ```
+
+   ```text
    DSP48E1 A-input setup time = -3.722 ns
    Available budget after clock overhead = ~1.3 ns
    ```
+
    Adding more fabric registers doesn't reduce DSP setup requirements.
 
 3. **Vivado placement is already optimal**: The small array fits compactly, so inter-PE wires are short.
