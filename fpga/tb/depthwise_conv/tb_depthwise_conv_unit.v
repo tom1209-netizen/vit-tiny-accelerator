@@ -10,6 +10,9 @@ module tb_depthwise_conv_unit;
     parameter MAX_CHANNELS = 128;
     parameter ACC_WIDTH = 32;
 
+    // Set USE_MODULAR=1 to test the modular version
+    parameter USE_MODULAR = 0;
+
     // Clock and reset
     reg                           clk;
     reg                           rst_n;

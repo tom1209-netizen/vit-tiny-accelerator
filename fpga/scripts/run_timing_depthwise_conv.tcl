@@ -30,9 +30,12 @@ set post_route_hold [file join $build_dir "depthwise_conv_post_route_hold.rpt"]
 set util_rpt        [file join $build_dir "depthwise_conv_post_route_util.rpt"]
 set fmax_report     [file join $build_dir "depthwise_conv_post_route_fmax.txt"]
 
-# RTL source files (no wrapper needed for OOC)
+# RTL source files
 set rtl_files [list \
     [file join $rtl_dir "depthwise_conv" "depthwise_conv_unit.v"] \
+    [file join $rtl_dir "depthwise_conv" "kernel_buffer.v"] \
+    [file join $rtl_dir "depthwise_conv" "line_buffer.v"] \
+    [file join $rtl_dir "depthwise_conv" "mac_unit.v"] \
 ]
 
 foreach rtl_file $rtl_files {

@@ -16,3 +16,6 @@
 
 // Depthwise convolution module
 ../rtl/depthwise_conv/depthwise_conv_unit.v
+../rtl/depthwise_conv/kernel_buffer.v
+../rtl/depthwise_conv/line_buffer.v
+../rtl/depthwise_conv/mac_unit.v

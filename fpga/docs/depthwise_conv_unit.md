@@ -1,6 +1,6 @@
 # Depthwise 3x3 Convolution Unit Documentation
 
-This document describes the hardware depthwise 3x3 convolution implementation located at `fpga/rtl/depthwise_conv/depthwise_conv_unit.v`. It covers the algorithm design, architecture, I/O interfaces, internal pipeline, and testing methodology.
+This document describes the hardware depthwise 3x3 convolution implementation located in `fpga/rtl/depthwise_conv/`. The design uses a **modular architecture** with separate submodules for kernel storage, line buffering, and MAC operations. It covers the algorithm design, architecture, I/O interfaces, internal pipeline, and testing methodology.
 
 ## Why Depthwise Convolution Needs a Dedicated Unit
 
@@ -41,12 +41,34 @@ for each channel $c$:
 
 ### Key Features
 
--   **8-lane parallel processing** (matches AXI-Stream bus width)
--   **BRAM-based line buffers** with sequential 3-cycle window fetch (left→center→right)
--   **Register-based kernel storage** to avoid BRAM fragmentation
--   **Zero padding** for image borders
--   **Pipelined datapath** with proper BRAM read latency handling
--   **Outputs raw INT32** (requantization handled by external `requant_unit`)
+- **Modular architecture** with dedicated submodules for kernel buffer, line buffer, and MAC
+- **8-lane parallel processing** (matches AXI-Stream bus width)
+- **BRAM-based line buffers** with sequential 3-cycle window fetch (left→center→right)
+- **Register-based kernel storage** to avoid BRAM fragmentation
+- **Time-shared MAC** using 8 DSPs cycling through 9 kernel positions
+- **Zero padding** for image borders
+- **Pipelined datapath** with proper BRAM read latency handling
+- **Outputs raw INT32** (requantization handled by external `requant_unit`)
+
+## Modular File Structure
+
+The depthwise convolution unit is split into four Verilog files:
+
+| File | Module | Lines | Description |
+|------|--------|-------|-------------|
+| `depthwise_conv_unit.v` | `depthwise_conv_unit` | 685 | Top-level module with FSM, flow control, window extraction |
+| `kernel_buffer.v` | `kernel_buffer` | 141 | Kernel weight storage with 2-stage pipelined writes |
+| `line_buffer.v` | `line_buffer` | 83 | Triple BRAM circular line buffer |
+| `mac_unit.v` | `mac_unit` | 179 | Time-shared 8-DSP MAC unit |
+
+### Module Hierarchy
+
+```text
+depthwise_conv_unit (top)
+├── kernel_buffer      - Stores 3×3 kernels for all channel groups
+├── line_buffer        - 3 circular BRAMs for input row buffering
+└── mac_unit           - Time-shared multiply-accumulate
+```
 
 ## Block Diagram
 
@@ -69,7 +91,7 @@ for each channel $c$:
 
 The line buffer depth is calculated as:
 
-```
+```text
 MAX_BEATS_ROW = MAX_WIDTH × (MAX_CHANNELS / LANES)
 ```
 
@@ -103,7 +125,7 @@ Each line buffer stores `448 × 64 = 28,672 bits`, which fits in a single RAMB36
 
 Kernels are loaded sequentially: for each channel group (8 channels), stream 9 beats containing the 3×3 coefficients:
 
-```
+```text
 Beat 0: kernel[chan_group, pos 0, lanes 0-7]  (top-left)
 Beat 1: kernel[chan_group, pos 1, lanes 0-7]  (top-center)
 ...
@@ -208,30 +230,50 @@ This sequential approach uses only **3 single-port BRAMs** instead of 9 multi-po
 
 ## Internal Architecture
 
-### 1. Line Buffers (BRAM-Based)
+### 1. Line Buffer Submodule (`line_buffer.v`)
 
-Three rows of the input image are stored in **true dual-port BRAMs** configured as circular buffers:
-
-```verilog
-(* ram_style = "block" *) reg [INPUT_WIDTH-1:0] line_buf_0 [0:MAX_BEATS_ROW-1];
-(* ram_style = "block" *) reg [INPUT_WIDTH-1:0] line_buf_1 [0:MAX_BEATS_ROW-1];
-(* ram_style = "block" *) reg [INPUT_WIDTH-1:0] line_buf_2 [0:MAX_BEATS_ROW-1];
-```
-
--   **Port A**: Write from input stream (during S_PROCESS/S_FETCH states)
--   **Port B**: Read for window extraction (sequential left/center/right)
--   Circular buffer indexing: `line_buf[in_row % 3]` stores current row
-
-### 2. Kernel Storage (Register-Based)
-
-Kernel weights are stored in registers to avoid BRAM fragmentation:
+The `line_buffer` module implements three rows of BRAM-based circular buffers:
 
 ```verilog
-(* ram_style = "registers" *)
-reg [KERNEL_PACK_WIDTH-1:0] kernel_mem [0:(MAX_CHANNELS/LANES)-1];
+line_buffer #(
+    .DATA_WIDTH(8), .LANES(8), .INPUT_WIDTH(64),
+    .MAX_WIDTH(28), .MAX_CHANNELS(128)
+) u_line_buffer (
+    .clk(clk), .rst_n(rst_n),
+    .num_cols(num_cols), .num_chan_beats(num_chan_beats),
+    .wr_en(input_handshake), .wr_row_sel(in_row_mod3),
+    .wr_addr(in_beat_in_row), .wr_data(axis_data_in_tdata),
+    .rd_addr(lb_rd_addr),
+    .rd_data_0(lb_rd_data_0), .rd_data_1(lb_rd_data_1), .rd_data_2(lb_rd_data_2)
+);
 ```
 
-Each entry holds 9 × 64-bit = 576 bits (all 3×3 coefficients for 8 channels). This format enables single-cycle kernel access during MAC operations.
+- **Write port**: Receives input stream, writes to buffer selected by `in_row % 3`
+- **Read port**: All 3 buffers read simultaneously, top-level selects based on `out_row % 3`
+- Circular buffer indexing prevents overwrites through flow control
+
+### 2. Kernel Buffer Submodule (`kernel_buffer.v`)
+
+The `kernel_buffer` module stores kernel weights in registers (not BRAM) to avoid fragmentation:
+
+```verilog
+kernel_buffer #(
+    .DATA_WIDTH(8), .LANES(8), .INPUT_WIDTH(64),
+    .MAX_CHANNELS(128), .KERNEL_SIZE(9)
+) u_kernel_buffer (
+    .clk(clk), .rst_n(rst_n),
+    .load_enable(state == S_LOAD_KERNEL), .num_chan_beats(num_chan_beats),
+    .load_done(kernel_load_done),
+    .axis_kernel_tdata(axis_kernel_in_tdata),
+    .axis_kernel_tvalid(axis_kernel_in_tvalid),
+    .axis_kernel_tready(axis_kernel_in_tready),
+    .chan_group(kernel_chan_group_rd), .kernel_pack(kernel_pack)
+);
+```
+
+- **2-stage pipelined writes** for timing closure
+- **576-bit packed output** (9 coefficients × 8 lanes × 8 bits) per channel group
+- `load_done` signals completion of kernel loading phase
 
 ### 3. Flow Control
 
@@ -255,30 +297,47 @@ For each output pixel at (out_row, out_col), extract a 3×3 window across 3 fetc
 
 Border handling applies zero padding:
 
--   Top row (`out_row == 0`): Zero the "above" row
--   Bottom row (`out_row == H-1`): Zero the "below" row
--   Left column (`out_col == 0`): Zero the left column
--   Right column (`out_col == W-1`): Zero the right column
+- Top row (`out_row == 0`): Zero the "above" row
+- Bottom row (`out_row == H-1`): Zero the "below" row
+- Left column (`out_col == 0`): Zero the left column
+- Right column (`out_col == W-1`): Zero the right column
 
-### 5. MAC Pipeline (Time-Shared DSP)
+### 5. MAC Unit Submodule (`mac_unit.v`)
 
-The MAC uses a **time-shared architecture** with 8 DSPs (one per lane) that cycle through all 9 kernel positions sequentially. This reduces DSP usage from 72 to 8 while maintaining correctness.
+The `mac_unit` module implements a **time-shared architecture** with 8 DSPs (one per lane) that cycle through all 9 kernel positions sequentially:
 
-**Data Capture**: When window fetch completes, all 9 window positions and corresponding kernel coefficients are captured into storage arrays:
-
-```text
-win_data[0..8][0..7]  // 9 positions × 8 lanes
-ker_data[0..8][0..7]  // 9 positions × 8 lanes
+```verilog
+mac_unit #(
+    .DATA_WIDTH(8), .LANES(8), .ACC_WIDTH(32), .KERNEL_SIZE(9)
+) u_mac (
+    .clk(clk), .rst_n(rst_n),
+    .data_valid(mac_data_valid), .data_last(mac_data_last),
+    .win_pack(mac_win_pack), .ker_pack(mac_ker_pack),
+    .busy(mac_busy),
+    .result_valid(mac_result_valid), .result_last(mac_result_last),
+    .result_pack(mac_result_pack)
+);
 ```
 
-**Sequential Multiply-Accumulate**: A simple FSM cycles through positions 0-8:
+**Packed Interfaces**: Window and kernel data use 576-bit packed vectors for portability:
+
+- `win_pack[576-1:0]` = 9 positions × 8 lanes × 8 bits
+- `ker_pack[576-1:0]` = Same format
+
+**Internal FSM** cycles through 3 states:
+
+1. `MAC_IDLE`: Wait for `data_valid`, capture inputs
+2. `MAC_MULT`: Cycle through positions 0-8, multiply and accumulate
+3. `MAC_DONE`: Output final result, return to idle
+
+**Sequential Multiply-Accumulate**: A simple counter cycles through positions 0-8:
 
 ```text
 Cycle 0: Load position 0 operands
-Cycle 1: Multiply position 0, load position 1
-Cycle 2: Accumulate position 0, multiply position 1, load position 2
+Cycle 1: Multiply position 0, load position 1, accumulate previous
 ...
-Cycle 9: Accumulate position 8, output result
+Cycle 9: Accumulate position 8
+Cycle 10: Output result
 ```
 
 Each lane's accumulator computes the full 3×3 dot product:
@@ -298,29 +357,40 @@ Each lane's accumulator computes the full 3×3 dot product:
 
 **Example:** For 28×28×128 input:
 
--   Kernel loading: 16 × 9 = 144 cycles
--   Processing: 28 × 28 × 16 × 6 = 75,264 cycles (with fetch overhead)
--   Effective throughput: ~1 output beat per 6 cycles
+- Kernel loading: 16 × 9 = 144 cycles
+- Processing: 28 × 28 × 16 × 6 = 75,264 cycles (with fetch overhead)
+- Effective throughput: ~1 output beat per 6 cycles
 
 > **Trade-off**: The time-shared MAC uses 8x fewer DSPs (9 vs 73) at the cost of ~2x lower throughput. This is favorable since depthwise conv is not the accelerator bottleneck.
+
+## Timing Results (Post-Route, xc7z020)
+
+| Metric | Value |
+|--------|-------|
+| **Target Clock** | 200 MHz (5.0 ns) |
+| **WNS (Setup)** | -0.801 ns |
+| **Effective Min Period** | 5.801 ns |
+| **Estimated Fmax** | **172.38 MHz** |
+
+> The design achieves 172 MHz, an improvement from the original 73 MHz baseline through systematic critical path optimizations. See [Timing Optimizations](#timing-optimizations) for details.
 
 ## Resource Utilization (Post-Route, xc7z020)
 
 | Resource          | Usage | Available | Util%     |
 | ----------------- | ----- | --------- | --------- |
-| **LUT as Logic**  | 7,400 | 53,200    | 13.91%    |
+| **LUT as Logic**  | ~7,400 | 53,200    | ~14%    |
 | **LUT as Memory** | 0     | 17,400    | **0.00%** |
-| **Registers**     | 8,600 | 106,400   | 8.08%     |
+| **Registers**     | ~8,600 | 106,400   | ~8%     |
 | **BRAM (RAMB36)** | 3     | 140       | 2.14%     |
 | **DSP48E1**       | 9     | 220       | 4.09%     |
-| **Slice**         | 3,800 | 13,300    | 28.57%    |
 
 ### Key Resource Notes
 
--   **LUTRAM = 0**: Critical improvement from original design (was 126% over-utilized)
--   **3 RAMB36**: One per line buffer, efficient 448×64 configuration
--   **8,479 registers**: Includes kernel storage (576 bits × 16 groups = 9,216 bits)
--   **Fmax**: ~73 MHz (out-of-context, can be improved with additional pipelining)
+- **LUTRAM = 0**: Critical improvement from original design (was 126% over-utilized)
+- **3 RAMB36**: One per line buffer in `line_buffer` submodule
+- **9 DSP48E1**: 8 for time-shared MAC (1 per lane) + 1 for address computation
+- **Registers**: Includes kernel storage (576 bits × 16 groups = 9,216 bits) in `kernel_buffer`
+- **Fmax**: 172.38 MHz achieved through pipelining and pre-computed flags
 
 ## Usage Example
 
@@ -410,7 +480,7 @@ See the testbench at `fpga/tb/depthwise_conv/tb_depthwise_conv_unit.v`.
 
 All 6 tests pass with exact match to golden reference:
 
-```
+```text
 PASSED: All 128 elements match (Test 1)
 PASSED: All 512 elements match (Test 2)
 PASSED: All 128 elements match (Test 3)
@@ -433,8 +503,8 @@ SUMMARY: 6/6 tests passed - ALL TESTS PASSED!
 
 The initial design used 9 parallel line buffers (one per 3×3 window position) to enable single-cycle window extraction. This required:
 
--   9 × (MAX_WIDTH × MAX_CHANNELS/8) × 64-bit memories
--   With MAX_WIDTH=64, MAX_CHANNELS=512: 9 × 4096 × 64 = 2.25 Mbit
+- 9 × (MAX_WIDTH × MAX_CHANNELS/8) × 64-bit memories
+- With MAX_WIDTH=64, MAX_CHANNELS=512: 9 × 4096 × 64 = 2.25 Mbit
 
 This exceeded BRAM capacity and fell back to **LUTRAM**, consuming 22,016 LUTRAM sites (126% of available 17,400).
 
@@ -465,6 +535,9 @@ The original design achieved only **73.28 MHz** (WNS: -8.647 ns) against a 200 M
 | Two-stage `needed_beat` pipeline | 114.14 MHz | 150.29 MHz | +36.15 MHz  |
 | Registered beat addresses        | 150.29 MHz | 150.76 MHz | +0.47 MHz   |
 | Pre-computed edge flags          | 150.76 MHz | 156.25 MHz | +5.49 MHz   |
+| Modular refactoring              | 156.25 MHz | 172.38 MHz | +16.13 MHz  |
+
+> **Note**: The modular refactoring into separate submodules (`kernel_buffer`, `line_buffer`, `mac_unit`) improved timing by allowing Vivado to optimize each module's placement independently.
 
 ### Detailed Optimizations
 
@@ -474,8 +547,8 @@ The original design achieved only **73.28 MHz** (WNS: -8.647 ns) against a 200 M
 
 **Solution**: Added a 2-stage pipeline:
 
--   Stage 1: Register the DSP multiplication result
--   Added `pipeline_valid` signal to handle pipeline warmup after position changes
+- Stage 1: Register the DSP multiplication result
+- Added `pipeline_valid` signal to handle pipeline warmup after position changes
 
 ```verilog
 // Before: Combinational
@@ -492,9 +565,9 @@ reg pipeline_valid;
 
 **Solution**: Replaced division with explicit counters:
 
--   Added `kernel_chan_group` counter (0 to 15)
--   Added `kernel_coeff_idx` counter (0 to 8)
--   Added 2-stage pipeline for kernel memory writes
+- Added `kernel_chan_group` counter (0 to 15)
+- Added `kernel_coeff_idx` counter (0 to 8)
+- Added 2-stage pipeline for kernel memory writes
 
 ```verilog
 // Before: Division
@@ -545,8 +618,8 @@ else
 
 **Solution**: Split into two pipeline stages:
 
--   Stage 1: Compute `(out_col + 1) * num_chan_beats` unconditionally through DSP
--   Stage 2: Apply correction based on delayed `is_last_output_col` flag
+- Stage 1: Compute `(out_col + 1) * num_chan_beats` unconditionally through DSP
+- Stage 2: Apply correction based on delayed `is_last_output_col` flag
 
 ```verilog
 // Stage 1: DSP computation (no comparison in path)
@@ -588,17 +661,17 @@ end
 
 ### Remaining Critical Path
 
-After all optimizations, the critical path is in the **MAC (multiply-accumulate) datapath**:
+After all optimizations, the critical path is in the **MAC (multiply-accumulate) datapath** within `mac_unit.v`:
 
--   8-bit × 8-bit signed multiplications (LUT-based)
--   9-product adder tree for 3×3 convolution
--   Path delay: ~6.4 ns (156 MHz)
+- 8-bit × 8-bit signed multiplications (DSP48-inferred)
+- Sequential accumulation through 9 positions
+- Path delay: ~5.8 ns (172 MHz)
 
 To reach 200 MHz would require:
 
-1. Using DSP48 primitives for multiplications
-2. Additional pipeline stages in the MAC computation
-3. Restructuring the 9-product adder tree
+1. Additional pipeline stages in the MAC FSM
+2. Breaking the accumulator feedback path
+3. Restructuring the product-to-accumulator timing
 
 ### Key Timing Principles Applied
 
