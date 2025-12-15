@@ -21,6 +21,7 @@ module final_norm_calc #(
     input  wire signed [STAT_WIDTH-1:0]     gamma_val,
     input  wire signed [STAT_WIDTH-1:0]     beta_val,
     input  wire                             params_valid,
+    output wire                             params_ready, // [NEW] Handshake Output
     
     // Output Stream
     output reg [PARALLEL_N*(DO_REQUANTIZE ? 8 : 32)-1:0] m_axis_data,
@@ -28,7 +29,6 @@ module final_norm_calc #(
     output reg                                           m_axis_last, 
     input  wire                                          m_axis_ready
 );
-
     // =========================================================
     // PARAMETER STORAGE & FSM
     // =========================================================
@@ -48,7 +48,11 @@ module final_norm_calc #(
     localparam WAIT_MUL   = 1; 
     localparam WAIT_SCALE = 2;
     localparam BUSY       = 3;
+    
     reg [1:0] state;
+
+    // [NEW] Ready when IDLE
+    assign params_ready = (state == IDLE);
 
     always @(posedge clk) begin
         if (!aresetn) begin
@@ -64,7 +68,8 @@ module final_norm_calc #(
             case (state)
                 IDLE: begin
                     s_axis_ready <= 0;
-                    if (params_valid) begin
+                    // [MODIFIED] Handshake: Only accept if Valid & Ready
+                    if (params_valid && params_ready) begin
                         latched_mean <= mean_val;
                         latched_beta <= beta_val[STORE_W-1:0];
                         r_inv_sqrt   <= inv_sqrt_val;
@@ -81,7 +86,7 @@ module final_norm_calc #(
                 WAIT_SCALE: begin
                     combined_scale <= r_mul_full[39:16];
                     state          <= BUSY;
-                    s_axis_ready   <= 1; 
+                    s_axis_ready   <= 1;
                 end
 
                 BUSY: begin
@@ -99,6 +104,8 @@ module final_norm_calc #(
         end
     end
 
+    // ... [Rest of the module (Stages 0-5) remains exactly the same] ...
+    
     // =========================================================
     // STAGE 0: INPUT ISOLATION
     // =========================================================
@@ -114,7 +121,7 @@ module final_norm_calc #(
         end else if (m_axis_ready) begin
             st0_valid <= s_axis_valid && s_axis_ready;
             st0_last  <= s_axis_last && s_axis_valid && s_axis_ready;
-            st0_data  <= s_axis_data; 
+            st0_data  <= s_axis_data;
         end
     end
 
@@ -145,18 +152,12 @@ module final_norm_calc #(
     // =========================================================
     // STAGE 2: SPLIT MULTIPLICATION (PARALLEL DSPs)
     // =========================================================
-    // We split the 32-bit 'st1_diff' into High (15 bits) and Low (17 bits).
-    // This allows using 2 parallel DSPs (25x18) instead of one deep cascade.
-    // X (32b) = X_hi(15b) << 17 | X_lo(17b)
-    
-    reg signed [39:0] st2_prod_hi [0:PARALLEL_N-1]; // Result of 15b * 24b
-    reg signed [41:0] st2_prod_lo [0:PARALLEL_N-1]; // Result of 17b * 24b
+    reg signed [39:0] st2_prod_hi [0:PARALLEL_N-1];
+    reg signed [41:0] st2_prod_lo [0:PARALLEL_N-1];
     reg               st2_valid;
     reg               st2_last;
     
     integer j;
-    reg signed [14:0] A_hi;
-    reg signed [17:0] A_lo; // Treated as positive in logic, but needs care
     
     always @(posedge clk) begin
         if (!aresetn) begin
@@ -168,16 +169,7 @@ module final_norm_calc #(
             
             if (st1_valid) begin
                 for (j = 0; j < PARALLEL_N; j = j + 1) begin
-                    // Split st1_diff[31:0]
-                    // High part: bits [31:17] (15 bits signed)
-                    // Low part:  bits [16:0]  (17 bits unsigned/positive)
-                    
-                    // DSP 1: Signed * Signed
                     st2_prod_hi[j] <= $signed(st1_diff[j][31:17]) * combined_scale;
-                    
-                    // DSP 2: Unsigned * Signed. 
-                    // To force strict DSP mapping, we treat the 17 bits as a positive signed number.
-                    // We prepend a 0 bit to make it an 18-bit positive signed number.
                     st2_prod_lo[j] <= $signed({1'b0, st1_diff[j][16:0]}) * combined_scale;
                 end
             end
@@ -187,8 +179,6 @@ module final_norm_calc #(
     // =========================================================
     // STAGE 3: SUM PARTIAL PRODUCTS
     // =========================================================
-    // Recombine: (Hi * Scale) << 17 + (Lo * Scale)
-    
     reg signed [31:0] st3_norm_val [0:PARALLEL_N-1];
     reg               st3_valid;
     reg               st3_last;
@@ -205,10 +195,7 @@ module final_norm_calc #(
 
             if (st2_valid) begin
                 for (k = 0; k < PARALLEL_N; k = k + 1) begin
-                    // Shift high part by 17 and add low part
                     full_sum_temp = (st2_prod_hi[k] <<< 17) + st2_prod_lo[k];
-                    
-                    // Extract result (match previous Q format logic)
                     st3_norm_val[k] <= full_sum_temp[47:16];
                 end
             end
