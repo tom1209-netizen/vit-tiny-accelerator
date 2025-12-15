@@ -69,6 +69,9 @@ module depthwise_conv_unit #(
     reg [31:0] total_output_beats;  // = num_rows * num_cols * num_chan_beats
     reg [15:0] total_kernel_beats;  // = num_chan_beats * 9
 
+    // Pre-computed flag for kernel loading completion (avoids 16-bit comparison in FSM)
+    reg kernel_load_almost_done;  // Set when kernel_load_cnt == total_kernel_beats - 2
+
     // =========================================================================
     // Kernel Weight Storage - packed registers (9×64-bit per channel group)
     // Use registers (not BRAM) since kernel storage is small (~1KB for 16 groups)
@@ -76,9 +79,18 @@ module depthwise_conv_unit #(
     // =========================================================================
     (* ram_style = "registers" *)
     reg [KERNEL_PACK_WIDTH-1:0] kernel_mem[0:(MAX_CHANNELS/LANES)-1];
+    reg [KERNEL_PACK_WIDTH-1:0] kernel_data_q;
+
+    // Kernel loading state - declared here for use in FSM
     reg [15:0] kernel_load_cnt;
     reg [3:0] kernel_coeff_idx;
-    reg [KERNEL_PACK_WIDTH-1:0] kernel_data_q;
+    reg [3:0] kernel_chan_group;  // Which channel group (0 to 15)
+
+    // Stage 2 pipeline registers for kernel write
+    reg kernel_wr_en_d;
+    reg [3:0] kernel_coeff_idx_d;
+    reg [3:0] kernel_chan_group_d;
+    reg [INPUT_WIDTH-1:0] kernel_data_d;
 
     integer init_kb;
     initial begin
@@ -115,6 +127,7 @@ module depthwise_conv_unit #(
     reg [15:0] in_col;
     reg [15:0] in_chan_beat;
     reg [15:0] in_beat_in_row;
+    reg [1:0] in_row_mod3;  // Pre-computed in_row % 3 for timing closure
 
     // =========================================================================
     // Output Processing Tracking
@@ -124,6 +137,22 @@ module depthwise_conv_unit #(
     reg [15:0] out_chan_beat;
     reg [31:0] out_beat_cnt;
     reg processing_enabled;
+
+    // Pre-computed circular buffer indices (avoid expensive mod-3 operations)
+    // These track out_row % 3 and (out_row +/- 1) % 3 with simple increment logic
+    reg [1:0] out_row_mod3;  // = out_row % 3
+
+    // Pre-computed beat addresses (avoid expensive multiplications)
+    // beat_in_row = out_col * num_chan_beats + out_chan_beat
+    // This is just a counter that increments each fetch and resets per row
+    reg [15:0] out_beat_in_row;
+
+    // Pre-computed edge flags (avoid expensive 16-bit comparisons)
+    // These update when position changes, using simple logic
+    reg is_first_col_reg;  // = (out_col == 0)
+    reg is_last_col_reg;  // = (out_col == num_cols - 1)
+    reg is_first_row_reg;  // = (out_row == 0)
+    reg is_last_row_reg;  // = (out_row == num_rows - 1)
 
     // =========================================================================
     // Window Extraction Registers (filled over 3 fetch cycles)
@@ -182,51 +211,128 @@ module depthwise_conv_unit #(
     assign axis_data_out_tlast = out_last_reg;
 
     // =========================================================================
-    // Data Availability Logic
+    // Data Availability Logic - PIPELINED for timing closure
+    // The original combinational path through DSP48 multiplication was ~13ns.
+    // This version pipelines just the needed_beat computation (DSP48 is the main delay)
     // =========================================================================
-    wire is_last_output_row = (out_row == num_rows - 1);
+
+    // --- Combinational boundary flags (fast LUT logic) ---
+    // Use registered row flags where possible for timing
+    wire is_last_output_row = is_last_row_reg;  // Pre-computed registered value
     wire is_last_output_col = (out_col == num_cols - 1);
     wire is_last_chan_beat = (out_chan_beat == num_chan_beats - 1);
-
-    // Current output beat index (computed from position)
-    wire [31:0] current_out_beat = out_row * (num_cols * num_chan_beats) + 
-                                   out_col * num_chan_beats + 
-                                   out_chan_beat;
     wire is_last_output_beat = is_last_output_row && is_last_output_col && is_last_chan_beat;
 
-    wire [15:0] needed_beat = is_last_output_col ?
-                              (out_col * num_chan_beats + out_chan_beat) :
-                              ((out_col + 1) * num_chan_beats + out_chan_beat);
+    // --- Stage 1 (registered): Pre-compute needed_beat for NEXT cycle ---
+    // We register this computation to break the DSP48 critical path.
+    // The key insight: we compute needed_beat AHEAD of time, anticipating
+    // the position we'll be checking next.
+    
+    reg [31:0] needed_beat_r;
+    reg is_last_output_row_r;
+
+    // Stage 1: Compute next_col_beat through DSP (no comparison in path)
+    reg [31:0] next_col_beat_r;
+    reg is_last_output_col_d;  // Delayed comparison result for Stage 2
+    reg [15:0] num_chan_beats_d;  // Delayed for subtraction
+    reg [15:0] out_chan_beat_d;  // Delayed for addition
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            next_col_beat_r <= 32'd0;
+            is_last_output_col_d <= 1'b0;
+            num_chan_beats_d <= 16'd0;
+            out_chan_beat_d <= 16'd0;
+        end else begin
+            // Stage 1: Register the DSP result and save context for Stage 2
+            next_col_beat_r <= (out_col + 1) * num_chan_beats;
+            is_last_output_col_d <= is_last_output_col;
+            num_chan_beats_d <= num_chan_beats;
+            out_chan_beat_d <= out_chan_beat;
+        end
+    end
+
+    // Stage 2: Apply adjustment and add out_chan_beat
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            needed_beat_r <= 32'd0;
+            is_last_output_row_r <= 1'b0;
+        end else begin
+            is_last_output_row_r <= is_last_output_row;
+
+            // Adjust based on delayed is_last_output_col flag
+            // If was at last col, subtract num_chan_beats (to get current col * ncb)
+            if (is_last_output_col_d)
+                needed_beat_r <= next_col_beat_r - num_chan_beats_d + out_chan_beat_d;
+            else needed_beat_r <= next_col_beat_r + out_chan_beat_d;
+        end
+    end
+
+    // --- Combinational comparisons using registered needed_beat ---
+    // These comparisons now use the registered needed_beat_r from previous cycle.
+    // Since output position only changes in S_FETCH_DONE, and we check this in 
+    // S_PROCESS (after S_FETCH_DONE), the registered value is one cycle stale
+    // but reflects the PREVIOUS position. We need to use current position for
+    // the row comparisons but registered needed_beat for the beat comparison.
+    //
+    // IMPORTANT: After S_FETCH_DONE advances position, needed_beat_r will be
+    // updated after TWO clock edges (Stage 1 + Stage 2). So we need to wait
+    // two cycles for the pipeline to update.
+
+    reg [1:0] pipeline_countdown;  // Countdown for pipeline warmup
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pipeline_countdown <= 2'd0;
+        end else if (state == S_FETCH_DONE) begin
+            // Position is about to change, need 2 cycles for pipeline to update
+            pipeline_countdown <= 2'd2;
+        end else if (pipeline_countdown != 2'd0) begin
+            pipeline_countdown <= pipeline_countdown - 1'd1;
+        end
+    end
+
+    wire pipeline_valid = (pipeline_countdown == 2'd0);
 
     wire has_row_below_data = is_last_output_row ||
                               (in_row > out_row + 1) ||
-                              (in_row == out_row + 1 && in_beat_in_row > needed_beat);
+                              (in_row == out_row + 1 && in_beat_in_row > needed_beat_r[15:0]);
 
     wire has_current_row_data = (in_row > out_row) ||
-                                (in_row == out_row && in_beat_in_row > needed_beat);
+                                (in_row == out_row && in_beat_in_row > needed_beat_r[15:0]);
 
-    wire can_start_fetch = processing_enabled && has_row_below_data && 
-                           has_current_row_data && (!out_valid_reg || output_handshake);
+    wire can_start_fetch = processing_enabled && pipeline_valid &&
+                           has_row_below_data && has_current_row_data && 
+                           (!out_valid_reg || output_handshake);
 
-    // Beat addresses for window columns
-    wire [15:0] col_left = (out_col == 0) ? 16'd0 : out_col - 1;
-    wire [15:0] col_center = out_col;
-    wire [15:0] col_right = (out_col == num_cols - 1) ? num_cols - 1 : out_col + 1;
+    // Beat addresses for window columns - use pre-computed out_beat_in_row
+    // beat_center = out_beat_in_row (the current beat within the row)
+    // beat_left = out_beat_in_row - num_chan_beats (one column to the left)
+    // beat_right = out_beat_in_row + num_chan_beats (one column to the right)
+    // Handle edge cases: left edge repeats, right edge repeats
+    wire [15:0] beat_center = out_beat_in_row;
 
-    wire [15:0] beat_left = col_left * num_chan_beats + out_chan_beat;
-    wire [15:0] beat_center = col_center * num_chan_beats + out_chan_beat;
-    wire [15:0] beat_right = col_right * num_chan_beats + out_chan_beat;
+    // Compute both possibilities in parallel - no comparison in adder path
+    wire [15:0] beat_left_normal = out_beat_in_row - num_chan_beats;
+    wire [15:0] beat_right_normal = out_beat_in_row + num_chan_beats;
 
-    // Row indices in circular buffer
-    wire [1:0] row_above_idx = (out_row == 0) ? 2'd0 : (out_row - 1) % 3;
-    wire [1:0] row_center_idx = out_row % 3;
-    wire [1:0] row_below_idx = (out_row == num_rows - 1) ? 2'd0 : (out_row + 1) % 3;
+    // MUX using REGISTERED edge flags (no carry chain in this path)
+    wire [15:0] beat_left = is_first_col_reg ? out_beat_in_row : beat_left_normal;
+    wire [15:0] beat_right = is_last_col_reg ? out_beat_in_row : beat_right_normal;
 
-    // Border flags
-    wire is_top_row = (out_row == 0);
-    wire is_bottom_row = (out_row == num_rows - 1);
-    wire is_left_col = (out_col == 0);
-    wire is_right_col = (out_col == num_cols - 1);
+    // Row indices in circular buffer - use pre-computed mod3 for timing closure
+    // Simple increment/decrement mod 3: 0→1→2→0 or 0→2→1→0
+    wire [1:0] row_center_idx = out_row_mod3;
+    wire [1:0] row_above_idx = (out_row == 0) ? 2'd0 : 
+                               (out_row_mod3 == 2'd0) ? 2'd2 : out_row_mod3 - 1;
+    wire [1:0] row_below_idx = (out_row == num_rows - 1) ? 2'd0 :
+                               (out_row_mod3 == 2'd2) ? 2'd0 : out_row_mod3 + 1;
+
+    // Border flags - use pre-computed registered values for timing closure
+    wire is_top_row = is_first_row_reg;
+    wire is_bottom_row = is_last_row_reg;
+    wire is_left_col = is_first_col_reg;
+    wire is_right_col = is_last_col_reg;
 
     // =========================================================================
     // FSM State Register
@@ -248,8 +354,8 @@ module depthwise_conv_unit #(
             end
 
             S_LOAD_KERNEL: begin
-                if (kernel_load_cnt >= total_kernel_beats - 1 && kernel_handshake)
-                    next_state = S_PROCESS;
+                // Use pre-computed flag to avoid 16-bit comparison in critical path
+                if (kernel_load_almost_done && kernel_handshake) next_state = S_PROCESS;
             end
 
             S_PROCESS: begin
@@ -303,27 +409,56 @@ module depthwise_conv_unit #(
     end
 
     // =========================================================================
-    // Kernel Loading
+    // Kernel Loading - Pipelined for timing closure
+    // The kernel load path uses a 2-stage pipeline:
+    //   Stage 1: Compute write address (channel group) and coefficient index
+    //   Stage 2: Register the data and write enables, then write to kernel_mem
     // =========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            kernel_load_cnt  <= 16'd0;
+            kernel_load_cnt <= 16'd0;
             kernel_coeff_idx <= 4'd0;
+            kernel_chan_group <= 4'd0;
+            kernel_load_almost_done <= 1'b0;
         end else if (state == S_IDLE) begin
-            kernel_load_cnt  <= 16'd0;
+            kernel_load_cnt <= 16'd0;
             kernel_coeff_idx <= 4'd0;
+            kernel_chan_group <= 4'd0;
+            kernel_load_almost_done <= 1'b0;
         end else if (state == S_LOAD_KERNEL && kernel_handshake) begin
             kernel_load_cnt <= kernel_load_cnt + 1;
-            if (kernel_coeff_idx == KERNEL_SIZE - 1) kernel_coeff_idx <= 4'd0;
-            else kernel_coeff_idx <= kernel_coeff_idx + 1;
+            // Pre-compute "almost done" flag - true when we're at second-to-last beat
+            // On next handshake, kernel loading will complete
+            kernel_load_almost_done <= (kernel_load_cnt == total_kernel_beats - 2);
+            if (kernel_coeff_idx == KERNEL_SIZE - 1) begin
+                kernel_coeff_idx  <= 4'd0;
+                kernel_chan_group <= kernel_chan_group + 1;
+            end else begin
+                kernel_coeff_idx <= kernel_coeff_idx + 1;
+            end
         end
     end
 
-    // Kernel memory write (synchronous for BRAM inference)
+    // Stage 2: Register write data and enables
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            kernel_wr_en_d      <= 1'b0;
+            kernel_coeff_idx_d  <= 4'd0;
+            kernel_chan_group_d <= 4'd0;
+            kernel_data_d       <= {INPUT_WIDTH{1'b0}};
+        end else begin
+            kernel_wr_en_d      <= (state == S_LOAD_KERNEL) && kernel_handshake;
+            kernel_coeff_idx_d  <= kernel_coeff_idx;
+            kernel_chan_group_d <= kernel_chan_group;
+            kernel_data_d       <= axis_kernel_in_tdata;
+        end
+    end
+
+    // Kernel memory write using pipelined signals
     always @(posedge clk) begin
-        if (state == S_LOAD_KERNEL && kernel_handshake) begin
-            kernel_mem[kernel_load_cnt / KERNEL_SIZE][kernel_coeff_idx*INPUT_WIDTH +: INPUT_WIDTH] 
-                <= axis_kernel_in_tdata;
+        if (kernel_wr_en_d) begin
+            kernel_mem[kernel_chan_group_d][kernel_coeff_idx_d*INPUT_WIDTH +: INPUT_WIDTH] 
+                <= kernel_data_d;
         end
     end
 
@@ -336,11 +471,13 @@ module depthwise_conv_unit #(
             in_col         <= 16'd0;
             in_chan_beat   <= 16'd0;
             in_beat_in_row <= 16'd0;
+            in_row_mod3    <= 2'd0;
         end else if (state == S_IDLE) begin
             in_row         <= 16'd0;
             in_col         <= 16'd0;
             in_chan_beat   <= 16'd0;
             in_beat_in_row <= 16'd0;
+            in_row_mod3    <= 2'd0;
         end else if (input_handshake) begin
             if (in_chan_beat == num_chan_beats - 1) begin
                 in_chan_beat <= 16'd0;
@@ -348,6 +485,8 @@ module depthwise_conv_unit #(
                     in_col         <= 16'd0;
                     in_row         <= in_row + 1;
                     in_beat_in_row <= 16'd0;
+                    // Increment mod 3: 0→1→2→0
+                    in_row_mod3    <= (in_row_mod3 == 2'd2) ? 2'd0 : in_row_mod3 + 1;
                 end else begin
                     in_col         <= in_col + 1;
                     in_beat_in_row <= in_beat_in_row + 1;
@@ -360,9 +499,10 @@ module depthwise_conv_unit #(
     end
 
     // Line buffer write (synchronous for BRAM inference)
+    // Uses pre-computed in_row_mod3 for timing closure
     always @(posedge clk) begin
         if (input_handshake) begin
-            case (in_row % 3)
+            case (in_row_mod3)
                 2'd0: line_buf_0[in_beat_in_row] <= axis_data_in_tdata;
                 2'd1: line_buf_1[in_beat_in_row] <= axis_data_in_tdata;
                 2'd2: line_buf_2[in_beat_in_row] <= axis_data_in_tdata;
@@ -380,12 +520,24 @@ module depthwise_conv_unit #(
             out_chan_beat      <= 16'd0;
             out_beat_cnt       <= 32'd0;
             processing_enabled <= 1'b0;
+            out_row_mod3       <= 2'd0;
+            out_beat_in_row    <= 16'd0;
+            is_first_col_reg   <= 1'b1;  // Start at col 0
+            is_last_col_reg    <= 1'b0;  // Computed after config
+            is_first_row_reg   <= 1'b1;  // Start at row 0
+            is_last_row_reg    <= 1'b0;  // Computed after config
         end else if (state == S_IDLE) begin
             out_row            <= 16'd0;
             out_col            <= 16'd0;
             out_chan_beat      <= 16'd0;
             out_beat_cnt       <= 32'd0;
             processing_enabled <= 1'b0;
+            out_row_mod3       <= 2'd0;
+            out_beat_in_row    <= 16'd0;
+            is_first_col_reg   <= 1'b1;  // Start at col 0
+            is_last_col_reg    <= (num_cols == 16'd1);  // Edge case: single column
+            is_first_row_reg   <= 1'b1;  // Start at row 0
+            is_last_row_reg    <= (num_rows == 16'd1);  // Edge case: single row
         end else begin
             // Enable processing once we have some input
             if (in_row >= 1 || (in_row == 0 && in_col > 0)) processing_enabled <= 1'b1;
@@ -395,20 +547,37 @@ module depthwise_conv_unit #(
 
             // Advance output position AFTER the fetch completes (in S_FETCH_DONE)
             if (state == S_FETCH_DONE) begin
+                // Always increment beat_in_row (wraps at end of row)
                 if (out_chan_beat == num_chan_beats - 1) begin
                     out_chan_beat <= 16'd0;
                     if (out_col == num_cols - 1) begin
+                        // Moving to column 0 of next row
                         out_col <= 16'd0;
                         out_row <= out_row + 1;
+                        out_beat_in_row <= 16'd0;
+                        out_row_mod3 <= (out_row_mod3 == 2'd2) ? 2'd0 : out_row_mod3 + 1;
+                        is_first_col_reg <= 1'b1;
+                        is_last_col_reg <= (num_cols == 16'd1);
+                        // Update row edge flags for next row
+                        is_first_row_reg <= 1'b0;  // No longer at first row
+                        // Will be at last row if current row is num_rows - 2
+                        is_last_row_reg <= (out_row == num_rows - 2);
                     end else begin
+                        // Moving to next column
                         out_col <= out_col + 1;
+                        out_beat_in_row <= out_beat_in_row + 1;
+                        is_first_col_reg <= 1'b0;  // No longer at first column
+                        // Will be at last col if current col is num_cols - 2
+                        is_last_col_reg <= (out_col == num_cols - 2);
                     end
                 end else begin
-                    out_chan_beat <= out_chan_beat + 1;
+                    out_chan_beat   <= out_chan_beat + 1;
+                    out_beat_in_row <= out_beat_in_row + 1;
                 end
             end
         end
     end
+
     // =========================================================================
     // Window Fetch: Capture metadata at start of fetch sequence
     // =========================================================================
@@ -449,19 +618,23 @@ module depthwise_conv_unit #(
 
     // =========================================================================
     // BRAM Read Address Generation
+    // Uses registered beat addresses (beat_left_r, beat_center_r, beat_right_r)
+    // to avoid is_last_output_col comparison in critical path.
+    // The addresses are captured when transitioning S_PROCESS -> S_FETCH_LEFT.
     // =========================================================================
     always @(posedge clk) begin
         case (state)
             S_PROCESS: begin
+                // When initiating fetch, set first address (left column)
                 if (next_state == S_FETCH_LEFT) lb_rd_addr <= beat_left;
             end
             S_FETCH_LEFT: begin
-                // Use combinational beat_center since position hasn't changed yet
-                lb_rd_addr <= beat_center;
+                // Use REGISTERED beat_center_r captured at start of fetch
+                lb_rd_addr <= beat_center_r;
             end
             S_FETCH_CTR: begin
-                // Use combinational beat_right since position hasn't changed yet
-                lb_rd_addr <= beat_right;
+                // Use REGISTERED beat_right_r captured at start of fetch
+                lb_rd_addr <= beat_right_r;
             end
             default: begin
                 // Hold address

@@ -41,12 +41,12 @@ for each channel $c$:
 
 ### Key Features
 
-- **8-lane parallel processing** (matches AXI-Stream bus width)
-- **BRAM-based line buffers** with sequential 3-cycle window fetch (left→center→right)
-- **Register-based kernel storage** to avoid BRAM fragmentation
-- **Zero padding** for image borders
-- **Pipelined datapath** with proper BRAM read latency handling
-- **Outputs raw INT32** (requantization handled by external `requant_unit`)
+-   **8-lane parallel processing** (matches AXI-Stream bus width)
+-   **BRAM-based line buffers** with sequential 3-cycle window fetch (left→center→right)
+-   **Register-based kernel storage** to avoid BRAM fragmentation
+-   **Zero padding** for image borders
+-   **Pipelined datapath** with proper BRAM read latency handling
+-   **Outputs raw INT32** (requantization handled by external `requant_unit`)
 
 ## Block Diagram
 
@@ -218,9 +218,9 @@ Three rows of the input image are stored in **true dual-port BRAMs** configured 
 (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] line_buf_2 [0:MAX_BEATS_ROW-1];
 ```
 
-- **Port A**: Write from input stream (during S_PROCESS/S_FETCH states)
-- **Port B**: Read for window extraction (sequential left/center/right)
-- Circular buffer indexing: `line_buf[in_row % 3]` stores current row
+-   **Port A**: Write from input stream (during S_PROCESS/S_FETCH states)
+-   **Port B**: Read for window extraction (sequential left/center/right)
+-   Circular buffer indexing: `line_buf[in_row % 3]` stores current row
 
 ### 2. Kernel Storage (Register-Based)
 
@@ -255,10 +255,10 @@ For each output pixel at (out_row, out_col), extract a 3×3 window across 3 fetc
 
 Border handling applies zero padding:
 
-- Top row (`out_row == 0`): Zero the "above" row
-- Bottom row (`out_row == H-1`): Zero the "below" row
-- Left column (`out_col == 0`): Zero the left column
-- Right column (`out_col == W-1`): Zero the right column
+-   Top row (`out_row == 0`): Zero the "above" row
+-   Bottom row (`out_row == H-1`): Zero the "below" row
+-   Left column (`out_col == 0`): Zero the left column
+-   Right column (`out_col == W-1`): Zero the right column
 
 ### 5. MAC Pipeline
 
@@ -296,9 +296,9 @@ prod[8] = win_row2[2] * kernel[8]  // bot-right
 
 **Example:** For 28×28×128 input:
 
-- Kernel loading: 16 × 9 = 144 cycles
-- Processing: 28 × 28 × 16 × 6 = 75,264 cycles (with fetch overhead)
-- Effective throughput: ~1 output beat per 6 cycles
+-   Kernel loading: 16 × 9 = 144 cycles
+-   Processing: 28 × 28 × 16 × 6 = 75,264 cycles (with fetch overhead)
+-   Effective throughput: ~1 output beat per 6 cycles
 
 > **Trade-off**: The 4-cycle window fetch (vs 1-cycle in LUTRAM design) reduces throughput but eliminates LUTRAM over-utilization.
 
@@ -315,10 +315,10 @@ prod[8] = win_row2[2] * kernel[8]  // bot-right
 
 ### Key Resource Notes
 
-- **LUTRAM = 0**: Critical improvement from original design (was 126% over-utilized)
-- **3 RAMB36**: One per line buffer, efficient 448×64 configuration
-- **8,479 registers**: Includes kernel storage (576 bits × 16 groups = 9,216 bits)
-- **Fmax**: ~73 MHz (out-of-context, can be improved with additional pipelining)
+-   **LUTRAM = 0**: Critical improvement from original design (was 126% over-utilized)
+-   **3 RAMB36**: One per line buffer, efficient 448×64 configuration
+-   **8,479 registers**: Includes kernel storage (576 bits × 16 groups = 9,216 bits)
+-   **Fmax**: ~73 MHz (out-of-context, can be improved with additional pipelining)
 
 ## Usage Example
 
@@ -431,8 +431,8 @@ SUMMARY: 6/6 tests passed - ALL TESTS PASSED!
 
 The initial design used 9 parallel line buffers (one per 3×3 window position) to enable single-cycle window extraction. This required:
 
-- 9 × (MAX_WIDTH × MAX_CHANNELS/8) × 64-bit memories
-- With MAX_WIDTH=64, MAX_CHANNELS=512: 9 × 4096 × 64 = 2.25 Mbit
+-   9 × (MAX_WIDTH × MAX_CHANNELS/8) × 64-bit memories
+-   With MAX_WIDTH=64, MAX_CHANNELS=512: 9 × 4096 × 64 = 2.25 Mbit
 
 This exceeded BRAM capacity and fell back to **LUTRAM**, consuming 22,016 LUTRAM sites (126% of available 17,400).
 
@@ -445,3 +445,165 @@ The redesigned architecture uses:
 3. **Register-based kernel storage** to avoid BRAM width fragmentation
 
 Trade-off: 4 extra cycles per output window, but **zero LUTRAM usage** and successful placement.
+
+## Timing Optimizations
+
+The original design achieved only **73.28 MHz** (WNS: -8.647 ns) against a 200 MHz target. Through systematic critical path analysis and pipelining, the design was improved to **156.25 MHz** - a **2.13x improvement**.
+
+### Summary of Optimizations
+
+| Optimization                     | Before     | After      | Improvement |
+| -------------------------------- | ---------- | ---------- | ----------- |
+| Initial baseline                 | 73.28 MHz  | -          | -           |
+| Pipelined `needed_beat`          | 73.28 MHz  | 79.62 MHz  | +6.34 MHz   |
+| Eliminated kernel division       | 79.62 MHz  | 101.08 MHz | +21.46 MHz  |
+| Pre-computed `out_row_mod3`      | 101.08 MHz | 103.46 MHz | +2.38 MHz   |
+| Pre-computed `out_beat_in_row`   | 103.46 MHz | 106.11 MHz | +2.65 MHz   |
+| Pre-computed `in_row_mod3`       | 106.11 MHz | 114.14 MHz | +8.03 MHz   |
+| Two-stage `needed_beat` pipeline | 114.14 MHz | 150.29 MHz | +36.15 MHz  |
+| Registered beat addresses        | 150.29 MHz | 150.76 MHz | +0.47 MHz   |
+| Pre-computed edge flags          | 150.76 MHz | 156.25 MHz | +5.49 MHz   |
+
+### Detailed Optimizations
+
+#### 1. Pipelined `needed_beat` Computation
+
+**Problem**: The `needed_beat` calculation (`out_col * num_chan_beats + out_chan_beat`) went through a DSP48 multiplier in a combinational path (~13.6 ns delay).
+
+**Solution**: Added a 2-stage pipeline:
+
+-   Stage 1: Register the DSP multiplication result
+-   Added `pipeline_valid` signal to handle pipeline warmup after position changes
+
+```verilog
+// Before: Combinational
+wire [31:0] needed_beat = out_col * num_chan_beats + out_chan_beat;
+
+// After: Registered with pipeline guard
+reg [31:0] needed_beat_r;
+reg pipeline_valid;
+```
+
+#### 2. Eliminated Kernel Loading Division
+
+**Problem**: The kernel write address computation used `kernel_load_cnt / KERNEL_SIZE` (division by 9), creating a 13-LUT decode chain.
+
+**Solution**: Replaced division with explicit counters:
+
+-   Added `kernel_chan_group` counter (0 to 15)
+-   Added `kernel_coeff_idx` counter (0 to 8)
+-   Added 2-stage pipeline for kernel memory writes
+
+```verilog
+// Before: Division
+kernel_mem[kernel_load_cnt / KERNEL_SIZE][...] <= ...
+
+// After: Explicit counters
+reg [3:0] kernel_coeff_idx;   // 0-8
+reg [3:0] kernel_chan_group;  // 0-15
+```
+
+#### 3. Pre-computed Modulo-3 Values
+
+**Problem**: The circular buffer indices used `out_row % 3` and `in_row % 3`, which synthesize to 6-level CARRY4 chains.
+
+**Solution**: Maintain pre-computed registers that update with simple increment logic:
+
+```verilog
+// out_row_mod3 tracks out_row % 3
+reg [1:0] out_row_mod3;
+
+// Update with simple 0→1→2→0 logic
+if (out_row_mod3 == 2'd2)
+    out_row_mod3 <= 2'd0;
+else
+    out_row_mod3 <= out_row_mod3 + 1;
+```
+
+#### 4. Pre-computed Beat Address Counter
+
+**Problem**: The beat address computation `out_col * num_chan_beats + out_chan_beat` required a multiplication in the critical path.
+
+**Solution**: Replace with a simple counter that tracks the same value:
+
+```verilog
+// out_beat_in_row = out_col * num_chan_beats + out_chan_beat
+reg [15:0] out_beat_in_row;
+
+// Increments each fetch, resets at row boundary
+if (end_of_row)
+    out_beat_in_row <= 16'd0;
+else
+    out_beat_in_row <= out_beat_in_row + 1;
+```
+
+#### 5. Two-stage `needed_beat` Pipeline
+
+**Problem**: The `is_last_output_col` comparison (16-bit equality check) created a 6-level CARRY4 chain feeding into the DSP input mux.
+
+**Solution**: Split into two pipeline stages:
+
+-   Stage 1: Compute `(out_col + 1) * num_chan_beats` unconditionally through DSP
+-   Stage 2: Apply correction based on delayed `is_last_output_col` flag
+
+```verilog
+// Stage 1: DSP computation (no comparison in path)
+reg [31:0] next_col_beat_r;
+reg is_last_output_col_d;
+
+always @(posedge clk) begin
+    next_col_beat_r <= (out_col + 1) * num_chan_beats;
+    is_last_output_col_d <= is_last_output_col;
+end
+
+// Stage 2: Correction using delayed flag
+always @(posedge clk) begin
+    if (is_last_output_col_d)
+        needed_beat_r <= next_col_beat_r - num_chan_beats_d + out_chan_beat_d;
+    else
+        needed_beat_r <= next_col_beat_r + out_chan_beat_d;
+end
+```
+
+#### 6. Pre-computed Edge Flags
+
+**Problem**: Row and column boundary checks (`out_col == 0`, `out_col == num_cols - 1`, etc.) are 16-bit comparisons creating carry chains in multiple paths.
+
+**Solution**: Maintain registered flags that update when position changes:
+
+```verilog
+reg is_first_col_reg;   // = (out_col == 0)
+reg is_last_col_reg;    // = (out_col == num_cols - 1)
+reg is_first_row_reg;   // = (out_row == 0)
+reg is_last_row_reg;    // = (out_row == num_rows - 1)
+
+// Update on position change
+if (moving_to_next_col) begin
+    is_first_col_reg <= 1'b0;
+    is_last_col_reg <= (out_col == num_cols - 2);
+end
+```
+
+### Remaining Critical Path
+
+After all optimizations, the critical path is in the **MAC (multiply-accumulate) datapath**:
+
+-   8-bit × 8-bit signed multiplications (LUT-based)
+-   9-product adder tree for 3×3 convolution
+-   Path delay: ~6.4 ns (156 MHz)
+
+To reach 200 MHz would require:
+
+1. Using DSP48 primitives for multiplications
+2. Additional pipeline stages in the MAC computation
+3. Restructuring the 9-product adder tree
+
+### Key Timing Principles Applied
+
+1. **Replace expensive operations with counters**: Modulo, division, and multiplication can often be replaced with simple counters that track the same value through increment/reset logic.
+
+2. **Pre-compute and register comparison results**: Wide comparisons (16-bit equality checks) create carry chains. Register the results and use delayed flags where semantic allows.
+
+3. **Pipeline DSP48 paths**: DSP48 multipliers have significant setup time requirements. Break combinational paths before DSP inputs.
+
+4. **Use 2-stage pipelines for complex decisions**: When a comparison affects DSP operand selection, compute both possibilities in Stage 1 and select in Stage 2 using the registered comparison result.
