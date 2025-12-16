@@ -2,7 +2,7 @@
 
 module stats_fifo #(
     parameter SUM_WIDTH    = 18,
-    parameter SUM_SQ_WIDTH = 24,
+    parameter SUM_SQ_WIDTH = 26,
     parameter DEPTH        = 32
 )(
     input  wire                   clk,
@@ -11,17 +11,19 @@ module stats_fifo #(
     // Write Interface (From Accumulator)
     input  wire [SUM_WIDTH-1:0]    s_sum_int,
     input  wire [SUM_SQ_WIDTH-1:0] s_sum_sq_int,
+    input  wire [15:0]             s_count,      // [NEW]
     input  wire                    s_valid,
-    output wire                    s_ready, // Full signal (optional check)
+    output wire                    s_ready, 
 
     // Read Interface (To Avg/Var Calc)
     output wire [SUM_WIDTH-1:0]    m_sum_int,
     output wire [SUM_SQ_WIDTH-1:0] m_sum_sq_int,
+    output wire [15:0]             m_count,      // [NEW]
     output wire                    m_valid,
-    input  wire                    m_ready  // Read Enable
+    input  wire                    m_ready 
 );
-
-    localparam TOTAL_WIDTH = SUM_WIDTH + SUM_SQ_WIDTH;
+    // [CHANGED] Add 16 bits for count
+    localparam TOTAL_WIDTH = SUM_WIDTH + SUM_SQ_WIDTH + 16;
     
     // Memory
     reg [TOTAL_WIDTH-1:0] mem [0:DEPTH-1];
@@ -31,23 +33,21 @@ module stats_fifo #(
 
     // Packing
     wire [TOTAL_WIDTH-1:0] write_data;
-    assign write_data = {s_sum_sq_int, s_sum_int};
+    assign write_data = {s_count, s_sum_sq_int, s_sum_int};
 
     // Unpacking
-    assign {m_sum_sq_int, m_sum_int} = mem[rd_ptr];
+    assign {m_count, m_sum_sq_int, m_sum_int} = mem[rd_ptr];
 
     // Status
     assign s_ready = (count < DEPTH);
     assign m_valid = (count > 0);
 
-    // Khởi tạo memory khi reset
     integer idx;
     always @(posedge clk) begin
         if (!aresetn) begin
             wr_ptr <= 0;
             rd_ptr <= 0;
             count  <= 0;
-            // Reset tất cả các ô nhớ về 0
             for (idx = 0; idx < DEPTH; idx = idx + 1) begin
                 mem[idx] <= 0;
             end

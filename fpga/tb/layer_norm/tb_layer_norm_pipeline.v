@@ -2,29 +2,24 @@
 
 module tb_layer_norm_pipelined;
 
-    // =========================================================
-    // 1. PARAMETERS
-    // =========================================================
+    // Parameters
     parameter DATA_WIDTH   = 8;
     parameter PARALLEL_N   = 8;
-    parameter BEAT_WIDTH   = 64;   // 8 * 8
+    parameter BEAT_WIDTH   = 64;   
     parameter FIFO_DEPTH   = 512;
-    parameter STAT_WIDTH   = 32;   // Q16.16
+    parameter STAT_WIDTH   = 32;   
     parameter SUM_WIDTH    = 18;
-    parameter SUM_SQ_WIDTH = 24;
+    parameter SUM_SQ_WIDTH = 26; // Match RTL
     parameter M_BITS       = 12;
 
     localparam CLK_PERIOD = 5.0;
-    localparam PACKET_LEN = 320;
-    localparam NUM_PACKETS = 4;
+    localparam MAX_PACKET_LEN = 800; // Buffer size
+    localparam NUM_PACKETS = 3;      // Testing 3 distinct lengths
 
-    // =========================================================
-    // 2. SIGNALS
-    // =========================================================
+    // Signals
     reg clk;
     reg aresetn;
     
-    // DUT Interface
     reg [BEAT_WIDTH-1:0]   s_axis_tdata;
     reg                    s_axis_tvalid;
     reg                    s_axis_tlast;
@@ -38,19 +33,19 @@ module tb_layer_norm_pipelined;
     wire                   m_axis_tlast;
     reg                    m_axis_tready;
 
-    // =========================================================
-    // 3. STORAGE FOR VERIFICATION
-    // =========================================================
-    reg signed [7:0] history_buffer [0:NUM_PACKETS-1][0:PACKET_LEN-1];
-    reg signed [7:0] input_buffer [0:PACKET_LEN-1];
-    reg signed [7:0] expected_buffer [0:PACKET_LEN-1];
-    
-    // Synchronization Flag: Tells Monitor that history_buffer[pkt] is ready
+    // Test Config
+    // Packet 0: 128 (Stage 1)
+    // Packet 1: 160 (Stage 2)
+    // Packet 2: 320 (Stage 3)
+    integer packet_lengths [0:2];
+
+    // Verification Storage
+    reg signed [7:0] history_buffer [0:NUM_PACKETS-1][0:MAX_PACKET_LEN-1];
+    reg signed [7:0] input_buffer [0:MAX_PACKET_LEN-1];
+    reg signed [7:0] expected_buffer [0:MAX_PACKET_LEN-1];
     reg packet_gen_done [0:NUM_PACKETS-1];
 
-    // =========================================================
-    // 4. DUT INSTANTIATION
-    // =========================================================
+    // DUT
     layer_norm #(
         .DATA_WIDTH(DATA_WIDTH),
         .PARALLEL_N(PARALLEL_N),
@@ -75,9 +70,7 @@ module tb_layer_norm_pipelined;
         .m_axis_tready(m_axis_tready)
     );
 
-    // =========================================================
-    // 5. HELPER FUNCTIONS & GOLDEN MODEL
-    // =========================================================
+    // Helpers
     function real q16_to_real(input signed [31:0] val);
         q16_to_real = $itor(val) / 65536.0;
     endfunction
@@ -98,23 +91,22 @@ module tb_layer_norm_pipelined;
         end
     endfunction
 
-    // Golden Calculation Task
-    task calc_golden_model(input integer id);
+    // Golden Model with DYNAMIC LENGTH
+    task calc_golden_model(input integer id, input integer len);
         integer i;
         real sum, sum_sq, mean, var, inv_std, val, norm;
         real r_gamma, r_beta;
     begin
         sum = 0; sum_sq = 0;
         
-        // 1. Calculate Stats
-        for (i=0; i<PACKET_LEN; i=i+1) begin
+        for (i=0; i<len; i=i+1) begin
             val = $itor(input_buffer[i]);
             sum = sum + val;
             sum_sq = sum_sq + (val*val);
         end
         
-        mean = sum / PACKET_LEN;
-        var  = (sum_sq / PACKET_LEN) - (mean * mean);
+        mean = sum / len;
+        var  = (sum_sq / len) - (mean * mean);
         
         if (var <= 0.0001) inv_std = 0;
         else inv_std = 1.0 / $sqrt(var);
@@ -122,14 +114,12 @@ module tb_layer_norm_pipelined;
         r_gamma = q16_to_real(cfg_gamma);
         r_beta  = q16_to_real(cfg_beta);
 
-        // DEBUG PRINT
         $display("---------------------------------------------------------------");
-        $display("[Golden Pkt %0d] Mean=%.4f, Var=%.4f, InvStd=%.4f, Gamma=%.4f, Beta=%.4f", 
-                 id, mean, var, inv_std, r_gamma, r_beta);
+        $display("[Golden Pkt %0d] Len=%0d, Mean=%.4f, Var=%.4f, InvStd=%.4f", 
+                 id, len, mean, var, inv_std);
         $display("---------------------------------------------------------------");
         
-        // 2. Calculate Expected Output
-        for (i=0; i<PACKET_LEN; i=i+1) begin
+        for (i=0; i<len; i=i+1) begin
             val = $itor(input_buffer[i]);
             norm = (val - mean) * inv_std * r_gamma + r_beta;
             expected_buffer[i] = clamp_to_int8(round_half_up(norm));
@@ -137,28 +127,28 @@ module tb_layer_norm_pipelined;
     end
     endtask
 
-    // =========================================================
-    // 6. MAIN TEST SCENARIO
-    // =========================================================
+    // Main
     integer k;
-
     initial begin
         clk = 0;
         forever #(CLK_PERIOD/2) clk = ~clk;
     end
 
     initial begin
-        $display("=== START PIPELINED LAYER NORM TEST ===");
+        $display("=== START DYNAMIC LENGTH TEST ===");
         
-        // Initialize Sync Flags
+        // Setup Lengths
+        packet_lengths[0] = 160; // Stage 1
+        packet_lengths[1] = 800; // Stage 2
+        packet_lengths[2] = 320; // Stage 3
+        
         for(k=0; k<NUM_PACKETS; k=k+1) packet_gen_done[k] = 0;
 
         aresetn = 0;
         s_axis_tdata = 0; s_axis_tvalid = 0; s_axis_tlast = 0;
         m_axis_tready = 1; 
         
-        // Config
-        cfg_gamma = real_to_q16(1.5); 
+        cfg_gamma = real_to_q16(10); 
         cfg_beta  = real_to_q16(5.0);
 
         #(CLK_PERIOD * 10);
@@ -170,131 +160,94 @@ module tb_layer_norm_pipelined;
             monitor_thread();
         join
 
-        $display("\n=== ALL PIPELINE TESTS PASSED ===");
+        $display("\n=== ALL TESTS PASSED ===");
         $finish;
     end
 
-    // ---------------------------------------------------------
-    // THREAD A: DRIVER
-    // ---------------------------------------------------------
+    // Driver
     task driver_thread;
-        integer pkt_id, beat_idx, elem_idx, global_idx;
+        integer pkt_id, beat_idx, elem_idx, global_idx, current_len, num_beats;
         reg [63:0] r_data;
-        reg [63:0] current_packet_data [0:39]; // Temp storage for driver
+        reg [63:0] packet_data_store [0:99]; // Max 800 elems = 100 beats
     begin
-        // Wait for reset release
         @(posedge clk);
         while (!aresetn) @(posedge clk);
         
         for (pkt_id = 0; pkt_id < NUM_PACKETS; pkt_id = pkt_id + 1) begin
-            $display("[Driver] Generating Pkt %0d...", pkt_id);
+            current_len = packet_lengths[pkt_id];
+            num_beats = current_len / 8;
+
+            $display("[Driver] Generating Pkt %0d (Len=%0d, Beats=%0d)", pkt_id, current_len, num_beats);
             
-            // ---------------------------------------------------------
-            // STEP 1: PRE-GENERATE DATA & SIGNAL MONITOR
-            // ---------------------------------------------------------
-            // We generate the full packet *before* driving the bus.
-            // This ensures the Monitor has the data ready to calculate Golden Model
-            // simultaneously while we are driving or waiting.
             global_idx = 0;
-            for (beat_idx = 0; beat_idx < 40; beat_idx = beat_idx + 1) begin
+            // Generate Data
+            for (beat_idx = 0; beat_idx < num_beats; beat_idx = beat_idx + 1) begin
                 r_data = {$random, $random};
-                current_packet_data[beat_idx] = r_data; // Store for driving later
+                packet_data_store[beat_idx] = r_data;
                 
-                // Store to History Buffer for Monitor
                 for (elem_idx = 0; elem_idx < 8; elem_idx = elem_idx + 1) begin
                    history_buffer[pkt_id][global_idx] = r_data[elem_idx*8 +: 8];
                    global_idx = global_idx + 1;
                 end
             end
-            // Signal Monitor: "Data for Pkt X is ready in history_buffer"
             packet_gen_done[pkt_id] = 1; 
 
-            // ---------------------------------------------------------
-            // STEP 2: DRIVE THE BUS
-            // ---------------------------------------------------------
-            $display("[Driver] Sending Packet %0d at time %0t", pkt_id, $time);
-            for (beat_idx = 0; beat_idx < 40; beat_idx = beat_idx + 1) begin
+            // Drive Bus
+            for (beat_idx = 0; beat_idx < num_beats; beat_idx = beat_idx + 1) begin
                 s_axis_tvalid <= 1;
-                s_axis_tdata  <= current_packet_data[beat_idx];
-                s_axis_tlast  <= (beat_idx == 39);
+                s_axis_tdata  <= packet_data_store[beat_idx];
+                s_axis_tlast  <= (beat_idx == num_beats - 1);
                 
-                // Handshake
                 @(posedge clk);
                 while (!s_axis_tready) @(posedge clk);
             end
             
-            // Packet Done
             s_axis_tvalid <= 0;
             s_axis_tlast  <= 0;
             s_axis_tdata  <= 0;
 
-            // ---------------------------------------------------------
-            // STEP 3: PRECISE GAP (30 CYCLES)
-            // ---------------------------------------------------------
-            // The user requested: "Packet 0 send all input data, then 
-            // 30 clocks later, Packet 1 send input data".
-            if (pkt_id < NUM_PACKETS - 1) begin
-                $display("[Driver] Gap: Waiting 30 cycles before sending next packet...");
-//                repeat(100) @(posedge clk); 
-            end
+            // Small gap to separate packets slightly in waveform for visual check
+            repeat(150) @(posedge clk); 
         end
-        $display("[Driver] Finished sending all packets.");
     end
     endtask
 
-    // ---------------------------------------------------------
-    // THREAD B: MONITOR
-    // ---------------------------------------------------------
+    // Monitor
     task monitor_thread;
-        integer pkt_id, out_cnt, elem_idx, global_idx, err_cnt;
+        integer pkt_id, out_cnt, elem_idx, global_idx, err_cnt, current_len, num_beats;
         integer diff, i;
         reg signed [7:0] rtl_val, exp_val;
-        real rtl_mean, rtl_inv_sqrt, rtl_gamma, rtl_beta;
     begin
         for (pkt_id = 0; pkt_id < NUM_PACKETS; pkt_id = pkt_id + 1) begin
             
-            // 1. Wait until Driver has generated the data for this packet
             wait (packet_gen_done[pkt_id] == 1);
+            current_len = packet_lengths[pkt_id];
+            num_beats   = current_len / 8;
 
-            // 2. Prepare Golden Model
-            // (Now safe because driver has finished filling history_buffer[pkt_id])
-            for (i=0; i<PACKET_LEN; i=i+1) begin
+            // Prepare Golden
+            for (i=0; i<current_len; i=i+1) begin
                 input_buffer[i] = history_buffer[pkt_id][i];
             end
-            calc_golden_model(pkt_id); 
-            
-            $display("[Monitor] Waiting for Packet %0d output...", pkt_id);
+            calc_golden_model(pkt_id, current_len); 
             
             out_cnt = 0;
             global_idx = 0;
             err_cnt = 0;
 
-            // Wait for first Valid Beat
             while (!m_axis_tvalid) @(posedge clk);
 
-            // DEBUG PROBE
-            rtl_mean     = q16_to_real(dut.delayed_mean[1]);
-            rtl_inv_sqrt = q16_to_real(dut.peano_inv_sqrt);
-            rtl_gamma    = q16_to_real(dut.cfg_gamma);
-            rtl_beta     = q16_to_real(dut.cfg_beta);
-
-            $display("[RTL Pkt %0d Probe] Mean=%.4f, InvSqrt=%.4f, Gamma=%.4f, Beta=%.4f",
-                     pkt_id, rtl_mean, rtl_inv_sqrt, rtl_gamma, rtl_beta);
-            
-            // Verify loop
-            while (out_cnt < 40) begin
+            // Verify
+            while (out_cnt < num_beats) begin
                 while (!m_axis_tvalid) @(posedge clk);
 
-                // Check TLAST
-                if (out_cnt == 39 && !m_axis_tlast) begin
-                    $display("[FAIL] Packet %0d: TLAST missing on last beat!", pkt_id);
+                if (out_cnt == num_beats-1 && !m_axis_tlast) begin
+                    $display("[FAIL] Packet %0d: TLAST missing!", pkt_id);
                     err_cnt = err_cnt + 1;
-                end else if (out_cnt != 39 && m_axis_tlast) begin
-                    $display("[FAIL] Packet %0d: TLAST early at beat %0d!", pkt_id, out_cnt);
+                end else if (out_cnt != num_beats-1 && m_axis_tlast) begin
+                    $display("[FAIL] Packet %0d: TLAST early!", pkt_id);
                     err_cnt = err_cnt + 1;
                 end
 
-                // Check Data
                 for (elem_idx = 0; elem_idx < 8; elem_idx = elem_idx + 1) begin
                     rtl_val = $signed(m_axis_tdata[elem_idx*8 +: 8]);
                     exp_val = expected_buffer[global_idx];
@@ -303,9 +256,9 @@ module tb_layer_norm_pipelined;
                     if (diff < 0) diff = -diff;
                     
                     if (diff > 1) begin
-                        if (err_cnt < 10) 
+                        if (err_cnt < 5) 
                             $display("[FAIL] Pkt%0d Idx%0d: Exp=%d, Act=%d", pkt_id, global_idx, exp_val, rtl_val);
-                        err_cnt = err_cnt + 1;
+                            err_cnt = err_cnt + 1;
                     end
                     global_idx = global_idx + 1;
                 end
@@ -315,10 +268,7 @@ module tb_layer_norm_pipelined;
             end
             
             if (err_cnt == 0) $display("[PASS] Packet %0d Verified.", pkt_id);
-            else begin
-                $display("[FAIL] Packet %0d had %0d errors. Stopping.", pkt_id, err_cnt);
-                $stop;
-            end
+            else $stop;
         end
     end
     endtask

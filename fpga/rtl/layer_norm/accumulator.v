@@ -5,7 +5,7 @@ module accumulator #(
     parameter NUM_ELEMS  = 8,
     parameter ELEM_WIDTH = 8,
     parameter SUM_WIDTH  = 18,      
-    parameter SUM_SQ_WIDTH = 24     
+    parameter SUM_SQ_WIDTH = 26     
 )(
     input  wire                   clk,
     input  wire                   aresetn,
@@ -17,6 +17,8 @@ module accumulator #(
 
     output reg signed [SUM_WIDTH-1:0]    sum_out_int,
     output reg signed [SUM_SQ_WIDTH-1:0] sum_sq_out_int,
+    // [NEW] Output the count of elements
+    output reg [15:0]                    count_out, 
     output reg                           stats_valid
 );
     assign s_axis_tready = 1'b1; 
@@ -27,7 +29,6 @@ module accumulator #(
     reg [BEAT_WIDTH-1:0] r_tdata;
     reg                  r_tvalid;
     reg                  r_tlast;
-    
     always @(posedge clk) begin
         if (!aresetn) begin
             r_tvalid <= 0;
@@ -49,13 +50,9 @@ module accumulator #(
     endgenerate
 
     // =========================================================================
-    // STAGE 1: SQUARING (Multiplication Only)
+    // STAGE 1: SQUARING (DSP)
     // =========================================================================
-    
-    // [FIX] Force usage of DSP48 blocks for multiplication.
-    // This replaces the slow LUT/CARRY4 logic chains (7 levels) with a single DSP block (1 level).
     (* use_dsp = "yes" *) reg signed [2*ELEM_WIDTH-1:0] st1_sq [0:NUM_ELEMS-1];
-    
     reg signed [ELEM_WIDTH-1:0]   st1_val [0:NUM_ELEMS-1];
     reg                           st1_valid, st1_last;
     integer j;
@@ -64,32 +61,28 @@ module accumulator #(
         if (!aresetn) begin
             st1_valid <= 0;
             st1_last <= 0;
-            // Reset for loop inference
             for (j=0; j<NUM_ELEMS; j=j+1) begin
                 st1_sq[j]  <= 0;
                 st1_val[j] <= 0;
             end
         end else begin
-            st1_valid <= r_tvalid; 
+            st1_valid <= r_tvalid;
             st1_last  <= r_tlast;
-            
             if (r_tvalid) begin
                 for (j=0; j<NUM_ELEMS; j=j+1) begin
-                    st1_sq[j]  <= el[j] * el[j]; // Mapped to DSP
-                    st1_val[j] <= el[j];         
+                    st1_sq[j]  <= el[j] * el[j];
+                    st1_val[j] <= el[j];
                 end
             end
         end
     end
 
     // =========================================================================
-    // STAGE 2: PAIRWISE SUM (Add Depth 1)
+    // STAGE 2: PAIRWISE SUM
     // =========================================================================
-    
     reg signed [ELEM_WIDTH:0]     st2_pair_sum [0:3];
     reg signed [2*ELEM_WIDTH:0]   st2_pair_sq_sum [0:3]; 
     reg                           st2_valid, st2_last;
-    
     always @(posedge clk) begin
         if (!aresetn) begin
             st2_valid <= 0;
@@ -100,13 +93,10 @@ module accumulator #(
             if (st1_valid) begin
                 st2_pair_sum[0]    <= st1_val[0] + st1_val[1];
                 st2_pair_sq_sum[0] <= st1_sq[0]  + st1_sq[1];
-                
                 st2_pair_sum[1]    <= st1_val[2] + st1_val[3];
                 st2_pair_sq_sum[1] <= st1_sq[2]  + st1_sq[3];
-                
                 st2_pair_sum[2]    <= st1_val[4] + st1_val[5];
                 st2_pair_sq_sum[2] <= st1_sq[4]  + st1_sq[5];
-                
                 st2_pair_sum[3]    <= st1_val[6] + st1_val[7];
                 st2_pair_sq_sum[3] <= st1_sq[6]  + st1_sq[7];
             end
@@ -114,13 +104,11 @@ module accumulator #(
     end
 
     // =========================================================================
-    // STAGE 3: QUAD SUM (Add Depth 1)
+    // STAGE 3: QUAD SUM
     // =========================================================================
-    
     reg signed [ELEM_WIDTH+1:0]   st3_quad_sum [0:1];
     reg signed [2*ELEM_WIDTH+1:0]   st3_quad_sq_sum [0:1];
     reg                           st3_valid, st3_last;
-    
     always @(posedge clk) begin
         if (!aresetn) begin
             st3_valid <= 0;
@@ -131,7 +119,6 @@ module accumulator #(
             if (st2_valid) begin
                 st3_quad_sum[0]    <= st2_pair_sum[0] + st2_pair_sum[1];
                 st3_quad_sq_sum[0] <= st2_pair_sq_sum[0] + st2_pair_sq_sum[1];
-                
                 st3_quad_sum[1]    <= st2_pair_sum[2] + st2_pair_sum[3];
                 st3_quad_sq_sum[1] <= st2_pair_sq_sum[2] + st2_pair_sq_sum[3];
             end
@@ -139,13 +126,11 @@ module accumulator #(
     end
 
     // =========================================================================
-    // STAGE 4: FINAL BEAT SUM (Add Depth 1)
+    // STAGE 4: FINAL BEAT SUM
     // =========================================================================
-    
     reg signed [15:0] st4_beat_sum;
     reg signed [19:0] st4_beat_sum_sq;
     reg               st4_valid, st4_last;
-    
     always @(posedge clk) begin
         if (!aresetn) begin
             st4_valid <= 0;
@@ -161,32 +146,44 @@ module accumulator #(
     end
 
     // =========================================================================
-    // STAGE 5: ACCUMULATION (Add Depth 1)
+    // STAGE 5: ACCUMULATION & ELEMENT COUNTING
     // =========================================================================
-    
     reg signed [SUM_WIDTH-1:0]    acc_sum;
     reg signed [SUM_SQ_WIDTH-1:0] acc_sum_sq;
+    reg [15:0]                    current_count; // [NEW] Internal Counter
 
     always @(posedge clk) begin
         if (!aresetn) begin
-            acc_sum <= 0;
-            acc_sum_sq <= 0;
-            sum_out_int <= 0; sum_sq_out_int <= 0; stats_valid <= 0;
+            acc_sum     <= 0;
+            acc_sum_sq  <= 0;
+            current_count <= 0;
+            
+            sum_out_int <= 0; 
+            sum_sq_out_int <= 0; 
+            count_out   <= 0;
+            stats_valid <= 0;
         end else begin
             stats_valid <= 0;
+            
             if (st4_valid) begin
                 if (st4_last) begin
                     // Final Output
                     sum_out_int    <= acc_sum + st4_beat_sum;
                     sum_sq_out_int <= acc_sum_sq + st4_beat_sum_sq;
+                    // [NEW] Output Total Count
+                    count_out      <= current_count + NUM_ELEMS; 
                     stats_valid    <= 1;
+                    
                     // Reset
-                    acc_sum     <= 0;
-                    acc_sum_sq  <= 0;
+                    acc_sum       <= 0;
+                    acc_sum_sq    <= 0;
+                    current_count <= 0;
                 end else begin
                     // Accumulate
-                    acc_sum     <= acc_sum + st4_beat_sum;
-                    acc_sum_sq  <= acc_sum_sq + st4_beat_sum_sq;
+                    acc_sum       <= acc_sum + st4_beat_sum;
+                    acc_sum_sq    <= acc_sum_sq + st4_beat_sum_sq;
+                    // [NEW] Increment Count
+                    current_count <= current_count + NUM_ELEMS;
                 end
             end
         end

@@ -34,11 +34,13 @@ module layer_norm #(
     wire                  sf_valid, sf_last, sf_ready;
     wire signed [SUM_WIDTH-1:0]    acc_sum;
     wire signed [SUM_SQ_WIDTH-1:0] acc_sum_sq;
+    wire signed [15:0]             count_acc_fifo; 
     wire                           acc_valid, acc_in_ready;
     wire signed [SUM_WIDTH-1:0]    buff_sum;
     wire signed [SUM_SQ_WIDTH-1:0] buff_sum_sq;
     wire                           buff_valid, buff_read_en;
     wire signed [STAT_WIDTH-1:0]   calc_mean, calc_var;
+    wire signed [15:0]             count_fifo_avg;
     wire                           calc_valid;
     wire signed [STAT_WIDTH-1:0]   peano_inv_sqrt;
     wire                           peano_valid;
@@ -93,15 +95,16 @@ module layer_norm #(
         .clk(clk), .aresetn(aresetn),
         .s_axis_tdata(sf_data), .s_axis_tvalid(sf_valid), .s_axis_tlast(sf_last), 
         .s_axis_tready(acc_in_ready),
-        .sum_out_int(acc_sum), .sum_sq_out_int(acc_sum_sq), .stats_valid(acc_valid)
+        .sum_out_int(acc_sum), .sum_sq_out_int(acc_sum_sq), .stats_valid(acc_valid),
+        .count_out(count_acc_fifo)
     );
 
     stats_fifo #(
         .SUM_WIDTH(SUM_WIDTH), .SUM_SQ_WIDTH(SUM_SQ_WIDTH), .DEPTH(16)
     ) u_stats_buffer (
         .clk(clk), .aresetn(aresetn),
-        .s_sum_int(acc_sum), .s_sum_sq_int(acc_sum_sq), .s_valid(acc_valid), .s_ready(),
-        .m_sum_int(buff_sum), .m_sum_sq_int(buff_sum_sq), .m_valid(buff_valid), .m_ready(buff_read_en)
+        .s_sum_int(acc_sum), .s_sum_sq_int(acc_sum_sq), .s_valid(acc_valid), .s_ready(), .s_count(count_acc_fifo),
+        .m_sum_int(buff_sum), .m_sum_sq_int(buff_sum_sq), .m_valid(buff_valid), .m_ready(buff_read_en), .m_count(count_fifo_avg)
     );
     assign buff_read_en = 1'b1; 
 
@@ -109,7 +112,7 @@ module layer_norm #(
         .SUM_WIDTH(SUM_WIDTH), .SUM_SQ_WIDTH(SUM_SQ_WIDTH), .FIXED_WIDTH(STAT_WIDTH)
     ) u_avg_var (
         .clk(clk), .aresetn(aresetn),
-        .sum_int(buff_sum), .sum_sq_int(buff_sum_sq), .stats_valid_in(buff_valid),
+        .sum_int(buff_sum), .sum_sq_int(buff_sum_sq), .stats_valid_in(buff_valid), .pkt_len_in(count_fifo_avg),
         .mean_out(calc_mean), .var_out(calc_var), .calc_valid_out(calc_valid)
     );
 
