@@ -48,6 +48,12 @@ module axi_dma_shim #(
     input  wire                               s_axis_tlast,
     input  wire                               s_axis_tvalid,
     output wire                               s_axis_tready,
+    
+    output wire [31:0]                        m_axis_accel_tdata,
+    output wire [3:0]                         m_axis_accel_tkeep,
+    output wire                               m_axis_accel_tlast,
+    output wire                               m_axis_accel_tvalid,
+    input  wire                               m_axis_accel_tready,
 
     // shim m_axis -> DMA S2MM
     output wire [31:0]                        m_axis_tdata,
@@ -56,16 +62,32 @@ module axi_dma_shim #(
     output wire                               m_axis_tvalid,
     input  wire                               m_axis_tready,
     
+    input wire [31:0]                        s_accel_axis_tdata,
+    input wire [3:0]                         s_accel_axis_tkeep,
+    input wire                               s_accel_axis_tlast,
+    input wire                               s_accel_axis_tvalid,
+    output wire                              s_accel_axis_tready,
+    
     output reg [3:0] state, next_state
 
 );
 
-    // AXIS passthrough (đường thẳng)
-    assign m_axis_tdata  = s_axis_tdata;
-    assign m_axis_tkeep  = s_axis_tkeep;
-    assign m_axis_tlast  = s_axis_tlast;
-    assign m_axis_tvalid = s_axis_tvalid;
-    assign s_axis_tready = m_axis_tready;
+    // MM2S Pass through
+    assign m_axis_accel_tdata  = s_axis_tdata;
+    assign m_axis_accel_tkeep  = s_axis_tkeep;
+    assign m_axis_accel_tlast  = s_axis_tlast;
+    assign m_axis_accel_tvalid = s_axis_tvalid;
+//    assign s_axis_tready = m_axis_accel_tready;
+    assign s_axis_tready = 1'b1;
+
+    // S2MM Pass through
+    assign m_axis_tdata  = s_accel_axis_tdata;
+    assign m_axis_tkeep  = s_accel_axis_tkeep;
+    assign m_axis_tlast  = s_accel_axis_tlast;
+    assign m_axis_tvalid = s_accel_axis_tvalid;
+    assign s_accel_axis_tready = m_axis_tready;
+    
+    
 
     // Register offset AXI DMA 
     localparam MM2S_DMACR   = 32'h00;  // Control
