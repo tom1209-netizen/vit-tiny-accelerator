@@ -1,8 +1,9 @@
 #Define variables
-TESTNAME 	?= tb_softmax_unit
-TB_NAME 	?= tb_softmax_unit
+TESTNAME 	?= tb_depthwise_conv_unit
+TB_NAME 	?= tb_depthwise_conv_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
+SIM_DEBUG   ?= 1
 
 #==============================
 
@@ -38,12 +39,12 @@ all_cov: clean build_cov run_cov
 build:
 	vlib work
 	vmap work work
-	vlog -f compile.f | tee compile.log
+	vlog $(if $(SIM_DEBUG),+define+SIM_DEBUG,) -f compile.f | tee compile.log
 
 build_cov:
 	vlib work
 	vmap work work
-	vlog +cover=bcesft -f compile.f
+	vlog +cover=bcesft $(if $(SIM_DEBUG),+define+SIM_DEBUG,) -f compile.f
 
 run:
 	vsim -debugDB -l $(TESTNAME).log -voptargs=+acc -assertdebug -c $(TB_NAME) -do "log -r /*;run -all;" -GMEALY_FSM=$(MEALY_FSM)

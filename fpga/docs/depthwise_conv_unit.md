@@ -1,684 +1,821 @@
-# Depthwise 3x3 Convolution Unit Documentation
+# Depthwise 3×3 Convolution Unit
 
-This document describes the hardware depthwise 3x3 convolution implementation located in `fpga/rtl/depthwise_conv/`. The design uses a **modular architecture** with separate submodules for kernel storage, line buffering, and MAC operations. It covers the algorithm design, architecture, I/O interfaces, internal pipeline, and testing methodology.
+| **Document Information** |                                                   |
+| ------------------------ | ------------------------------------------------- |
+| **Module Name**          | `depthwise_conv_unit`                             |
+| **Version**              | 1.0                                               |
+| **Design Status**        | In development                                    |
+| **Last Updated**         | December 31 2025                                  |
+| **Source Location**      | `fpga/rtl/depthwise_conv/`                        |
+| **Testbench**            | `fpga/tb/depthwise_conv/tb_depthwise_conv_unit.v` |
+| **Author**               | Le Phuc Khang                                     |
 
-## Why Depthwise Convolution Needs a Dedicated Unit
+## Table of Contents
 
-### The GEMM Utilization Problem
+1. [Overview](#1-overview)
+2. [Features Summary](#2-features-summary)
+3. [Theory of Operation](#3-theory-of-operation)
+4. [Module Architecture](#4-module-architecture)
+5. [Parameters](#5-parameters)
+6. [Interface Specification](#6-interface-specification)
+7. [Data Formats](#7-data-formats)
+8. [Finite State Machine](#8-finite-state-machine)
+9. [Timing Diagrams](#9-timing-diagrams)
+10. [Pipeline Architecture](#10-pipeline-architecture)
+11. [Submodule Reference](#11-submodule-reference)
+12. [Resource Utilization](#12-resource-utilization)
+13. [Timing Analysis](#13-timing-analysis)
+14. [Integration Guidelines](#14-integration-guidelines)
+15. [Verification](#15-verification)
+16. [Design Constraints](#16-design-constraints)
+17. [Known Limitations](#17-known-limitations)
+18. [Revision History](#18-revision-history)
 
-Standard GEMM operates on dense matrices where every output depends on all inputs. Depthwise convolution is inherently sparse - each output channel depends on only ONE input channel:
+## 1. Overview
 
-| Operation                     | Weight Matrix        | 8×8 Systolic Utilization   |
-| ----------------------------- | -------------------- | -------------------------- |
-| Standard Conv (3×3, Cin→Cout) | Dense (Cout × 9×Cin) | 100%                       |
-| FC / Linear                   | Dense (Dout × Din)   | 100%                       |
-| **Depthwise Conv (3×3)**      | Diagonal (C × 9)     | **12.5% (1/8 PEs active)** |
+### 1.1 Purpose
 
-Mapping depthwise to an 8×8 systolic array wastes 87.5% of compute resources. A dedicated unit with 8 parallel MAC units is much more efficient.
+The `depthwise_conv_unit` module implements a fully-pipelined 3×3 depthwise separable convolution accelerator optimized for INT8 inference on Vision Transformer architectures. It is a key component of the TinyViT-5M hardware accelerator, designed to efficiently process the local spatial mixing operations within the Attention with Spatial Reduction blocks.
 
-### Where This Sits In TinyViT
+### 1.2 Functional Description
 
-Depthwise 3×3 convolution appears in two places:
+Depthwise convolution applies an independent 3×3 filter to each input channel, producing a same-sized output feature map with zero-padding at boundaries. For each output pixel location `(row, col)` and channel `c`, the operation computes:
 
-1. **MBConv Blocks (Stage 1)**: Mobile Inverted Bottleneck with depthwise separable conv
+$$
+\text{out}[r, c, ch] = \sum_{i=-1}^{1} \sum_{j=-1}^{1} \text{in}[r+i, c+j, ch] \cdot \text{ker}[ch, i+1, j+1]
+$$
 
-    - Channel dimensions: 64, 128 (after expansion)
-    - Spatial size: 56×56, 28×28
+Where boundary pixels (`r+i < 0`, `r+i ≥ H`, `c+j < 0`, or `c+j ≥ W`) are treated as zero (implicit zero-padding).
 
-2. **LocalConv (Stages 2-4)**: Applied after attention to refine local features
-    - Applied within each window (7×7 or 14×14)
-    - Maintains spatial structure
+### 1.3 Design Philosophy
 
-## Module Overview
+Unlike standard convolution which can be efficiently mapped to GEMM-based systolic arrays, depthwise convolution has sparse connectivity (each filter operates on only one channel). This module uses a dedicated architecture with:
 
-The depthwise convolution unit applies a separate 3×3 filter to each input channel independently:
+- **8 parallel lanes** processing 8 channels simultaneously per clock cycle
+- **Circular line buffers** for efficient row-wise data reuse
+- **Shift register banks** for column-wise sliding window extraction
+- **Fully-pipelined MAC unit** achieving II=1 (initiation interval of 1 cycle)
 
-for each channel $c$:
+## 2. Features Summary
 
-```math
-\text{output}[row, col, c] = \sum_{i=-1}^{1} \sum_{j=-1}^{1} \left( \text{input}[row+i, col+j, c] \times \text{kernel}[c, i, j] \right)
-```
+| Feature                  | Specification                                      |
+| ------------------------ | -------------------------------------------------- |
+| **Kernel Size**          | 3×3 (fixed)                                        |
+| **Input Precision**      | Signed INT8                                        |
+| **Output Precision**     | Signed INT32 (pre-requantization)                  |
+| **Parallel Lanes**       | 8 channels per beat                                |
+| **Padding Mode**         | Implicit zero-padding (same output size)           |
+| **Stride**               | 1 (fixed)                                          |
+| **Max Image Width**      | Configurable (default: 28 pixels)                  |
+| **Max Channels**         | Configurable (default: 128, must be multiple of 8) |
+| **Throughput**           | 1 MAC result (8 channels) per cycle (steady-state) |
+| **AXI-Stream Interface** | Kernel input, Data input, Data output              |
+| **Backpressure Support** | Full backpressure on output stream                 |
+| **Flow Control**         | Credit-based FIFO prevents overflow                |
 
-### Key Features
+## 3. Theory of Operation
 
-- **Modular architecture** with dedicated submodules for kernel buffer, line buffer, and MAC
-- **8-lane parallel processing** (matches AXI-Stream bus width)
-- **BRAM-based line buffers** with sequential 3-cycle window fetch (left→center→right)
-- **Register-based kernel storage** to avoid BRAM fragmentation
-- **Time-shared MAC** using 8 DSPs cycling through 9 kernel positions
-- **Zero padding** for image borders
-- **Pipelined datapath** with proper BRAM read latency handling
-- **Outputs raw INT32** (requantization handled by external `requant_unit`)
+### 3.1 Processing Flow
 
-## Modular File Structure
-
-The depthwise convolution unit is split into four Verilog files:
-
-| File | Module | Lines | Description |
-|------|--------|-------|-------------|
-| `depthwise_conv_unit.v` | `depthwise_conv_unit` | 685 | Top-level module with FSM, flow control, window extraction |
-| `kernel_buffer.v` | `kernel_buffer` | 141 | Kernel weight storage with 2-stage pipelined writes |
-| `line_buffer.v` | `line_buffer` | 83 | Triple BRAM circular line buffer |
-| `mac_unit.v` | `mac_unit` | 179 | Time-shared 8-DSP MAC unit |
-
-### Module Hierarchy
-
-```text
-depthwise_conv_unit (top)
-├── kernel_buffer      - Stores 3×3 kernels for all channel groups
-├── line_buffer        - 3 circular BRAMs for input row buffering
-└── mac_unit           - Time-shared multiply-accumulate
-```
-
-## Block Diagram
-
-> [!NOTE]
-> Placeholder - diagram will be added later
-
-## Parameterization
-
-| Parameter      | Default | Description                                |
-| -------------- | ------- | ------------------------------------------ |
-| `DATA_WIDTH`   | 8       | Input/output element width (INT8)          |
-| `LANES`        | 8       | Parallel channels per beat                 |
-| `INPUT_WIDTH`  | 64      | Input AXI-Stream data width (8 × 8 bits)   |
-| `OUTPUT_WIDTH` | 256     | Output AXI-Stream data width (8 × 32 bits) |
-| `MAX_WIDTH`    | 28      | Maximum image width (columns)              |
-| `MAX_CHANNELS` | 128     | Maximum channels supported                 |
-| `ACC_WIDTH`    | 32      | Accumulator width (INT32)                  |
-
-### Parameter Sizing for BRAM Efficiency
-
-The line buffer depth is calculated as:
+The module operates in three sequential phases:
 
 ```text
-MAX_BEATS_ROW = MAX_WIDTH × (MAX_CHANNELS / LANES)
+S_IDLE -> S_LOAD_KERNEL -> S_PROCESS -> S_DONE
 ```
 
-For the default parameters: `28 × 16 = 448 beats/row`
+1. **Idle/Configuration Phase (`S_IDLE`)**: Waits for `start` pulse; latches `cfg_height`, `cfg_width`, and `cfg_channels`.
 
-Each line buffer stores `448 × 64 = 28,672 bits`, which fits in a single RAMB36. With 3 line buffers, total BRAM usage is **3 RAMB36** (2.14% of xc7z020).
+2. **Kernel Loading Phase (`S_LOAD_KERNEL`)**: Receives 9 kernel coefficients per channel group via AXI-Stream. Total beats = `(channels/8) × 9`.
 
-> **Design Trade-off**: The kernel storage uses `(* ram_style = "registers" *)` instead of BRAM because the 576-bit wide packed format (9 × 64-bit coefficients per channel group) causes severe BRAM fragmentation. Register-based storage is efficient for the small kernel memory (~1KB for 16 channel groups).
+3. **Processing Phase (`S_PROCESS`)**: Streams input feature map while computing and outputting convolution results with continuous throughput.
 
-## Interfaces (Ports)
+4. **Done Phase (`S_DONE`)**: Asserts `done` signal for one cycle, then returns to `S_IDLE`.
 
-### Control
+### 3.2 Window Formation Strategy
 
-| Port           | Dir | Width | Description                                       |
-| -------------- | --- | ----- | ------------------------------------------------- |
-| `start`        | in  | 1     | Pulse to begin a new convolution (latches config) |
-| `cfg_height`   | in  | 16    | Image height (rows)                               |
-| `cfg_width`    | in  | 16    | Image width (columns)                             |
-| `cfg_channels` | in  | 16    | Total channels (must be multiple of 8)            |
-| `done`         | out | 1     | Pulses when convolution complete                  |
+The 3×3 convolution window is formed using a combination of:
 
-### AXI-Stream Kernel Input (`axis_kernel_in_*`)
+- **Line Buffers (4 BRAMs)**: Store up to 4 complete rows of the input feature map in a circular fashion.
+- **Shift Register Banks**: Maintain a 2-column sliding history to extract left, center, and right column values.
+- **Lookahead Architecture**: The currently-read data serves as the "right" column, allowing continuous processing without stalls.
 
-| Port                    | Dir | Width | Description                                  |
-| ----------------------- | --- | ----- | -------------------------------------------- |
-| `axis_kernel_in_tdata`  | in  | 64    | Packed INT8 kernel coefficients (8 per beat) |
-| `axis_kernel_in_tvalid` | in  | 1     | Kernel input valid                           |
-| `axis_kernel_in_tready` | out | 1     | Ready (only in `S_LOAD_KERNEL`)              |
+### 3.3 Boundary Handling
 
-**Kernel Loading Format:**
+Zero-padding is applied implicitly:
 
-Kernels are loaded sequentially: for each channel group (8 channels), stream 9 beats containing the 3×3 coefficients:
+- **Top row** (`row == 0`): Top kernel row contributions zeroed
+- **Bottom row** (`row == H-1`): Bottom kernel row contributions zeroed
+- **Left column** (`col == 0`): Left kernel column contributions zeroed
+- **Right column** (`col == W-1`): Right kernel column contributions zeroed
+
+## 4. Module Architecture
+
+### 4.1 Block Diagram
+
+![Depthwise Convolution Unit Block Diagram](./figure/depthwise_conv/block_diagram.png)
+
+### 4.2 Module Hierarchy
 
 ```text
-Beat 0: kernel[chan_group, pos 0, lanes 0-7]  (top-left)
-Beat 1: kernel[chan_group, pos 1, lanes 0-7]  (top-center)
-...
-Beat 8: kernel[chan_group, pos 8, lanes 0-7]  (bottom-right)
+depthwise_conv_unit (top-level)
+│
+├── kernel_buffer           # Stores 3×3 kernels for all channel groups
+│   └── kernel_mem[16]      # 576-bit packed registers × 16 groups
+│
+├── line_buffer             # 4-row circular BRAM storage
+│   ├── line_buf_0          # BRAM row 0 (448 × 64-bit)
+│   ├── line_buf_1          # BRAM row 1
+│   ├── line_buf_2          # BRAM row 2
+│   └── line_buf_3          # BRAM row 3
+│
+├── mac_unit                # 9-stage fully-pipelined MAC
+│   ├── Stage 0             # Capture + first product
+│   ├── Stages 1-8          # Accumulate remaining products
+│   └── Output stage        # Result valid + last flags
+│
+├── Input FIFO              # Decouples AXI input from line buffer writes
+│
+├── Shift Register Banks    # Dual-bank column history (ping-pong)
+│   ├── row_*_shift_a[33]   # Bank A for current row processing
+│   └── row_*_shift_b[33]   # Bank B for next-row prefetch
+│
+└── Output FIFO + Serializer
+    ├── out_fifo[16]        # 256-bit MAC result buffer
+    └── ser_buf             # 64-bit output slice register
 ```
 
-Total kernel beats = (num_channels / 8) × 9
+## 5. Parameters
 
-### AXI-Stream Data Input (`axis_data_in_*`)
+### 5.1 Top-Level Parameters
 
-| Port                  | Dir | Width | Description                                         |
-| --------------------- | --- | ----- | --------------------------------------------------- |
-| `axis_data_in_tdata`  | in  | 64    | Packed INT8 input pixels (8 channels per beat)      |
-| `axis_data_in_tvalid` | in  | 1     | Input valid                                         |
-| `axis_data_in_tlast`  | in  | 1     | Last beat of input (optional, uses cfg for control) |
-| `axis_data_in_tready` | out | 1     | Ready (during `S_PROCESS`)                          |
+| Parameter      | Default | Range            | Description                                  |
+| -------------- | ------- | ---------------- | -------------------------------------------- |
+| `DATA_WIDTH`   | 8       | 1–16             | Input element bit-width (signed)             |
+| `LANES`        | 8       | 4, 8, 16         | Parallel channels per beat                   |
+| `INPUT_WIDTH`  | 64      | LANES×DATA_WIDTH | AXI-Stream data width for inputs             |
+| `OUTPUT_WIDTH` | 64      | 32, 64, 128, 256 | AXI-Stream data width for outputs            |
+| `MAX_WIDTH`    | 28      | 4–256            | Maximum supported image width (pixels)       |
+| `MAX_CHANNELS` | 128     | 8–1024           | Maximum channels (must be multiple of LANES) |
+| `ACC_WIDTH`    | 32      | 16–64            | Accumulator bit-width for MAC results        |
 
-### AXI-Stream Data Output (`axis_data_out_*`)
+### 5.2 Derived Parameters (Computed Internally)
 
-| Port                   | Dir | Width | Description                               |
-| ---------------------- | --- | ----- | ----------------------------------------- |
-| `axis_data_out_tdata`  | out | 256   | Packed INT32 accumulators (8 per beat)    |
-| `axis_data_out_tvalid` | out | 1     | Output valid                              |
-| `axis_data_out_tlast`  | out | 1     | Last beat of output                       |
-| `axis_data_out_tready` | in  | 1     | Downstream ready (backpressure supported) |
+| Parameter           | Formula                    | Default Value | Description                 |
+| ------------------- | -------------------------- | ------------- | --------------------------- |
+| `KERNEL_SIZE`       | 9 (constant)               | 9             | 3×3 kernel positions        |
+| `KERNEL_PACK_WIDTH` | KERNEL_SIZE × INPUT_WIDTH  | 576           | Packed kernel width in bits |
+| `MAX_CHAN_BEATS`    | MAX_CHANNELS / LANES       | 16            | Max channel groups          |
+| `SHIFT_DEPTH`       | 2 × MAX_CHAN_BEATS + 1     | 33            | Shift register depth        |
+| `MAC_WIDTH`         | LANES × ACC_WIDTH          | 256           | Full MAC result width       |
+| `OUT_SLICES`        | MAC_WIDTH / OUTPUT_WIDTH   | 4             | Output serialization factor |
+| `OUT_FIFO_DEPTH`    | 16 (constant)              | 16            | Output FIFO entries         |
+| `IN_FIFO_DEPTH`     | MAX_WIDTH × MAX_CHAN_BEATS | 448           | Input FIFO entries          |
 
-## Data Layout
+### 5.3 Constraints and Requirements
 
-### Input Format
+1. **Channel Alignment**: `cfg_channels` must be a multiple of `LANES` (8 by default)
+2. **Width Constraint**: `cfg_width` ≤ `MAX_WIDTH`
+3. **Channel Limit**: `cfg_channels` ≤ `MAX_CHANNELS`
+4. **Output Width**: `OUTPUT_WIDTH` must evenly divide `MAC_WIDTH` (256 bits)
 
-Data is streamed **row-by-row**, with channels grouped into beats:
+## 6. Interface Specification
+
+### 6.1 Port List
+
+#### Clock and Reset
+
+| Port    | Direction | Width | Description                            |
+| ------- | --------- | ----- | -------------------------------------- |
+| `clk`   | Input     | 1     | System clock (positive-edge triggered) |
+| `rst_n` | Input     | 1     | Active-low asynchronous reset          |
+
+#### Control Interface
+
+| Port           | Direction | Width | Description                                    |
+| -------------- | --------- | ----- | ---------------------------------------------- |
+| `start`        | Input     | 1     | Pulse to begin new convolution job             |
+| `done`         | Output    | 1     | Pulses when job completes                      |
+| `cfg_height`   | Input     | 16    | Image height in pixels (rows)                  |
+| `cfg_width`    | Input     | 16    | Image width in pixels (columns)                |
+| `cfg_channels` | Input     | 16    | Number of channels (must be multiple of LANES) |
+
+#### Kernel Input (AXI-Stream Slave)
+
+| Port                    | Direction | Width       | Description                         |
+| ----------------------- | --------- | ----------- | ----------------------------------- |
+| `axis_kernel_in_tdata`  | Input     | INPUT_WIDTH | Packed kernel coefficients (8×INT8) |
+| `axis_kernel_in_tvalid` | Input     | 1           | Data valid indicator                |
+| `axis_kernel_in_tlast`  | Input     | 1           | End of kernel stream                |
+| `axis_kernel_in_tready` | Output    | 1           | Ready to accept kernel data         |
+
+#### Feature Map Input (AXI-Stream Slave)
+
+| Port                  | Direction | Width       | Description                         |
+| --------------------- | --------- | ----------- | ----------------------------------- |
+| `axis_data_in_tdata`  | Input     | INPUT_WIDTH | Packed input pixels (8×INT8)        |
+| `axis_data_in_tvalid` | Input     | 1           | Data valid indicator                |
+| `axis_data_in_tlast`  | Input     | 1           | End of input stream (informational) |
+| `axis_data_in_tready` | Output    | 1           | Ready to accept input data          |
+
+#### Feature Map Output (AXI-Stream Master)
+
+| Port                   | Direction | Width        | Description                      |
+| ---------------------- | --------- | ------------ | -------------------------------- |
+| `axis_data_out_tdata`  | Output    | OUTPUT_WIDTH | Serialized output data (2×INT32) |
+| `axis_data_out_tvalid` | Output    | 1            | Data valid indicator             |
+| `axis_data_out_tlast`  | Output    | 1            | End of output stream             |
+| `axis_data_out_tready` | Input     | 1            | Downstream ready to accept       |
+
+### 6.2 AXI-Stream Compliance
+
+All AXI-Stream interfaces comply with ARM AMBA 4 AXI-Stream Protocol Specification:
+
+- **Handshake Protocol**: Data transfer occurs when both `TVALID` and `TREADY` are asserted on the rising edge of `clk`.
+- **TVALID Assertion Rules**: Once asserted, `TVALID` remains high until the transfer completes (handshake occurs).
+- **TREADY Behavior**: May be asserted/deasserted independently of `TVALID`.
+- **TLAST Semantics**: Indicates the last beat of a packet/frame.
+
+## 7. Data Formats
+
+### 7.1 Kernel Data Format
+
+Kernels are loaded via `axis_kernel_in` in a specific order optimized for streaming access:
 
 ```text
-For image H×W×C:
+For each channel_group (0 to C/8 - 1):
+    For each coefficient (0 to 8):  # Raster order of 3×3 kernel
+        Send 64-bit beat containing 8 kernel values
 
-Row 0:
-  Pixel (0,0): Beat 0 = channels[0:7], Beat 1 = channels[8:15], ...
-  Pixel (0,1): Beat N = channels[0:7], ...
+Beat layout:
+  [63:56] = kernel[ch_group*8 + 7, coeff]
+  [55:48] = kernel[ch_group*8 + 6, coeff]
   ...
-Row 1:
-  Pixel (1,0): ...
-  ...
+  [ 7: 0] = kernel[ch_group*8 + 0, coeff]
+
+Coefficient ordering (raster scan):
+  ┌───┬───┬───┐
+  │ 0 │ 1 │ 2 │  (top row)
+  ├───┼───┼───┤
+  │ 3 │ 4 │ 5 │  (center row, coeff 4 = center)
+  ├───┼───┼───┤
+  │ 6 │ 7 │ 8 │  (bottom row)
+  └───┴───┴───┘
 ```
 
-Total input beats = H × W × (C / 8)
+**Total Kernel Beats**: `(cfg_channels / 8) × 9`
 
-### Output Format
+### 7.2 Input Feature Map Format
 
-Same layout as input, but each element is INT32:
+Input data arrives row-major with channel interleaving within each pixel:
 
 ```text
-axis_data_out_tdata[31:0]   = output[row, col, chan+0]  (INT32)
-axis_data_out_tdata[63:32]  = output[row, col, chan+1]  (INT32)
-...
-axis_data_out_tdata[255:224] = output[row, col, chan+7] (INT32)
+Stream order:
+  Row 0:
+    Pixel(0,0): Beat 0  = ch[7:0],   Beat 1  = ch[15:8],  ...
+    Pixel(0,1): Beat N  = ch[7:0],   Beat N+1 = ch[15:8], ...
+    ...
+  Row 1:
+    Pixel(1,0): ...
+
+Beat layout (64 bits):
+  [63:56] = input[row, col, ch_group*8 + 7]  (signed INT8)
+  [55:48] = input[row, col, ch_group*8 + 6]
+  ...
+  [ 7: 0] = input[row, col, ch_group*8 + 0]
 ```
 
-## State Machine
+**Total Input Beats**: `cfg_height × cfg_width × (cfg_channels / 8)`
 
-The depthwise conv unit implements an **8-state FSM** with sequential BRAM fetch stages:
+### 7.3 Output Feature Map Format
 
-| State           | Value | Description                                    |
-| --------------- | ----- | ---------------------------------------------- |
-| `S_IDLE`        | 0     | Wait for `start` pulse; latch configuration    |
-| `S_LOAD_KERNEL` | 1     | Load all kernel weights sequentially           |
-| `S_PROCESS`     | 2     | Check data availability, initiate window fetch |
-| `S_FETCH_LEFT`  | 3     | Issue BRAM read for left column                |
-| `S_FETCH_CTR`   | 4     | Capture left column, issue center read         |
-| `S_FETCH_RIGHT` | 5     | Capture center column, issue right read        |
-| `S_FETCH_DONE`  | 6     | Capture right column, trigger MAC pipeline     |
-| `S_DONE`        | 7     | Assert `done` signal                           |
+Output data is serialized when `OUTPUT_WIDTH < MAC_WIDTH`. With default parameters (64-bit output, 256-bit MAC result), each MAC result is emitted across 4 consecutive beats:
 
-### State Transitions
+```text
+For each MAC result (8 × INT32 = 256 bits):
+  Beat 0: [63:32] = out[row,col,ch+1], [31:0] = out[row,col,ch+0]
+  Beat 1: [63:32] = out[row,col,ch+3], [31:0] = out[row,col,ch+2]
+  Beat 2: [63:32] = out[row,col,ch+5], [31:0] = out[row,col,ch+4]
+  Beat 3: [63:32] = out[row,col,ch+7], [31:0] = out[row,col,ch+6]
+
+TLAST is asserted only on the final beat of the final MAC result.
+```
+
+**Total Output Beats**: `cfg_height × cfg_width × (cfg_channels / 8) × OUT_SLICES`
+
+## 8. Finite State Machine
+
+### 8.1 State Diagram
 
 ```mermaid
 stateDiagram-v2
-    direction TB
-    [*] --> S_IDLE
-    S_IDLE --> S_LOAD_KERNEL: start
-    S_LOAD_KERNEL --> S_PROCESS: all kernels loaded
-    S_PROCESS --> S_FETCH_LEFT: data available
-    S_FETCH_LEFT --> S_FETCH_CTR: 1 cycle
-    S_FETCH_CTR --> S_FETCH_RIGHT: capture LEFT
-    S_FETCH_RIGHT --> S_FETCH_DONE: capture CENTER
-    S_FETCH_DONE --> S_PROCESS: capture RIGHT, MAC trigger
-    S_PROCESS --> S_DONE: all outputs sent
-    S_DONE --> S_IDLE: done
+  direction TB
+
+  %% Initial entry
+  [*] --> S_IDLE
+
+  %% States with encodings
+  state "S_IDLE
+  (2'b00)" as S_IDLE
+  state "S_LOAD_KERNEL
+  (2'b01)" as S_LOAD_KERNEL
+  state "S_PROCESS
+  (2'b10)" as S_PROCESS
+  state "S_DONE
+  (2'b11)" as S_DONE
+
+  %% Transitions
+  S_IDLE --> S_LOAD_KERNEL: start && valid_config
+  S_LOAD_KERNEL --> S_PROCESS: kernel_load_done
+  S_PROCESS --> S_DONE: last_beat_sent
+  S_DONE --> S_IDLE
+
 ```
 
-### Sequential BRAM Fetch Pipeline
+### 8.2 State Descriptions
 
-The 3-cycle fetch sequence handles BRAM read latency:
+| State           | Encoding | Entry Condition          | Exit Condition            | Actions                               |
+| --------------- | -------- | ------------------------ | ------------------------- | ------------------------------------- |
+| `S_IDLE`        | 2'b00    | Reset or S_DONE complete | `start` with valid config | Latch cfg\_\*, reset counters         |
+| `S_LOAD_KERNEL` | 2'b01    | `start` accepted         | `kernel_load_done`        | Accept kernel stream, fill kernel_mem |
+| `S_PROCESS`     | 2'b10    | Kernels loaded           | `last_beat_sent`          | Stream input, compute, emit output    |
+| `S_DONE`        | 2'b11    | All outputs sent         | Always (1 cycle)          | Assert `done`, return to S_IDLE       |
 
-| Cycle | State         | BRAM Address  | Data Captured |
-| ----- | ------------- | ------------- | ------------- |
-| 0     | S_FETCH_LEFT  | `beat_left`   | -             |
-| 1     | S_FETCH_CTR   | `beat_center` | LEFT column   |
-| 2     | S_FETCH_RIGHT | `beat_right`  | CENTER column |
-| 3     | S_FETCH_DONE  | -             | RIGHT column  |
+### 8.3 Valid Configuration Check
 
-This sequential approach uses only **3 single-port BRAMs** instead of 9 multi-port memories, reducing LUTRAM usage to zero.
-
-## Internal Architecture
-
-### 1. Line Buffer Submodule (`line_buffer.v`)
-
-The `line_buffer` module implements three rows of BRAM-based circular buffers:
+The transition from `S_IDLE` to `S_LOAD_KERNEL` requires:
 
 ```verilog
-line_buffer #(
-    .DATA_WIDTH(8), .LANES(8), .INPUT_WIDTH(64),
-    .MAX_WIDTH(28), .MAX_CHANNELS(128)
-) u_line_buffer (
-    .clk(clk), .rst_n(rst_n),
-    .num_cols(num_cols), .num_chan_beats(num_chan_beats),
-    .wr_en(input_handshake), .wr_row_sel(in_row_mod3),
-    .wr_addr(in_beat_in_row), .wr_data(axis_data_in_tdata),
-    .rd_addr(lb_rd_addr),
-    .rd_data_0(lb_rd_data_0), .rd_data_1(lb_rd_data_1), .rd_data_2(lb_rd_data_2)
-);
+start && (cfg_height > 0) && (cfg_width > 0) && (cfg_channels >= LANES)
 ```
 
-- **Write port**: Receives input stream, writes to buffer selected by `in_row % 3`
-- **Read port**: All 3 buffers read simultaneously, top-level selects based on `out_row % 3`
-- Circular buffer indexing prevents overwrites through flow control
+## 9. Timing Diagrams
 
-### 2. Kernel Buffer Submodule (`kernel_buffer.v`)
+### 9.1 Kernel Loading Sequence
 
-The `kernel_buffer` module stores kernel weights in registers (not BRAM) to avoid fragmentation:
+![Kernel Loading Timing](./figure/depthwise_conv/kernel_loading.png)
 
-```verilog
-kernel_buffer #(
-    .DATA_WIDTH(8), .LANES(8), .INPUT_WIDTH(64),
-    .MAX_CHANNELS(128), .KERNEL_SIZE(9)
-) u_kernel_buffer (
-    .clk(clk), .rst_n(rst_n),
-    .load_enable(state == S_LOAD_KERNEL), .num_chan_beats(num_chan_beats),
-    .load_done(kernel_load_done),
-    .axis_kernel_tdata(axis_kernel_in_tdata),
-    .axis_kernel_tvalid(axis_kernel_in_tvalid),
-    .axis_kernel_tready(axis_kernel_in_tready),
-    .chan_group(kernel_chan_group_rd), .kernel_pack(kernel_pack)
-);
-```
+### 9.2 Steady-State Processing
 
-- **2-stage pipelined writes** for timing closure
-- **576-bit packed output** (9 coefficients × 8 lanes × 8 bits) per channel group
-- `load_done` signals completion of kernel loading phase
+![Steady State Processing](./figure/depthwise_conv/normal_operation.png)
 
-### 3. Flow Control
+## 10. Pipeline Architecture
 
-The circular buffer requires careful flow control to prevent overwrites:
+### 10.1 End-to-End Pipeline Stages
 
-```verilog
-wire input_not_too_far = (in_row <= out_row + 1);
-```
+| Stage | Name                  | Latency  | Description                                      |
+| ----- | --------------------- | -------- | ------------------------------------------------ |
+| 1     | Input FIFO            | 1 cycle  | Decouples AXI input from internal timing         |
+| 2     | Line Buffer Write     | 1 cycle  | Write incoming data to circular BRAM             |
+| 3     | Line Buffer Read      | 1 cycle  | Synchronous BRAM read (3 parallel reads)         |
+| 4     | Row Mux Select        | 1 cycle  | Select above/center/below rows from BRAM outputs |
+| 5     | Shift Register Insert | 1 cycle  | Shift new data into column history               |
+| 6     | Window Assembly       | 1 cycle  | Form 3×3 window with boundary masking            |
+| 7-15  | MAC Pipeline          | 9 cycles | 9-stage pipelined multiply-accumulate            |
+| 16    | Output FIFO Write     | 1 cycle  | Buffer MAC result                                |
+| 17+   | Serializer            | 4 cycles | Emit 4× 64-bit slices per MAC result             |
 
-With 3 line buffers, processing row R needs rows R-1 (above), R (center), and R+1 (below). Row R+2 would overwrite R-1, so input must stay **at most 1 row ahead** of output.
+**Total Pipeline Latency**: ~18-20 cycles (first result appearance)
 
-### 4. Window Extraction
+**Steady-State Throughput**: 1 MAC result (8 channels) per cycle after fill
 
-For each output pixel at (out_row, out_col), extract a 3×3 window across 3 fetch cycles:
+### 10.2 MAC Unit Pipeline Detail
 
-| Fetch Cycle   | Column        | Captured In        |
-| ------------- | ------------- | ------------------ |
-| S_FETCH_CTR   | Left (col-1)  | `win_word_row*[0]` |
-| S_FETCH_RIGHT | Center (col)  | `win_word_row*[1]` |
-| S_FETCH_DONE  | Right (col+1) | `win_word_row*[2]` |
-
-Border handling applies zero padding:
-
-- Top row (`out_row == 0`): Zero the "above" row
-- Bottom row (`out_row == H-1`): Zero the "below" row
-- Left column (`out_col == 0`): Zero the left column
-- Right column (`out_col == W-1`): Zero the right column
-
-### 5. MAC Unit Submodule (`mac_unit.v`)
-
-The `mac_unit` module implements a **time-shared architecture** with 8 DSPs (one per lane) that cycle through all 9 kernel positions sequentially:
-
-```verilog
-mac_unit #(
-    .DATA_WIDTH(8), .LANES(8), .ACC_WIDTH(32), .KERNEL_SIZE(9)
-) u_mac (
-    .clk(clk), .rst_n(rst_n),
-    .data_valid(mac_data_valid), .data_last(mac_data_last),
-    .win_pack(mac_win_pack), .ker_pack(mac_ker_pack),
-    .busy(mac_busy),
-    .result_valid(mac_result_valid), .result_last(mac_result_last),
-    .result_pack(mac_result_pack)
-);
-```
-
-**Packed Interfaces**: Window and kernel data use 576-bit packed vectors for portability:
-
-- `win_pack[576-1:0]` = 9 positions × 8 lanes × 8 bits
-- `ker_pack[576-1:0]` = Same format
-
-**Internal FSM** cycles through 3 states:
-
-1. `MAC_IDLE`: Wait for `data_valid`, capture inputs
-2. `MAC_MULT`: Cycle through positions 0-8, multiply and accumulate
-3. `MAC_DONE`: Output final result, return to idle
-
-**Sequential Multiply-Accumulate**: A simple counter cycles through positions 0-8:
+The `mac_unit` module implements a fully-unrolled 9-stage pipeline:
 
 ```text
-Cycle 0: Load position 0 operands
-Cycle 1: Multiply position 0, load position 1, accumulate previous
+Stage 0: Capture win_pack, ker_pack; compute product[0] for all 8 lanes
+Stage 1: sum[1] = sum[0] + product[1]
+Stage 2: sum[2] = sum[1] + product[2]
 ...
-Cycle 9: Accumulate position 8
-Cycle 10: Output result
+Stage 8: sum[8] = sum[7] + product[8] → result_pack
 ```
 
-Each lane's accumulator computes the full 3×3 dot product:
-
-```math
-\text{mac\_result}[lane] = \sum_{i=0}^{8} \text{win\_data}[i][lane] \times \text{ker\_data}[i][lane]
-```
-
-## Pipeline Latency
-
-| Phase                     | Latency (cycles) | Notes                               |
-| ------------------------- | ---------------- | ----------------------------------- |
-| Kernel loading            | (C/8) × 9        | Sequential kernel stream            |
-| Window fetch              | 4                | S_FETCH_LEFT → S_FETCH_DONE         |
-| MAC (time-shared)         | 10               | 9 positions + output cycle          |
-| **Total per output beat** | 14               | Window fetch + MAC pipeline         |
-
-**Example:** For 28×28×128 input:
-
-- Kernel loading: 16 × 9 = 144 cycles
-- Processing: 28 × 28 × 16 × 6 = 75,264 cycles (with fetch overhead)
-- Effective throughput: ~1 output beat per 6 cycles
-
-> **Trade-off**: The time-shared MAC uses 8x fewer DSPs (9 vs 73) at the cost of ~2x lower throughput. This is favorable since depthwise conv is not the accelerator bottleneck.
-
-## Timing Results (Post-Route, xc7z020)
-
-| Metric | Value |
-|--------|-------|
-| **Target Clock** | 200 MHz (5.0 ns) |
-| **WNS (Setup)** | -0.801 ns |
-| **Effective Min Period** | 5.801 ns |
-| **Estimated Fmax** | **172.38 MHz** |
-
-> The design achieves 172 MHz, an improvement from the original 73 MHz baseline through systematic critical path optimizations. See [Timing Optimizations](#timing-optimizations) for details.
-
-## Resource Utilization (Post-Route, xc7z020)
-
-| Resource          | Usage | Available | Util%     |
-| ----------------- | ----- | --------- | --------- |
-| **LUT as Logic**  | ~7,400 | 53,200    | ~14%    |
-| **LUT as Memory** | 0     | 17,400    | **0.00%** |
-| **Registers**     | ~8,600 | 106,400   | ~8%     |
-| **BRAM (RAMB36)** | 3     | 140       | 2.14%     |
-| **DSP48E1**       | 9     | 220       | 4.09%     |
-
-### Key Resource Notes
-
-- **LUTRAM = 0**: Critical improvement from original design (was 126% over-utilized)
-- **3 RAMB36**: One per line buffer in `line_buffer` submodule
-- **9 DSP48E1**: 8 for time-shared MAC (1 per lane) + 1 for address computation
-- **Registers**: Includes kernel storage (576 bits × 16 groups = 9,216 bits) in `kernel_buffer`
-- **Fmax**: 172.38 MHz achieved through pipelining and pre-computed flags
-
-## Usage Example
+Each stage uses signed multiply with sign-extension to INT32:
 
 ```verilog
-// Instantiation
+prod = $signed(win[pos][lane]) * $signed(ker[pos][lane]);  // 16-bit result
+sum[stage] = sum[stage-1] + {{16{prod[15]}}, prod};        // Sign-extend to 32-bit
+```
+
+### 10.3 Backpressure Handling
+
+The design uses credit-based flow control to prevent FIFO overflow:
+
+```verilog
+pending_count = in_flight + out_fifo_count + issue_pipe_count;
+fifo_has_space = (pending_count < OUT_FIFO_DEPTH);  // 16
+
+// Read issuance stalls when FIFO is nearly full
+can_issue_real = ... && fifo_has_space;
+```
+
+When `axis_data_out_tready` deasserts:
+
+1. Output serializer pauses
+2. Output FIFO fills
+3. `fifo_has_space` becomes false
+4. Read scheduler stalls (no new windows issued)
+5. Input FIFO can continue filling up to its depth
+6. Eventually `axis_data_in_tready` deasserts
+
+## 11. Submodule Reference
+
+### 11.1 kernel_buffer
+
+**Purpose**: Stores 3×3 kernel weights for all channel groups with single-cycle read access.
+
+**Location**: `fpga/rtl/depthwise_conv/kernel_buffer.v`
+
+#### Parameters
+
+| Parameter      | Default | Description                |
+| -------------- | ------- | -------------------------- |
+| `DATA_WIDTH`   | 8       | Kernel element width       |
+| `LANES`        | 8       | Channels per beat          |
+| `INPUT_WIDTH`  | 64      | Input bus width            |
+| `MAX_CHANNELS` | 128     | Maximum supported channels |
+| `KERNEL_SIZE`  | 9       | Kernel coefficients (3×3)  |
+
+#### Interface
+
+| Port             | Direction | Width | Description                         |
+| ---------------- | --------- | ----- | ----------------------------------- |
+| `clk`, `rst_n`   | Input     | 1     | Clock and active-low reset          |
+| `load_enable`    | Input     | 1     | High during kernel loading phase    |
+| `num_chan_beats` | Input     | 16    | Number of channel groups to load    |
+| `load_done`      | Output    | 1     | Pulses when loading completes       |
+| `axis_kernel_*`  | Mixed     | -     | AXI-Stream kernel input interface   |
+| `chan_group`     | Input     | 4     | Channel group index for read access |
+| `kernel_pack`    | Output    | 576   | Packed 9×64-bit kernel coefficients |
+
+#### Architecture
+
+- **Storage**: 16 × 576-bit packed registers (not BRAM for single-cycle access)
+- **Write Pipeline**: 2-stage for timing closure
+  - Stage 1: Counter update, address generation
+  - Stage 2: Data registration
+  - Stage 3: Memory write
+- **Read**: Combinational (single-cycle latency)
+
+### 11.2 line_buffer
+
+**Purpose**: Circular 4-row BRAM buffer for efficient sliding window data reuse.
+
+**Location**: `fpga/rtl/depthwise_conv/line_buffer.v`
+
+#### Parameters
+
+| Parameter      | Default | Description         |
+| -------------- | ------- | ------------------- |
+| `DATA_WIDTH`   | 8       | Element width       |
+| `LANES`        | 8       | Channels per beat   |
+| `INPUT_WIDTH`  | 64      | Bus width           |
+| `MAX_WIDTH`    | 28      | Maximum image width |
+| `MAX_CHANNELS` | 128     | Maximum channels    |
+
+#### Interface
+
+| Port             | Direction | Width | Description                         |
+| ---------------- | --------- | ----- | ----------------------------------- |
+| `clk`, `rst_n`   | Input     | 1     | Clock and reset                     |
+| `num_cols`       | Input     | 16    | Image width for address calculation |
+| `num_chan_beats` | Input     | 16    | Channel groups per pixel            |
+| `wr_en`          | Input     | 1     | Write enable                        |
+| `wr_row_sel`     | Input     | 2     | Target row buffer (0-3)             |
+| `wr_addr`        | Input     | 16    | Write address within row            |
+| `wr_data`        | Input     | 64    | Write data                          |
+| `rd_addr`        | Input     | 16    | Read address (same for all 4 rows)  |
+| `rd_data_0..3`   | Output    | 64    | Read data from each row buffer      |
+
+#### Architecture
+
+- **Storage**: 4 × Block RAM (448 × 64-bit each)
+- **RAM Attribute**: `(* ram_style = "block" *)` for BRAM inference
+- **Write Port**: Single write to selected row buffer
+- **Read Port**: Simultaneous read from all 4 buffers
+- **Latency**: 1 cycle (synchronous BRAM read)
+
+### 11.3 mac_unit
+
+**Purpose**: Fully-pipelined 9-stage MAC computing 8 parallel 3×3 dot products.
+
+**Location**: `fpga/rtl/depthwise_conv/mac_unit.v`
+
+#### Parameters
+
+| Parameter     | Default | Description                   |
+| ------------- | ------- | ----------------------------- |
+| `DATA_WIDTH`  | 8       | Input element width           |
+| `LANES`       | 8       | Parallel channels             |
+| `ACC_WIDTH`   | 32      | Accumulator width             |
+| `KERNEL_SIZE` | 9       | Number of products per result |
+
+#### Interface
+
+| Port           | Direction | Width | Description                 |
+| -------------- | --------- | ----- | --------------------------- |
+| `clk`, `rst_n` | Input     | 1     | Clock and reset             |
+| `data_valid`   | Input     | 1     | Window/kernel data ready    |
+| `data_last`    | Input     | 1     | Last beat flag              |
+| `win_pack`     | Input     | 576   | Packed 9×8-lane window data |
+| `ker_pack`     | Input     | 576   | Packed 9×8-lane kernel data |
+| `busy`         | Output    | 1     | Legacy signal (always 0)    |
+| `result_valid` | Output    | 1     | Result available            |
+| `result_last`  | Output    | 1     | Last result flag            |
+| `result_pack`  | Output    | 256   | Packed 8×INT32 results      |
+
+#### Architecture
+
+- **Pipeline Depth**: 9 stages (one per kernel position)
+- **Initiation Interval**: 1 cycle (fully pipelined)
+- **Latency**: 9 cycles from input to output
+- **Valid/Last Propagation**: `valid_pipe` and `last_pipe` shift registers track data through pipeline
+
+## 12. Resource Utilization
+
+### 12.1 Synthesis Results
+
+**Target Device**: Xilinx Zynq-7020 (xc7z020clg400-1)  
+**Tool Version**: Vivado 2025.2  
+**Synthesis Mode**: Out-of-Context (OOC)
+
+| Resource            | Used   | Available | Utilization |
+| ------------------- | ------ | --------- | ----------- |
+| **Slice LUTs**      | 27,892 | 53,200    | 52.43%      |
+| - LUT as Logic      | 27,251 | 53,200    | 51.22%      |
+| - LUT as Memory     | 641    | 17,400    | 3.68%       |
+| **Slice Registers** | 33,692 | 106,400   | 31.67%      |
+| **F7 Muxes**        | 3,458  | 26,600    | 13.00%      |
+| **F8 Muxes**        | 1,537  | 13,300    | 11.56%      |
+| **Block RAM**       | 5      | 140       | 3.57%       |
+| **DSP Slices**      | 72     | 220       | 32.73%      |
+
+### 12.2 Resource Breakdown by Component
+
+| Component         | LUTs (est.) | Registers (est.) | BRAM | Notes                         |
+| ----------------- | ----------- | ---------------- | ---- | ----------------------------- |
+| kernel_buffer     | 2,500       | 9,500            | 0    | 576-bit × 16 packed regs      |
+| line_buffer       | 500         | 300              | 5    | 4 × 448 × 64-bit BRAMs        |
+| mac_unit          | 12,000      | 8,000            | 0    | 72 multipliers + accumulators |
+| Shift registers   | 10,000      | 12,000           | 0    | 2 banks × 33 × 192 bits       |
+| Output serializer | 2,000       | 3,000            | 0    | FIFO + slice muxing           |
+| Control logic     | 5,000       | 2,000            | 0    | FSM, counters, flow control   |
+
+### 12.3 Resource Optimization Notes
+
+1. **DSP Usage Enabled**: 72 DSP48E1s inferred for MAC multiplies; LUT usage is reduced compared to the LUT-only build.
+
+2. **High Register Count**: Dominated by shift register banks. Could use SRL16/SRL32 primitives for reduction.
+
+3. **BRAM Efficiency**: Only 5 of 140 BRAMs used. Additional line buffering or larger channel support possible.
+
+## 13. Timing Analysis
+
+### 13.1 Post-Route Timing Summary
+
+| Metric                         | Value              |
+| ------------------------------ | ------------------ |
+| **Target Clock Period**        | 5.000 ns (200 MHz) |
+| **WNS (Worst Negative Slack)** | -1.189 ns          |
+| **Achieved Clock Period**      | 6.189 ns           |
+| **Estimated Fmax**             | 161.58 MHz         |
+| **Timing Status**              | VIOLATED           |
+
+### 13.2 Critical Path Analysis
+
+The critical path is likely in one of these areas:
+
+1. **MAC Pipeline Stage Transitions**: 8-bit × 8-bit → 32-bit accumulation chains
+2. **Shift Register Muxing**: Large mux trees for column selection
+3. **FIFO Space Calculation**: `pending_count` computation with multiple adders
+
+### 13.3 Timing Optimization Recommendations
+
+1. **DSP Inference**: Enabled for MAC multiplies; consider adding DSP input/output regs for better timing
+2. **Pipeline Mux Selection**: Add register stages in row selection logic
+3. **Reduce Shift Depth**: Use smaller `MAX_CHAN_BEATS` if application allows
+4. **Retiming**: Enable `synth_design -retiming` for automatic register balancing
+
+## 14. Integration Guidelines
+
+### 14.1 System Integration
+
+![Integration Diagram](./figure/depthwise_conv/system_integration.png)
+
+[!NOTE] In the system diagram, this module is depicted as a standalone IP with standard AXI4 interfaces for integration. However, in the target architecture, this unit serves as a stage within a larger dataflow pipeline. Consequently, the configuration signals (cfg_*) are designed to be driven directly by a hardware scheduler ("sched tiler") rather than individual memory-mapped registers. The AXI4-Lite wrapper would only be implemented if deploying this unit as an independent IP core.
+
+### 14.2 DMA Configuration
+
+For continuous streaming:
+
+| Parameter                  | Recommended Value |
+| -------------------------- | ----------------- |
+| **S2MM/MM2S Width**        | 64 bits           |
+| **Burst Length**           | 16–256            |
+| **Buffer Descriptor Mode** | Scatter-Gather    |
+| **Data Realignment**       | Enabled           |
+
+### 14.3 Software Driver Flow
+
+```c
+// 1. Configure dimensions
+axi_lite_write(CTRL_BASE + CFG_HEIGHT, height);
+axi_lite_write(CTRL_BASE + CFG_WIDTH, width);
+axi_lite_write(CTRL_BASE + CFG_CHANNELS, channels);
+
+// 2. Start kernel DMA transfer
+dma_start_s2mm(kernel_dma, kernel_ptr, kernel_size);
+
+// 3. Pulse start
+axi_lite_write(CTRL_BASE + CTRL_REG, START_BIT);
+
+// 4. Wait for kernel load (poll or interrupt)
+while (!(dma_status(kernel_dma) & COMPLETE));
+
+// 5. Start input/output DMA transfers
+dma_start_s2mm(data_dma, input_ptr, input_size);
+dma_start_mm2s(data_dma, output_ptr, output_size);
+
+// 6. Wait for completion
+while (!axi_lite_read(CTRL_BASE + STATUS_REG) & DONE_BIT);
+```
+
+### 14.4 Clock Domain Crossing
+
+All interfaces are synchronous to `clk`. If crossing clock domains:
+
+- Use asynchronous FIFOs on AXI-Stream interfaces
+- Synchronize control signals (`start`, `done`) with dual-flop synchronizers
+- Ensure `cfg_*` signals are stable before `start` assertion
+
+## 15. Verification
+
+### 15.1 Testbench Overview
+
+**Location**: `fpga/tb/depthwise_conv/tb_depthwise_conv_unit.v`
+
+The testbench provides comprehensive functional verification:
+
+| Test Case | Configuration | Kernel Type | Input Type | Purpose                 |
+| --------- | ------------- | ----------- | ---------- | ----------------------- |
+| Test 1    | 4×4×8         | Identity    | Gradient   | Basic functionality     |
+| Test 2    | 8×8×8         | Identity    | Random     | Larger image, identity  |
+| Test 3    | 4×4×8         | Random      | Gradient   | Random kernel           |
+| Test 4    | 8×8×16        | Random      | Random     | Multi-channel group     |
+| Test 5    | 4×4×32        | Random      | Random     | More channels           |
+| Test 6    | 7×7×64        | Random      | Random     | TinyViT-like dimensions |
+
+### 15.2 Verification Methodology
+
+1. **Golden Reference Generation**: Software model computes expected outputs in Verilog
+2. **Streaming Interface Testing**: Full AXI-Stream handshaking with valid/ready toggling
+3. **Boundary Condition Coverage**: Zero-padding at all four edges verified
+4. **Output Comparison**: Bit-exact comparison against golden reference
+5. **Timeout Protection**: Watchdog timer prevents infinite simulation
+
+### 15.3 Running Simulations
+
+```bash
+# Using ModelSim
+cd fpga/sim
+make all TESTNAME=tb_depthwise_conv_unit
+
+# View waveforms
+make wave TESTNAME=tb_depthwise_conv_unit
+
+# Generate VCD for other viewers
+# (VCD dump enabled by default in testbench)
+```
+
+### 15.4 Expected Output
+
+```text
+==============================================
+Depthwise Conv Unit Testbench
+==============================================
+
+========================================
+TEST 1: 4x4x8
+========================================
+  Kernel type: Identity (center=1, others=0)
+  Input type: Horizontal gradient (-64 to +63)
+  Loaded 9 kernel beats
+  Sent 16 input beats
+  Received 64 output slices
+  PASSED: All 128 elements match
+...
+==============================================
+SUMMARY: 6/6 tests passed
+ALL TESTS PASSED!
+==============================================
+```
+
+## 16. Design Constraints
+
+### 16.1 Timing Constraints (XDC)
+
+**File**: `fpga/constraints/depthwise_conv_unit.xdc`
+
+```tcl
+## Clock constraint - 200 MHz target (adjust based on timing closure)
+create_clock -period 5.000 -name clk -waveform {0.000 2.500} [get_ports clk]
+
+## Asynchronous reset - false path
+set_false_path -from [get_ports rst_n]
+```
+
+### 16.2 Recommended Constraints for Integration
+
+```tcl
+## Input delay constraints (adjust based on upstream module)
+set_input_delay -clock clk -max 2.0 [get_ports axis_*_tdata]
+set_input_delay -clock clk -max 2.0 [get_ports axis_*_tvalid]
+set_input_delay -clock clk -min 0.5 [get_ports axis_*_tdata]
+set_input_delay -clock clk -min 0.5 [get_ports axis_*_tvalid]
+
+## Output delay constraints (adjust based on downstream module)
+set_output_delay -clock clk -max 2.0 [get_ports axis_*_tdata]
+set_output_delay -clock clk -max 2.0 [get_ports axis_*_tvalid]
+set_output_delay -clock clk -min 0.5 [get_ports axis_*_tdata]
+set_output_delay -clock clk -min 0.5 [get_ports axis_*_tvalid]
+```
+
+## 17. Known Limitations
+
+### 17.1 Functional Limitations
+
+| Limitation            | Impact                              | Workaround                              |
+| --------------------- | ----------------------------------- | --------------------------------------- |
+| Fixed 3×3 kernel size | Cannot support other kernel sizes   | Use multiple passes or different module |
+| Fixed stride of 1     | Cannot support strided convolutions | Post-process with downsampler           |
+| Channel multiple of 8 | Odd channel counts require padding  | Pad channels to multiple of 8           |
+| No dilation support   | Dilated convolutions not possible   | Not applicable to TinyViT workload      |
+
+### 17.2 Timing Limitations
+
+| Issue                     | Current Status           | Mitigation                           |
+| ------------------------- | ------------------------ | ------------------------------------ |
+| Fmax < 200 MHz target     | 157 MHz achieved         | Reduce target or apply optimizations |
+| Large combinational paths | In shift register muxing | Add pipeline stages                  |
+
+### 17.3 Resource Limitations
+
+| Issue                | Current Status               | Mitigation                            |
+| -------------------- | ---------------------------- | ------------------------------------- |
+| High LUT usage (60%) | Limits other logic on device | Enable DSP inference for MACs         |
+| No DSP usage         | Underutilizes available DSPs | Add `use_dsp` attribute to multiplies |
+
+## 18. Revision History
+
+| Version | Date             | Author        | Changes                             |
+| ------- | ---------------- | ------------- | ----------------------------------- |
+| 1.0     | December 31 2025 | Le Phuc Khang | Initial comprehensive documentation |
+
+## Appendix A: Quick Reference Card
+
+### A.1 Port Summary
+
+```text
 depthwise_conv_unit #(
-    .DATA_WIDTH(8),
-    .LANES(8),
-    .INPUT_WIDTH(64),
-    .OUTPUT_WIDTH(256),
-    .MAX_WIDTH(28),
-    .MAX_CHANNELS(128),
-    .ACC_WIDTH(32)
-) u_depthwise_conv (
-    .clk(clk),
-    .rst_n(rst_n),
-
+    .DATA_WIDTH   (8),      // INT8 elements
+    .LANES        (8),      // 8 channels/beat
+    .INPUT_WIDTH  (64),     // 64-bit input bus
+    .OUTPUT_WIDTH (64),     // 64-bit output bus
+    .MAX_WIDTH    (28),     // Max 28 pixels wide
+    .MAX_CHANNELS (128),    // Max 128 channels
+    .ACC_WIDTH    (32)      // INT32 accumulators
+) u_dwconv (
+    .clk                    (clk),
+    .rst_n                  (rst_n),
     // Control
-    .start(start),
-    .done(done),
-    .cfg_height(16'd28),
-    .cfg_width(16'd28),
-    .cfg_channels(16'd128),
-
-    // Kernel input
-    .axis_kernel_in_tdata(kernel_data),
-    .axis_kernel_in_tvalid(kernel_valid),
-    .axis_kernel_in_tready(kernel_ready),
-
-    // Data input
-    .axis_data_in_tdata(input_data),
-    .axis_data_in_tvalid(input_valid),
-    .axis_data_in_tlast(input_last),
-    .axis_data_in_tready(input_ready),
-
-    // Data output (INT32 → external requant)
-    .axis_data_out_tdata(output_data),
-    .axis_data_out_tvalid(output_valid),
-    .axis_data_out_tlast(output_last),
-    .axis_data_out_tready(output_ready)
+    .start                  (start),
+    .done                   (done),
+    .cfg_height             (cfg_height),
+    .cfg_width              (cfg_width),
+    .cfg_channels           (cfg_channels),
+    // Kernel AXI-Stream
+    .axis_kernel_in_tdata   (kernel_tdata),
+    .axis_kernel_in_tvalid  (kernel_tvalid),
+    .axis_kernel_in_tlast   (kernel_tlast),
+    .axis_kernel_in_tready  (kernel_tready),
+    // Input AXI-Stream
+    .axis_data_in_tdata     (data_in_tdata),
+    .axis_data_in_tvalid    (data_in_tvalid),
+    .axis_data_in_tlast     (data_in_tlast),
+    .axis_data_in_tready    (data_in_tready),
+    // Output AXI-Stream
+    .axis_data_out_tdata    (data_out_tdata),
+    .axis_data_out_tvalid   (data_out_tvalid),
+    .axis_data_out_tlast    (data_out_tlast),
+    .axis_data_out_tready   (data_out_tready)
 );
 ```
 
-## Integration with Central Interconnect
-
-The depthwise conv unit integrates into the accelerator as follows:
-
-```mermaid
-graph LR
-    %% Define nodes with multi-line labels to include data types
-    BB_IN["Buffer Bank<br>(INT8)"]
-    DCU["depthwise_conv_unit<br>(INT32 out)"]
-    RQU["requant_unit<br>(INT8)"]
-    BB_OUT["Buffer Bank"]
-
-    %% Define data flow connections
-    BB_IN --> DCU
-    DCU --> RQU
-    RQU --> BB_OUT
-```
-
-The scheduler:
-
-1. Loads kernel weights via `axis_kernel_in`
-2. Configures dimensions
-3. Asserts `start`
-4. Streams input from buffer bank
-5. Routes INT32 output to `requant_unit`
-6. Waits for `done`
-
-## Testing Methodology
-
-See the testbench at `fpga/tb/depthwise_conv/tb_depthwise_conv_unit.v`.
-
-### Test Cases
-
-| Test | Dimensions | Description                    |
-| ---- | ---------- | ------------------------------ |
-| 1    | 4×4×8      | Simple case with random kernel |
-| 2    | 4×4×16     | Two channel groups             |
-| 3    | 4×4×8      | All-ones kernel (sum filter)   |
-| 4    | 4×4×32     | Four channel groups            |
-| 5    | 4×4×16     | Edge case verification         |
-| 6    | 7×7×64     | Larger spatial size            |
-
-### Verification Results
-
-All 6 tests pass with exact match to golden reference:
-
-```text
-PASSED: All 128 elements match (Test 1)
-PASSED: All 512 elements match (Test 2)
-PASSED: All 128 elements match (Test 3)
-PASSED: All 1024 elements match (Test 4)
-PASSED: All 512 elements match (Test 5)
-PASSED: All 3136 elements match (Test 6)
-SUMMARY: 6/6 tests passed - ALL TESTS PASSED!
-```
-
-### Verification Approach
-
-1. **Golden Model**: Verilog `expected_out` computed in testbench with same fixed-point arithmetic
-2. **Tolerance**: Exact match (no approximation in depthwise conv)
-3. **Border Check**: Verify padding produces correct corner/edge results
-4. **Streaming**: Verify AXI-Stream protocol compliance with backpressure
-
-## Design History
-
-### Original Issue
-
-The initial design used 9 parallel line buffers (one per 3×3 window position) to enable single-cycle window extraction. This required:
-
-- 9 × (MAX_WIDTH × MAX_CHANNELS/8) × 64-bit memories
-- With MAX_WIDTH=64, MAX_CHANNELS=512: 9 × 4096 × 64 = 2.25 Mbit
-
-This exceeded BRAM capacity and fell back to **LUTRAM**, consuming 22,016 LUTRAM sites (126% of available 17,400).
-
-### Solution: Sequential BRAM Fetch
-
-The redesigned architecture uses:
-
-1. **3 line buffers** (one per circular buffer row) instead of 9
-2. **Sequential 4-cycle window fetch** (left→center→right columns)
-3. **Register-based kernel storage** to avoid BRAM width fragmentation
-
-Trade-off: 4 extra cycles per output window, but **zero LUTRAM usage** and successful placement.
-
-## Timing Optimizations
-
-The original design achieved only **73.28 MHz** (WNS: -8.647 ns) against a 200 MHz target. Through systematic critical path analysis and pipelining, the design was improved to **156.25 MHz** - a **2.13x improvement**.
-
-### Summary of Optimizations
-
-| Optimization                     | Before     | After      | Improvement |
-| -------------------------------- | ---------- | ---------- | ----------- |
-| Initial baseline                 | 73.28 MHz  | -          | -           |
-| Pipelined `needed_beat`          | 73.28 MHz  | 79.62 MHz  | +6.34 MHz   |
-| Eliminated kernel division       | 79.62 MHz  | 101.08 MHz | +21.46 MHz  |
-| Pre-computed `out_row_mod3`      | 101.08 MHz | 103.46 MHz | +2.38 MHz   |
-| Pre-computed `out_beat_in_row`   | 103.46 MHz | 106.11 MHz | +2.65 MHz   |
-| Pre-computed `in_row_mod3`       | 106.11 MHz | 114.14 MHz | +8.03 MHz   |
-| Two-stage `needed_beat` pipeline | 114.14 MHz | 150.29 MHz | +36.15 MHz  |
-| Registered beat addresses        | 150.29 MHz | 150.76 MHz | +0.47 MHz   |
-| Pre-computed edge flags          | 150.76 MHz | 156.25 MHz | +5.49 MHz   |
-| Modular refactoring              | 156.25 MHz | 172.38 MHz | +16.13 MHz  |
-
-> **Note**: The modular refactoring into separate submodules (`kernel_buffer`, `line_buffer`, `mac_unit`) improved timing by allowing Vivado to optimize each module's placement independently.
-
-### Detailed Optimizations
-
-#### 1. Pipelined `needed_beat` Computation
-
-**Problem**: The `needed_beat` calculation (`out_col * num_chan_beats + out_chan_beat`) went through a DSP48 multiplier in a combinational path (~13.6 ns delay).
-
-**Solution**: Added a 2-stage pipeline:
-
-- Stage 1: Register the DSP multiplication result
-- Added `pipeline_valid` signal to handle pipeline warmup after position changes
-
-```verilog
-// Before: Combinational
-wire [31:0] needed_beat = out_col * num_chan_beats + out_chan_beat;
-
-// After: Registered with pipeline guard
-reg [31:0] needed_beat_r;
-reg pipeline_valid;
-```
-
-#### 2. Eliminated Kernel Loading Division
-
-**Problem**: The kernel write address computation used `kernel_load_cnt / KERNEL_SIZE` (division by 9), creating a 13-LUT decode chain.
-
-**Solution**: Replaced division with explicit counters:
-
-- Added `kernel_chan_group` counter (0 to 15)
-- Added `kernel_coeff_idx` counter (0 to 8)
-- Added 2-stage pipeline for kernel memory writes
-
-```verilog
-// Before: Division
-kernel_mem[kernel_load_cnt / KERNEL_SIZE][...] <= ...
-
-// After: Explicit counters
-reg [3:0] kernel_coeff_idx;   // 0-8
-reg [3:0] kernel_chan_group;  // 0-15
-```
-
-#### 3. Pre-computed Modulo-3 Values
-
-**Problem**: The circular buffer indices used `out_row % 3` and `in_row % 3`, which synthesize to 6-level CARRY4 chains.
-
-**Solution**: Maintain pre-computed registers that update with simple increment logic:
-
-```verilog
-// out_row_mod3 tracks out_row % 3
-reg [1:0] out_row_mod3;
-
-// Update with simple 0→1→2→0 logic
-if (out_row_mod3 == 2'd2)
-    out_row_mod3 <= 2'd0;
-else
-    out_row_mod3 <= out_row_mod3 + 1;
-```
-
-#### 4. Pre-computed Beat Address Counter
-
-**Problem**: The beat address computation `out_col * num_chan_beats + out_chan_beat` required a multiplication in the critical path.
-
-**Solution**: Replace with a simple counter that tracks the same value:
-
-```verilog
-// out_beat_in_row = out_col * num_chan_beats + out_chan_beat
-reg [15:0] out_beat_in_row;
-
-// Increments each fetch, resets at row boundary
-if (end_of_row)
-    out_beat_in_row <= 16'd0;
-else
-    out_beat_in_row <= out_beat_in_row + 1;
-```
-
-#### 5. Two-stage `needed_beat` Pipeline
-
-**Problem**: The `is_last_output_col` comparison (16-bit equality check) created a 6-level CARRY4 chain feeding into the DSP input mux.
-
-**Solution**: Split into two pipeline stages:
-
-- Stage 1: Compute `(out_col + 1) * num_chan_beats` unconditionally through DSP
-- Stage 2: Apply correction based on delayed `is_last_output_col` flag
-
-```verilog
-// Stage 1: DSP computation (no comparison in path)
-reg [31:0] next_col_beat_r;
-reg is_last_output_col_d;
-
-always @(posedge clk) begin
-    next_col_beat_r <= (out_col + 1) * num_chan_beats;
-    is_last_output_col_d <= is_last_output_col;
-end
-
-// Stage 2: Correction using delayed flag
-always @(posedge clk) begin
-    if (is_last_output_col_d)
-        needed_beat_r <= next_col_beat_r - num_chan_beats_d + out_chan_beat_d;
-    else
-        needed_beat_r <= next_col_beat_r + out_chan_beat_d;
-end
-```
-
-#### 6. Pre-computed Edge Flags
-
-**Problem**: Row and column boundary checks (`out_col == 0`, `out_col == num_cols - 1`, etc.) are 16-bit comparisons creating carry chains in multiple paths.
-
-**Solution**: Maintain registered flags that update when position changes:
-
-```verilog
-reg is_first_col_reg;   // = (out_col == 0)
-reg is_last_col_reg;    // = (out_col == num_cols - 1)
-reg is_first_row_reg;   // = (out_row == 0)
-reg is_last_row_reg;    // = (out_row == num_rows - 1)
-
-// Update on position change
-if (moving_to_next_col) begin
-    is_first_col_reg <= 1'b0;
-    is_last_col_reg <= (out_col == num_cols - 2);
-end
-```
-
-### Remaining Critical Path
-
-After all optimizations, the critical path is in the **MAC (multiply-accumulate) datapath** within `mac_unit.v`:
-
-- 8-bit × 8-bit signed multiplications (DSP48-inferred)
-- Sequential accumulation through 9 positions
-- Path delay: ~5.8 ns (172 MHz)
-
-To reach 200 MHz would require:
-
-1. Additional pipeline stages in the MAC FSM
-2. Breaking the accumulator feedback path
-3. Restructuring the product-to-accumulator timing
-
-### Key Timing Principles Applied
-
-1. **Replace expensive operations with counters**: Modulo, division, and multiplication can often be replaced with simple counters that track the same value through increment/reset logic.
-
-2. **Pre-compute and register comparison results**: Wide comparisons (16-bit equality checks) create carry chains. Register the results and use delayed flags where semantic allows.
-
-3. **Pipeline DSP48 paths**: DSP48 multipliers have significant setup time requirements. Break combinational paths before DSP inputs.
-
-4. **Use 2-stage pipelines for complex decisions**: When a comparison affects DSP operand selection, compute both possibilities in Stage 1 and select in Stage 2 using the registered comparison result.
+### A.2 Typical Dimensions for TinyViT
+
+| Stage               | Height | Width | Channels | Kernel Beats | Input Beats | Output Slices |
+| ------------------- | ------ | ----- | -------- | ------------ | ----------- | ------------- |
+| Stage 1 (56×56×64)  | 56     | 56    | 64       | 72           | 25,088      | 100,352       |
+| Stage 2 (28×28×128) | 28     | 28    | 128      | 144          | 12,544      | 50,176        |
+| Stage 3 (14×14×160) | 14     | 14    | 160      | 180          | 3,920       | 15,680        |
+| Stage 4 (7×7×320)   | 7      | 7     | 320      | 360          | 1,960       | 7,840         |

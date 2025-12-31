@@ -5,13 +5,17 @@ module tb_depthwise_conv_unit;
     parameter DATA_WIDTH = 8;
     parameter LANES = 8;
     parameter INPUT_WIDTH = 64;
-    parameter OUTPUT_WIDTH = 256;
+    parameter OUTPUT_WIDTH = 64;
     parameter MAX_WIDTH = 64;
     parameter MAX_CHANNELS = 128;
     parameter ACC_WIDTH = 32;
 
     // Set USE_MODULAR=1 to test the modular version
     parameter USE_MODULAR = 0;
+
+    localparam MAC_WIDTH = LANES * ACC_WIDTH;
+    localparam OUT_SLICES = MAC_WIDTH / OUTPUT_WIDTH;
+    localparam OUT_SLICE_LANES = OUTPUT_WIDTH / ACC_WIDTH;
 
     // Clock and reset
     reg                           clk;
@@ -27,6 +31,7 @@ module tb_depthwise_conv_unit;
     // Kernel input interface
     reg        [ INPUT_WIDTH-1:0] axis_kernel_in_tdata;
     reg                           axis_kernel_in_tvalid;
+    reg                           axis_kernel_in_tlast;
     wire                          axis_kernel_in_tready;
 
     // Data input interface
@@ -74,6 +79,7 @@ module tb_depthwise_conv_unit;
         .cfg_channels(cfg_channels),
         .axis_kernel_in_tdata(axis_kernel_in_tdata),
         .axis_kernel_in_tvalid(axis_kernel_in_tvalid),
+        .axis_kernel_in_tlast(axis_kernel_in_tlast),
         .axis_kernel_in_tready(axis_kernel_in_tready),
         .axis_data_in_tdata(axis_data_in_tdata),
         .axis_data_in_tvalid(axis_data_in_tvalid),
@@ -89,6 +95,12 @@ module tb_depthwise_conv_unit;
     initial clk = 0;
     always #5 clk = ~clk;  // 100 MHz
 
+    // Waveform dump
+    initial begin
+        $dumpfile("tb_depthwise_conv_unit.vcd");
+        $dumpvars(0, tb_depthwise_conv_unit);
+    end
+
     // Task
     task reset_dut;
         begin
@@ -99,6 +111,7 @@ module tb_depthwise_conv_unit;
             cfg_channels = 0;
             axis_kernel_in_tdata = 0;
             axis_kernel_in_tvalid = 0;
+            axis_kernel_in_tlast = 0;
             axis_data_in_tdata = 0;
             axis_data_in_tvalid = 0;
             axis_data_in_tlast = 0;
@@ -277,9 +290,11 @@ module tb_depthwise_conv_unit;
     task load_kernels;
         input integer num_channels;
         integer ch_group, coeff, lane;
+        integer total_kernel_beats;
         reg [INPUT_WIDTH-1:0] beat_data;
         begin
             kernel_beat_cnt = 0;
+            total_kernel_beats = (num_channels / LANES) * 9;
 
             // Load kernel weights: (C/8) groups × 9 coefficients
             for (ch_group = 0; ch_group < num_channels / LANES; ch_group = ch_group + 1) begin
@@ -293,6 +308,7 @@ module tb_depthwise_conv_unit;
 
                     axis_kernel_in_tdata  = beat_data;
                     axis_kernel_in_tvalid = 1;
+                    axis_kernel_in_tlast  = (kernel_beat_cnt == total_kernel_beats - 1);
 
                     @(posedge clk);
                     while (!axis_kernel_in_tready) @(posedge clk);
@@ -302,6 +318,7 @@ module tb_depthwise_conv_unit;
             end
 
             axis_kernel_in_tvalid = 0;
+            axis_kernel_in_tlast  = 0;
             $display("  Loaded %0d kernel beats", kernel_beat_cnt);
         end
     endtask
@@ -350,19 +367,25 @@ module tb_depthwise_conv_unit;
         input integer width;
         input integer channels;
         integer row, col, ch_beat, lane;
-        integer total_beats;
+        integer total_results;
+        integer total_slices;
         integer idx;
+        integer result_idx;
+        integer slice_idx;
         begin
             out_beat_cnt = 0;
-            total_beats = height * width * (channels / LANES);
+            total_results = height * width * (channels / LANES);
+            total_slices = total_results * OUT_SLICES;
             axis_data_out_tready = 1;
 
-            while (out_beat_cnt < total_beats) begin
+            while (out_beat_cnt < total_slices) begin
                 @(posedge clk);
                 if (axis_data_out_tvalid && axis_data_out_tready) begin
-                    // Unpack INT32 values
-                    for (lane = 0; lane < LANES; lane = lane + 1) begin
-                        idx = out_beat_cnt * LANES + lane;
+                    result_idx = out_beat_cnt / OUT_SLICES;
+                    slice_idx  = out_beat_cnt % OUT_SLICES;
+                    // Unpack INT32 values from the current slice
+                    for (lane = 0; lane < OUT_SLICE_LANES; lane = lane + 1) begin
+                        idx = result_idx * LANES + slice_idx * OUT_SLICE_LANES + lane;
                         actual_out[idx] = $signed(axis_data_out_tdata[lane*ACC_WIDTH+:ACC_WIDTH]);
                     end
                     out_beat_cnt = out_beat_cnt + 1;
@@ -370,7 +393,7 @@ module tb_depthwise_conv_unit;
             end
 
             axis_data_out_tready = 0;
-            $display("  Received %0d output beats", out_beat_cnt);
+            $display("  Received %0d output slices", out_beat_cnt);
         end
     endtask
 

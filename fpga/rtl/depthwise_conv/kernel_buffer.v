@@ -18,6 +18,7 @@ module kernel_buffer #(
     // AXI-Stream kernel input
     input  wire [INPUT_WIDTH-1:0] axis_kernel_tdata,
     input  wire                   axis_kernel_tvalid,
+    input  wire                   axis_kernel_tlast,
     output wire                   axis_kernel_tready,
 
     // Kernel lookup interface
@@ -28,9 +29,7 @@ module kernel_buffer #(
     localparam KERNEL_PACK_WIDTH = KERNEL_SIZE * INPUT_WIDTH;  // 576 bits
     localparam NUM_GROUPS = MAX_CHANNELS / LANES;  // 16 groups for 128 channels
 
-    // =========================================================================
-    // Kernel Weight Storage - packed registers
-    // =========================================================================
+    // Kernel Weight Storage
     (* ram_style = "registers" *)
     reg [KERNEL_PACK_WIDTH-1:0] kernel_mem[0:NUM_GROUPS-1];
 
@@ -41,9 +40,7 @@ module kernel_buffer #(
         kernel_mem[init_i] = {KERNEL_PACK_WIDTH{1'b0}};
     end
 
-    // =========================================================================
     // Loading State Machine
-    // =========================================================================
     reg  [           15:0] load_cnt;  // Total beats received
     reg  [            3:0] coeff_idx;  // Coefficient index within group (0-8)
     reg  [            3:0] chan_group_wr;  // Current channel group being written
@@ -59,8 +56,9 @@ module kernel_buffer #(
     reg  [INPUT_WIDTH-1:0] data_d;
 
     wire                   handshake = axis_kernel_tvalid && axis_kernel_tready;
+    reg                    kernel_stream_done;
 
-    assign axis_kernel_tready = load_enable;
+    assign axis_kernel_tready = load_enable && !kernel_stream_done;
 
     // Stage 1: Address and counter computation
     always @(posedge clk or negedge rst_n) begin
@@ -71,14 +69,16 @@ module kernel_buffer #(
             total_kernel_beats <= 16'd0;
             load_almost_done   <= 1'b0;
             load_done          <= 1'b0;
+            kernel_stream_done <= 1'b0;
         end else if (!load_enable) begin
             // Reset counters when not loading (but don't compute total_kernel_beats here
             // as num_chan_beats may not be stable yet)
-            load_cnt         <= 16'd0;
-            coeff_idx        <= 4'd0;
-            chan_group_wr    <= 4'd0;
-            load_almost_done <= 1'b0;
-            load_done        <= 1'b0;
+            load_cnt           <= 16'd0;
+            coeff_idx          <= 4'd0;
+            chan_group_wr      <= 4'd0;
+            load_almost_done   <= 1'b0;
+            load_done          <= 1'b0;
+            kernel_stream_done <= 1'b0;
         end else if (handshake) begin
             // Capture total_kernel_beats on first handshake (num_chan_beats is now stable)
             if (load_cnt == 0) begin
@@ -98,6 +98,9 @@ module kernel_buffer #(
 
             // Signal done on last beat
             load_done <= load_almost_done;
+            if (axis_kernel_tlast) begin
+                kernel_stream_done <= 1'b1;
+            end
 
             // Update coefficient and group counters
             if (coeff_idx == KERNEL_SIZE - 1) begin
@@ -133,9 +136,7 @@ module kernel_buffer #(
         end
     end
 
-    // =========================================================================
     // Kernel Lookup - combinational read
-    // =========================================================================
     assign kernel_pack = kernel_mem[chan_group];
 
 endmodule

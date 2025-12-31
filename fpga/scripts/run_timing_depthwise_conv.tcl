@@ -54,7 +54,9 @@ read_xdc $constraint_file
 # Synthesis (Out-of-Context mode)
 # =============================================================================
 puts "Starting synthesis (Out-of-Context) for $top_module..."
-synth_design -top $top_module -part $fpga_part -mode out_of_context
+synth_design -top $top_module -part $fpga_part -mode out_of_context \
+    -directive PerformanceOptimized \
+    -retiming
 write_checkpoint -force $synth_dcp
 report_timing_summary -file $post_synth_rpt
 
@@ -62,10 +64,10 @@ report_timing_summary -file $post_synth_rpt
 # Implementation
 # =============================================================================
 puts "Starting implementation for $top_module..."
-opt_design
-place_design
+opt_design -directive Explore
+place_design -directive Explore
 phys_opt_design -directive AggressiveExplore
-route_design
+route_design -directive Explore
 phys_opt_design -directive AggressiveExplore
 write_checkpoint -force $impl_dcp
 

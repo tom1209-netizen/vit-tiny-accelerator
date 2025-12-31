@@ -10,56 +10,27 @@ module mac_unit #(
     input wire rst_n,
 
     // Input interface - packed arrays for portability
-    input wire data_valid,  // Window/kernel data ready
-    input wire data_last,  // Last beat flag
-    input wire [KERNEL_SIZE*LANES*DATA_WIDTH-1:0]  win_pack,   // 9 positions x 8 lanes x 8 bits = 576 bits
-    input wire [KERNEL_SIZE*LANES*DATA_WIDTH-1:0] ker_pack,  // Same packing
+    input wire                                    data_valid,  // Window/kernel data ready
+    input wire                                    data_last,   // Last beat flag
+    input wire [KERNEL_SIZE*LANES*DATA_WIDTH-1:0] win_pack,    // 9 positions x 8 lanes x 8 bits
+    input wire [KERNEL_SIZE*LANES*DATA_WIDTH-1:0] ker_pack,    // Same packing
 
     // Status
-    output reg busy,  // MAC is processing
+    output reg busy,  // Pipeline always ready (legacy signal)
 
     // Output interface - packed for portability
     output reg                       result_valid,
     output reg                       result_last,
-    output reg [LANES*ACC_WIDTH-1:0] result_pack    // 8 lanes x 32 bits = 256 bits
+    output reg [LANES*ACC_WIDTH-1:0] result_pack    // 8 lanes x 32 bits
 );
 
-    // =========================================================================
-    // MAC FSM States
-    // =========================================================================
-    localparam MAC_IDLE = 2'd0;
-    localparam MAC_MULT = 2'd1;  // Multiply and accumulate positions 0-8
-    localparam MAC_DONE = 2'd2;  // Output final result
+    localparam KERNEL_PACK_WIDTH = KERNEL_SIZE * LANES * DATA_WIDTH;
+    localparam PROD_WIDTH        = 2 * DATA_WIDTH;
 
-    reg        [                             1:0] mac_state;
-    reg        [                             3:0] mac_cnt;  // Position counter 0-8
-    reg                                           last_saved;  // Saved last flag
-
-    // =========================================================================
-    // Captured Input Data - packed storage
-    // =========================================================================
-    reg        [KERNEL_SIZE*LANES*DATA_WIDTH-1:0] win_cap;
-    reg        [KERNEL_SIZE*LANES*DATA_WIDTH-1:0] ker_cap;
-
-    // Current operands for multiply
-    reg signed [                  DATA_WIDTH-1:0] cur_win                          [0:LANES-1];
-    reg signed [                  DATA_WIDTH-1:0] cur_ker                          [0:LANES-1];
-
-    // Product register (DSP inference)
-    (* use_dsp = "yes" *)reg signed [                2*DATA_WIDTH-1:0] prod                             [0:LANES-1];
-
-    // Accumulator
-    reg signed [                   ACC_WIDTH-1:0] mac_acc                          [0:LANES-1];
-
-    // Pipeline flag
-    reg                                           prod_done;
-
-    // =========================================================================
     // Helper: Extract signed byte from packed data
     // Position p (0-8), lane l (0-7)
-    // =========================================================================
     function signed [DATA_WIDTH-1:0] extract_byte;
-        input [KERNEL_SIZE*LANES*DATA_WIDTH-1:0] pack;
+        input [KERNEL_PACK_WIDTH-1:0] pack;
         input [3:0] pos;
         input [3:0] lane;
         begin
@@ -67,112 +38,103 @@ module mac_unit #(
         end
     endfunction
 
-    // =========================================================================
-    // Capture input data on data_valid
-    // =========================================================================
-    always @(posedge clk) begin
-        if (data_valid && !busy) begin
-            win_cap <= win_pack;
-            ker_cap <= ker_pack;
+    // Fully pipelined MAC (II=1). Each stage accumulates one kernel position.
+    reg        [KERNEL_PACK_WIDTH-1:0] win_pipe   [0:KERNEL_SIZE-1];
+    reg        [KERNEL_PACK_WIDTH-1:0] ker_pipe   [0:KERNEL_SIZE-1];
+    reg        [      KERNEL_SIZE-1:0] valid_pipe;
+    reg        [      KERNEL_SIZE-1:0] last_pipe;
+    reg signed [  LANES*ACC_WIDTH-1:0] sum_pipe   [0:KERNEL_SIZE-1];
+
+    // Multiply grid (stage x lane).
+    wire signed [LANES*PROD_WIDTH-1:0] mult_stage [0:KERNEL_SIZE-1];
+
+    genvar gl;
+    generate
+        for (gl = 0; gl < LANES; gl = gl + 1) begin : gen_mult_stage0
+            localparam [3:0] LANE = gl;
+            wire signed [DATA_WIDTH-1:0] w;
+            wire signed [DATA_WIDTH-1:0] k;
+            (* use_dsp = "yes" *) wire signed [PROD_WIDTH-1:0] prod;
+            assign w = extract_byte(win_pack, 4'd0, LANE);
+            assign k = extract_byte(ker_pack, 4'd0, LANE);
+            assign prod = w * k;
+            assign mult_stage[0][gl*PROD_WIDTH+:PROD_WIDTH] = prod;
         end
-    end
+    endgenerate
 
-    // =========================================================================
-    // MAC State Machine
-    // =========================================================================
-    integer mi;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            mac_state  <= MAC_IDLE;
-            mac_cnt    <= 4'd0;
-            busy       <= 1'b0;
-            last_saved <= 1'b0;
-            prod_done  <= 1'b0;
-            for (mi = 0; mi < LANES; mi = mi + 1) begin
-                cur_win[mi] <= {DATA_WIDTH{1'b0}};
-                cur_ker[mi] <= {DATA_WIDTH{1'b0}};
-                prod[mi]    <= {(2*DATA_WIDTH){1'b0}};
-                mac_acc[mi] <= {ACC_WIDTH{1'b0}};
-            end
-        end else begin
-            prod_done <= 1'b0;
-
-            case (mac_state)
-                MAC_IDLE: begin
-                    if (data_valid) begin
-                        mac_state  <= MAC_MULT;
-                        mac_cnt    <= 4'd0;
-                        busy       <= 1'b1;
-                        last_saved <= data_last;
-                        // Clear accumulator
-                        for (mi = 0; mi < LANES; mi = mi + 1) begin
-                            mac_acc[mi] <= {ACC_WIDTH{1'b0}};
-                        end
-                        // Load first position from input data (pos=0)
-                        for (mi = 0; mi < LANES; mi = mi + 1) begin
-                            cur_win[mi] <= extract_byte(win_pack, 4'd0, mi[3:0]);
-                            cur_ker[mi] <= extract_byte(ker_pack, 4'd0, mi[3:0]);
-                        end
-                    end
-                end
-
-                MAC_MULT: begin
-                    // Multiply current position
-                    for (mi = 0; mi < LANES; mi = mi + 1) begin
-                        prod[mi] <= cur_win[mi] * cur_ker[mi];
-                    end
-
-                    // Load next position or transition to DONE
-                    if (mac_cnt < 4'd8) begin
-                        mac_cnt <= mac_cnt + 1;
-                        // Load next position (mac_cnt+1)
-                        for (mi = 0; mi < LANES; mi = mi + 1) begin
-                            cur_win[mi] <= extract_byte(win_cap, mac_cnt + 4'd1, mi[3:0]);
-                            cur_ker[mi] <= extract_byte(ker_cap, mac_cnt + 4'd1, mi[3:0]);
-                        end
-                    end else begin
-                        mac_state <= MAC_DONE;
-                    end
-                end
-
-                MAC_DONE: begin
-                    // Accumulate the last product
-                    for (mi = 0; mi < LANES; mi = mi + 1) begin
-                        mac_acc[mi] <= mac_acc[mi] + {{(ACC_WIDTH-2*DATA_WIDTH){prod[mi][2*DATA_WIDTH-1]}}, prod[mi]};
-                    end
-                    prod_done <= 1'b1;
-                    busy      <= 1'b0;
-                    mac_state <= MAC_IDLE;
-                end
-            endcase
-
-            // Accumulate products (one cycle after multiply, for positions 1-8)
-            if (mac_state == MAC_MULT && mac_cnt > 4'd0) begin
-                for (mi = 0; mi < LANES; mi = mi + 1) begin
-                    mac_acc[mi] <= mac_acc[mi] + {{(ACC_WIDTH-2*DATA_WIDTH){prod[mi][2*DATA_WIDTH-1]}}, prod[mi]};
-                end
+    genvar gs;
+    generate
+        for (gs = 1; gs < KERNEL_SIZE; gs = gs + 1) begin : gen_mult_stagen
+            for (gl = 0; gl < LANES; gl = gl + 1) begin : gen_mult_lanen
+                localparam [3:0] POS  = gs;
+                localparam [3:0] LANE = gl;
+                wire signed [DATA_WIDTH-1:0] w;
+                wire signed [DATA_WIDTH-1:0] k;
+                (* use_dsp = "yes" *) wire signed [PROD_WIDTH-1:0] prod;
+                assign w = extract_byte(win_pipe[gs-1], POS, LANE);
+                assign k = extract_byte(ker_pipe[gs-1], POS, LANE);
+                assign prod = w * k;
+                assign mult_stage[gs][gl*PROD_WIDTH+:PROD_WIDTH] = prod;
             end
         end
-    end
+    endgenerate
 
-    // =========================================================================
-    // Output Result - pack into output bus
-    // =========================================================================
-    integer ri;
+    integer                            si;
+    integer                            li;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            busy         <= 1'b0;
             result_valid <= 1'b0;
             result_last  <= 1'b0;
             result_pack  <= {(LANES * ACC_WIDTH) {1'b0}};
-        end else if (prod_done) begin
-            result_valid <= 1'b1;
-            result_last  <= last_saved;
-            for (ri = 0; ri < LANES; ri = ri + 1) begin
-                result_pack[ri*ACC_WIDTH+:ACC_WIDTH] <= mac_acc[ri];
+            valid_pipe   <= {KERNEL_SIZE{1'b0}};
+            last_pipe    <= {KERNEL_SIZE{1'b0}};
+            for (si = 0; si < KERNEL_SIZE; si = si + 1) begin
+                win_pipe[si] <= {KERNEL_PACK_WIDTH{1'b0}};
+                ker_pipe[si] <= {KERNEL_PACK_WIDTH{1'b0}};
+                sum_pipe[si] <= {(LANES * ACC_WIDTH) {1'b0}};
             end
         end else begin
-            result_valid <= 1'b0;
-            result_last  <= 1'b0;
+            busy <= 1'b0;
+
+            // Stage 0: capture inputs and compute first product
+            win_pipe[0] <= win_pack;
+            ker_pipe[0] <= ker_pack;
+            valid_pipe[0] <= data_valid;
+            last_pipe[0] <= data_last;
+            for (li = 0; li < LANES; li = li + 1) begin
+                if (data_valid)
+                    sum_pipe[0][li*ACC_WIDTH+:ACC_WIDTH] <= {{(ACC_WIDTH - PROD_WIDTH)
+                        {mult_stage[0][li*PROD_WIDTH+PROD_WIDTH-1]}}, mult_stage[0][li*PROD_WIDTH+:PROD_WIDTH]};
+                else sum_pipe[0][li*ACC_WIDTH+:ACC_WIDTH] <= {ACC_WIDTH{1'b0}};
+            end
+
+            // Stages 1..KERNEL_SIZE-1: accumulate remaining positions
+            for (si = 1; si < KERNEL_SIZE; si = si + 1) begin
+                win_pipe[si]   <= win_pipe[si-1];
+                ker_pipe[si]   <= ker_pipe[si-1];
+                valid_pipe[si] <= valid_pipe[si-1];
+                last_pipe[si]  <= last_pipe[si-1];
+                for (li = 0; li < LANES; li = li + 1) begin
+                    if (valid_pipe[si-1])
+                        sum_pipe[si][li*ACC_WIDTH+:ACC_WIDTH] <= $signed(
+                            sum_pipe[si-1][li*ACC_WIDTH+:ACC_WIDTH]
+                        ) + $signed({{(ACC_WIDTH - PROD_WIDTH)
+                            {mult_stage[si][li*PROD_WIDTH+PROD_WIDTH-1]}}, mult_stage[si][li*PROD_WIDTH+:PROD_WIDTH]});
+                    else sum_pipe[si][li*ACC_WIDTH+:ACC_WIDTH] <= {ACC_WIDTH{1'b0}};
+                end
+            end
+
+            // Output stage
+            result_valid <= valid_pipe[KERNEL_SIZE-1];
+            result_last  <= last_pipe[KERNEL_SIZE-1];
+            if (valid_pipe[KERNEL_SIZE-1]) begin
+                for (li = 0; li < LANES; li = li + 1) begin
+                    result_pack[li*ACC_WIDTH+:ACC_WIDTH] <= sum_pipe[KERNEL_SIZE-1][li*ACC_WIDTH+:ACC_WIDTH];
+                end
+            end else begin
+                result_pack <= {(LANES * ACC_WIDTH) {1'b0}};
+            end
         end
     end
 
