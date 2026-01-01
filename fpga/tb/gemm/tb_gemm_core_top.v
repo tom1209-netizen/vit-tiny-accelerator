@@ -208,11 +208,8 @@ module tb_gemm_core_top;
             handshakes_a = 0;
             handshakes_b = 0;
 
-            @(posedge aclk);
-
             // Wait for initial ready signals
-            while (!(s_axis_a_tready && s_axis_b_tready)) @(posedge aclk);
-            @(posedge aclk);
+            wait (s_axis_a_tready && s_axis_b_tready);
 
             // Stream using wavefront scheduling - total cycles needed: 2*ARRAY_SIZE-1
             for (cycle = 0; cycle < (2 * ARRAY_SIZE - 1); cycle = cycle + 1) begin

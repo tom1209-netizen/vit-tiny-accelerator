@@ -11,6 +11,7 @@ transcript
 compile.log
 modelsim.ini
 clockInfo.txt
+*.vcd
 
 # Models folder
 .venv/

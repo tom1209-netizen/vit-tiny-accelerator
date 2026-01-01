@@ -38,6 +38,8 @@ module gemm_core_top #(
     wire signed [DATA_WIDTH-1:0] b0, b1, b2, b3, b4, b5, b6, b7;
     wire b_valid_beat;
 
+    reg  tile_active;
+
     // A stream buffer
     input_buffer_controller #(
         .DATA_WIDTH     (DATA_WIDTH),
@@ -59,7 +61,8 @@ module gemm_core_top #(
         .data_out_6   (a6),
         .data_out_7   (a7),
         .data_valid   (a_valid_beat),
-        .enable       (1'b1)
+        .enable       (tile_active),
+        .stream_reset (start_tile)
     );
 
     // B stream buffer
@@ -83,13 +86,20 @@ module gemm_core_top #(
         .data_out_6   (b6),
         .data_out_7   (b7),
         .data_valid   (b_valid_beat),
-        .enable       (1'b1)
+        .enable       (tile_active),
+        .stream_reset (start_tile)
     );
 
 
     // Output collector starts waiting immediately; it only emits beats when cells finish
     wire start_output_collector = start_tile;
     wire array_active;
+
+    always @(posedge aclk or negedge aresetn) begin
+        if (!aresetn) tile_active <= 1'b0;
+        else if (start_tile) tile_active <= 1'b1;
+        else if (tile_done) tile_active <= 1'b0;
+    end
 
     // Clear accumulators at tile start
     wire clear_acc = start_tile;

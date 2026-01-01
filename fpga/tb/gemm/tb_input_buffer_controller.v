@@ -16,6 +16,7 @@ module tb_input_buffer_controller;
     reg                               clk;
     reg                               rst_n;
     reg                               enable;
+    reg                               stream_reset;
 
     // AXI-Stream signals
     reg         [AXIS_DATA_WIDTH-1:0] s_axis_tdata;
@@ -65,6 +66,7 @@ module tb_input_buffer_controller;
         .clk(clk),
         .rst_n(rst_n),
         .enable(enable),
+        .stream_reset(stream_reset),
         .s_axis_tdata(s_axis_tdata),
         .s_axis_tvalid(s_axis_tvalid),
         .s_axis_tlast(s_axis_tlast),
@@ -130,6 +132,7 @@ module tb_input_buffer_controller;
             // Initialize all signals
             rst_n              = 1'b0;
             enable             = 1'b0;
+            stream_reset       = 1'b0;
             s_axis_tdata       = {AXIS_DATA_WIDTH{1'b0}};
             s_axis_tvalid      = 1'b0;
             s_axis_tlast       = 1'b0;
@@ -166,6 +169,15 @@ module tb_input_buffer_controller;
         end
     endtask
 
+    task pulse_stream_reset;
+        begin
+            stream_reset = 1'b1;
+            @(posedge clk);
+            stream_reset = 1'b0;
+            @(posedge clk);
+        end
+    endtask
+
     // Test 1: Continuous streaming (original test)
     task run_continuous_test;
         begin
@@ -183,6 +195,7 @@ module tb_input_buffer_controller;
             fork
                 begin : continuous_driver
                     wait (rst_n == 1'b1);
+                    pulse_stream_reset();
                     @(posedge clk);
                     // Wait for initial ready
                     wait (s_axis_tready);
@@ -308,6 +321,7 @@ module tb_input_buffer_controller;
             fork
                 begin : backpressure_driver
                     wait (rst_n == 1'b1);
+                    pulse_stream_reset();
                     @(posedge clk);
                     wait (s_axis_tready);
                     @(posedge clk);
@@ -411,6 +425,7 @@ module tb_input_buffer_controller;
             fork
                 begin : intermittent_driver
                     wait (rst_n == 1'b1);
+                    pulse_stream_reset();
                     @(posedge clk);
                     wait (s_axis_tready);
                     @(posedge clk);
@@ -513,6 +528,7 @@ module tb_input_buffer_controller;
             fork
                 begin : reset_driver
                     wait (rst_n == 1'b1);
+                    pulse_stream_reset();
                     @(posedge clk);
                     wait (s_axis_tready);
                     @(posedge clk);

@@ -1,0 +1,33 @@
+{
+    "signal": [
+        { "name": "clk", "wave": "pppppppppppppp" },
+
+        { "name": "start_tile", "wave": "0.10.........." },
+        { "name": "tile_done", "wave": "0...........10" },
+        {
+            "name": "s_axis_a_tdata",
+            "wave": "xxx==|=xxxxxxx",
+            "data": ["A0", "A1", "A14"]
+        },
+        { "name": "s_axis_a_tvalid", "wave": "0..1...0......" },
+        { "name": "s_axis_a_tready", "wave": "0..1...0......" },
+        { "name": "s_axis_a_tlast", "wave": "0.....10......" },
+        {
+            "name": "s_axis_b_tdata",
+            "wave": "xxx==|=xxxxxxx",
+            "data": ["B0", "B1", "B14"]
+        },
+        { "name": "s_axis_b_tvalid", "wave": "0..1...0......" },
+        { "name": "s_axis_b_tready", "wave": "0..1...0......" },
+        { "name": "s_axis_b_tlast", "wave": "0.....10......" },
+        {
+            "name": "m_axis_out_tdata",
+            "wave": "xxxxxxxxx==|=x",
+            "data": ["O0", "O1", "O32"]
+        },
+        { "name": "m_axis_out_tready", "wave": "0......1.....0" },
+        { "name": "m_axis_out_tvalid", "wave": "0........1...0" },
+        { "name": "m_axis_out_tlast", "wave": "0...........10" }
+    ],
+    "config": { "hscale": 2 }
+}
