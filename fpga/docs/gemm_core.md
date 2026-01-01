@@ -161,13 +161,13 @@ gemm_core_top (top-level)
 
 ### 5.2 Derived Parameters (Computed Internally)
 
-| Parameter         | Formula                                    | Default | Description                  |
-| ----------------- | ------------------------------------------ | ------- | ---------------------------- |
-| `TOTAL_RESULTS`   | ARRAY_SIZE × ARRAY_SIZE                    | 64      | Total output elements        |
-| `VALUES_PER_BEAT` | AXIS_DATA_WIDTH / ACC_WIDTH                | 2       | INT32 values per output beat |
-| `TOTAL_BEATS`     | TOTAL_RESULTS / VALUES_PER_BEAT            | 32      | Output beats per tile        |
-| `INPUT_BEATS`     | 2 × ARRAY_SIZE - 1                         | 15      | Input beats per tile (A & B) |
-| `COUNT_WIDTH`     | $\lceil\log_2(\text{ARRAY\_SIZE}+1)\rceil$ | 4       | MAC counter width            |
+| Parameter         | Formula                                  | Default | Description                  |
+| ----------------- | ---------------------------------------- | ------- | ---------------------------- |
+| `TOTAL_RESULTS`   | ARRAY_SIZE × ARRAY_SIZE                  | 64      | Total output elements        |
+| `VALUES_PER_BEAT` | AXIS_DATA_WIDTH / ACC_WIDTH              | 2       | INT32 values per output beat |
+| `TOTAL_BEATS`     | TOTAL_RESULTS / VALUES_PER_BEAT          | 32      | Output beats per tile        |
+| `INPUT_BEATS`     | 2 × ARRAY_SIZE - 1                       | 15      | Input beats per tile (A & B) |
+| `COUNT_WIDTH`     | $\lceil\log_2(\text{ArraySize}+1)\rceil$ | 4       | MAC counter width            |
 
 ### 5.3 Constraints and Requirements
 
@@ -311,18 +311,18 @@ stateDiagram-v2
 
     %% Transitions
     IDLE --> WAIT: start_output
-    
+
     WAIT --> DRAIN: acc_done[0][4] == 1
-    
+
     %% Self-Loop: Same Row
     DRAIN --> DRAIN: tx_fire && col < 6
-    
+
     %% Self-Loop: Row Wrap
     DRAIN --> DRAIN: tx_fire && col >= 6 && row < 7
-    
+
     %% Exit: Done
     DRAIN --> DONE: tx_fire && col >= 6 && row == 7
-    
+
     DONE --> IDLE: (Next Cycle)
 ```
 
@@ -909,4 +909,3 @@ for (j = 0; j < 8; j++) begin
         b_beat[j*8 +: 8] = 8'b0;
 end
 ```
-
