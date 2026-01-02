@@ -1,6 +1,6 @@
 #Define variables
-TESTNAME 	?= tb_gemm_core_top
-TB_NAME 	?= tb_gemm_core_top
+TESTNAME 	?= tb_depthwise_conv_unit
+TB_NAME 	?= tb_depthwise_conv_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
 SIM_DEBUG   ?= 1

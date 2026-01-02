@@ -3,9 +3,9 @@
 | **Document Information** |                                                   |
 | ------------------------ | ------------------------------------------------- |
 | **Module Name**          | `depthwise_conv_unit`                             |
-| **Version**              | 1.0                                               |
+| **Version**              | 1.1                                               |
 | **Design Status**        | In development                                    |
-| **Last Updated**         | December 31 2025                                  |
+| **Last Updated**         | January 02 2025                                   |
 | **Source Location**      | `fpga/rtl/depthwise_conv/`                        |
 | **Testbench**            | `fpga/tb/depthwise_conv/tb_depthwise_conv_unit.v` |
 | **Author**               | Le Phuc Khang                                     |
@@ -29,7 +29,6 @@
 15. [Verification](#15-verification)
 16. [Design Constraints](#16-design-constraints)
 17. [Known Limitations](#17-known-limitations)
-18. [Revision History](#18-revision-history)
 
 ## 1. Overview
 
@@ -765,12 +764,6 @@ set_output_delay -clock clk -min 0.5 [get_ports axis_*_tvalid]
 | -------------------- | ---------------------------- | ------------------------------------- |
 | High LUT usage (60%) | Limits other logic on device | Enable DSP inference for MACs         |
 | No DSP usage         | Underutilizes available DSPs | Add `use_dsp` attribute to multiplies |
-
-## 18. Revision History
-
-| Version | Date             | Author        | Changes                             |
-| ------- | ---------------- | ------------- | ----------------------------------- |
-| 1.0     | December 31 2025 | Le Phuc Khang | Initial comprehensive documentation |
 
 ## Appendix A: Quick Reference Card
 

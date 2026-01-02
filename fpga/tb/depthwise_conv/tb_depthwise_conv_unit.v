@@ -46,6 +46,13 @@ module tb_depthwise_conv_unit;
     wire                          axis_data_out_tlast;
     reg                           axis_data_out_tready;
 
+    // DUT state visibility for waveform inspection
+    wire [1:0]                    dut_state;
+    wire                          state_idle;
+    wire                          state_load_kernel;
+    wire                          state_process;
+    wire                          state_done;
+
     // Testbench storage
     reg signed [             7:0] input_image           [0:MAX_WIDTH*MAX_WIDTH*MAX_CHANNELS-1];
     reg signed [             7:0] kernel_mem            [                  0:MAX_CHANNELS*9-1];
@@ -90,6 +97,12 @@ module tb_depthwise_conv_unit;
         .axis_data_out_tlast(axis_data_out_tlast),
         .axis_data_out_tready(axis_data_out_tready)
     );
+
+    assign dut_state = dut.state;
+    assign state_idle = (dut_state == 2'd0);
+    assign state_load_kernel = (dut_state == 2'd1);
+    assign state_process = (dut_state == 2'd2);
+    assign state_done = (dut_state == 2'd3);
 
     // Clock generation
     initial clk = 0;

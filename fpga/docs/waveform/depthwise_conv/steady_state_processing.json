@@ -1,0 +1,62 @@
+{
+    "signal": [
+        {
+            "name": "clk",
+            "wave": "ppppppppppppppppppppppp"
+        },
+        {
+            "name": "rst_n",
+            "wave": "01....................."
+        },
+        {
+            "name": "start",
+            "wave": "010...................."
+        },
+        {
+            "name": "done",
+            "wave": "0...................10."
+        },
+        {
+            "name": "state",
+            "wave": "=.=.................==.",
+            "data": ["00", "10", "11", "00"]
+        },
+        {
+            "name": "in_tdata",
+            "wave": "xx====|===xxxxxxxxxxxxx",
+            "data": ["D0", "D1", "D2", "D3", "D8", "D9", "D20"]
+        },
+        {
+            "name": "in_tvalid",
+            "wave": "0.1.......0............"
+        },
+        {
+            "name": "in_tready",
+            "wave": "0.1.......0............"
+        },
+        {
+            "name": "in_tlast",
+            "wave": "0........10............"
+        },
+        {
+            "name": "out_tdata",
+            "wave": "............========xxx",
+            "data": ["O0", "O1", "O2", "O3", "O4", "O5", "O6", "O7"]
+        },
+        {
+            "name": "out_tvalid",
+            "wave": "0............1......0.."
+        },
+        {
+            "name": "out_tready",
+            "wave": "0.1.................0.."
+        },
+        {
+            "name": "out_tlast",
+            "wave": "0..................10.."
+        }
+    ],
+    "config": {
+        "hscale": 1
+    }
+}

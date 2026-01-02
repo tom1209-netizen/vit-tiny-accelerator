@@ -14,7 +14,7 @@ module depthwise_conv_unit #(
 
     // Control interface
     input  wire        start,
-    output reg         done,
+    output wire        done,
     input  wire [15:0] cfg_height,
     input  wire [15:0] cfg_width,
     input  wire [15:0] cfg_channels,
@@ -91,6 +91,10 @@ module depthwise_conv_unit #(
 
     // Handshaking
     wire input_handshake = axis_data_in_tvalid && axis_data_in_tready;
+    wire kernel_last_handshake = axis_kernel_in_tvalid &&
+                                 axis_kernel_in_tready &&
+                                 axis_kernel_in_tlast;
+    wire last_beat_sent;
     reg input_stream_done;
 
 
@@ -205,7 +209,7 @@ module depthwise_conv_unit #(
     reg [OUT_SLICE_W-1:0] ser_slice_idx;
 
     reg [PENDING_W-1:0] in_flight;
-    reg last_beat_sent;
+    reg output_enable;
 
     localparam ISSUE_PIPE_DEPTH = 4;
     localparam ISSUE_PIPE_W = (ISSUE_PIPE_DEPTH <= 1) ? 1 : $clog2(ISSUE_PIPE_DEPTH + 1);
@@ -220,9 +224,20 @@ module depthwise_conv_unit #(
 
     wire [OUTPUT_WIDTH-1:0] ser_slice = ser_buf[ser_slice_idx*OUTPUT_WIDTH+:OUTPUT_WIDTH];
 
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            output_enable <= 1'b0;
+        end else if (state == S_IDLE) begin
+            output_enable <= 1'b0;
+        end else if (input_stream_done || !fifo_has_space) begin
+            output_enable <= 1'b1;
+        end
+    end
+
     assign axis_data_out_tdata = ser_slice;
-    assign axis_data_out_tvalid = ser_buf_valid;
-    assign axis_data_out_tlast = ser_buf_valid && ser_buf_last && (ser_slice_idx == OUT_SLICES - 1);
+    assign axis_data_out_tvalid = ser_buf_valid && output_enable;
+    assign axis_data_out_tlast = ser_buf_valid && ser_buf_last &&
+                                 (ser_slice_idx == OUT_SLICES - 1) && output_enable;
 
 
     // Flow Control Logic
@@ -267,7 +282,7 @@ module depthwise_conv_unit #(
                     next_state = S_LOAD_KERNEL;
             end
             S_LOAD_KERNEL: begin
-                if (kernel_load_done) next_state = S_PROCESS;
+                if (kernel_load_done || kernel_last_handshake) next_state = S_PROCESS;
             end
             S_PROCESS: begin
                 if (last_beat_sent) next_state = S_DONE;
@@ -920,7 +935,8 @@ module depthwise_conv_unit #(
 
     // Output FIFO (MAC results)
     wire fifo_push = mac_result_valid;
-    wire ser_accept = ser_buf_valid && axis_data_out_tready;
+    wire ser_accept = ser_buf_valid && axis_data_out_tready && output_enable;
+    assign last_beat_sent = ser_accept && axis_data_out_tlast;
     wire ser_done = ser_accept && (ser_slice_idx == OUT_SLICES - 1);
     wire ser_need_load = (!ser_buf_valid) || ser_done;
     wire fifo_pop = ser_need_load && !fifo_empty;
@@ -965,16 +981,14 @@ module depthwise_conv_unit #(
     // Output serializer
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            ser_buf        <= {MAC_WIDTH{1'b0}};
-            ser_buf_valid  <= 1'b0;
-            ser_buf_last   <= 1'b0;
-            ser_slice_idx  <= {OUT_SLICE_W{1'b0}};
-            last_beat_sent <= 1'b0;
+            ser_buf       <= {MAC_WIDTH{1'b0}};
+            ser_buf_valid <= 1'b0;
+            ser_buf_last  <= 1'b0;
+            ser_slice_idx <= {OUT_SLICE_W{1'b0}};
         end else if (state == S_IDLE) begin
-            ser_buf_valid  <= 1'b0;
-            ser_buf_last   <= 1'b0;
-            ser_slice_idx  <= {OUT_SLICE_W{1'b0}};
-            last_beat_sent <= 1'b0;
+            ser_buf_valid <= 1'b0;
+            ser_buf_last  <= 1'b0;
+            ser_slice_idx <= {OUT_SLICE_W{1'b0}};
         end else begin
             if (ser_need_load) begin
                 if (!fifo_empty) begin
@@ -989,9 +1003,6 @@ module depthwise_conv_unit #(
                 ser_slice_idx <= ser_slice_idx + 1'b1;
             end
 
-            if (ser_accept && axis_data_out_tlast) begin
-                last_beat_sent <= 1'b1;
-            end
         end
     end
 
@@ -1023,12 +1034,7 @@ module depthwise_conv_unit #(
         end
     end
 
-
-    // Done Signal
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) done <= 1'b0;
-        else if (state == S_DONE && last_beat_sent) done <= 1'b1;
-        else done <= 1'b0;
-    end
+    // Done Signal: same-cycle pulse on the final output handshake.
+    assign done = state == S_DONE;
 
 endmodule
