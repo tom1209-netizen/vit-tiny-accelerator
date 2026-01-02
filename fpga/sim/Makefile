@@ -4,6 +4,13 @@ TB_NAME 	?= tb_depthwise_conv_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
 SIM_DEBUG   ?= 1
+USE_UNISIM  ?= 1
+XILINX_LIB_DIR ?= $(CURDIR)/xilinx_lib
+XILINX_LIBS ?= unisim
+
+VLOG_DEFINES := $(if $(SIM_DEBUG),+define+SIM_DEBUG,) $(if $(USE_UNISIM),+define+USE_UNISIM,)
+VLOG_LIBS := $(if $(USE_UNISIM),$(foreach lib,$(XILINX_LIBS),-L $(lib)),)
+VSIM_LIBS := $(if $(USE_UNISIM),$(foreach lib,$(XILINX_LIBS),-L $(lib)),)
 
 #==============================
 
@@ -15,6 +22,7 @@ COMMANDS := all all_wave all_cov \
 			run run_cov \
 			wave \
 			gen_cov gen_html \
+			xilinx_libs check_xilinx_libs clean_libs \
 			clean \
 			help
 
@@ -36,21 +44,31 @@ all_wave: clean build run wave
 
 all_cov: clean build_cov run_cov
 
-build:
+build: $(if $(USE_UNISIM),check_xilinx_libs,)
 	vlib work
 	vmap work work
-	vlog $(if $(SIM_DEBUG),+define+SIM_DEBUG,) -f compile.f | tee compile.log
+	@if [ "$(USE_UNISIM)" = "1" ]; then \
+		for lib in $(XILINX_LIBS); do \
+			vmap $$lib $(XILINX_LIB_DIR)/$$lib; \
+		done; \
+	fi
+	vlog $(VLOG_DEFINES) $(VLOG_LIBS) -f compile.f | tee compile.log
 
-build_cov:
+build_cov: $(if $(USE_UNISIM),check_xilinx_libs,)
 	vlib work
 	vmap work work
-	vlog +cover=bcesft $(if $(SIM_DEBUG),+define+SIM_DEBUG,) -f compile.f
+	@if [ "$(USE_UNISIM)" = "1" ]; then \
+		for lib in $(XILINX_LIBS); do \
+			vmap $$lib $(XILINX_LIB_DIR)/$$lib; \
+		done; \
+	fi
+	vlog +cover=bcesft $(VLOG_DEFINES) $(VLOG_LIBS) -f compile.f
 
 run:
-	vsim -debugDB -l $(TESTNAME).log -voptargs=+acc -assertdebug -c $(TB_NAME) -do "log -r /*;run -all;" -GMEALY_FSM=$(MEALY_FSM)
+	vsim $(VSIM_LIBS) -debugDB -l $(TESTNAME).log -voptargs=+acc -assertdebug -c $(TB_NAME) -do "log -r /*;run -all;" -GMEALY_FSM=$(MEALY_FSM)
 
 run_cov:
-	vsim -coverage -l $(TESTNAME).log -c $(TB_NAME) -voptargs="+cover=bcesft" -assertdebug -do "do exclude.do; coverage save -onexit $(TESTNAME).ucdb; log -r /*;run -all"
+	vsim $(VSIM_LIBS) -coverage -l $(TESTNAME).log -c $(TB_NAME) -voptargs="+cover=bcesft" -assertdebug -do "do exclude.do; coverage save -onexit $(TESTNAME).ucdb; log -r /*;run -all"
 
 wave:
 	vsim -i -view vsim.wlf -do "add wave vsim:/$(TB_NAME)/*; radix -$(RADIX)" &
@@ -75,6 +93,24 @@ clean:
 	rm -rf transcript
 	rm -rf *.ucdb
 
+clean_libs:
+	rm -rf $(XILINX_LIB_DIR)
+
+xilinx_libs:
+	vlib $(XILINX_LIB_DIR)/unisim
+	vmap unisim $(XILINX_LIB_DIR)/unisim
+	vlog -work unisim $(XILINX_VIVADO)/data/verilog/src/unisims/*.v
+	vlog -work unisim $(XILINX_VIVADO)/data/verilog/src/glbl.v
+
+check_xilinx_libs:
+	@for lib in $(XILINX_LIBS); do \
+		if [ ! -d "$(XILINX_LIB_DIR)/$$lib" ]; then \
+			echo "Missing Xilinx sim lib: $$lib"; \
+			echo "Run: make xilinx_libs XILINX_LIB_DIR=$(XILINX_LIB_DIR)"; \
+			exit 1; \
+		fi; \
+	done
+
 help:
 	@echo ""
 	@echo "****************************************"
@@ -88,6 +124,8 @@ help:
 	@echo "** make wave     : open waveform"
 	@echo "** make gen_cov  : merge, generate coverage data base and text coverage report"
 	@echo "** make gen_cov  : merge, gemerate coverage data base and html coverage report"
+	@echo "** make xilinx_libs   : build Xilinx UNISIM libraries for Questa"
+	@echo "** make clean_libs    : remove precompiled Xilinx libraries"
 	@echo "** make help     : print this help message"
 	@echo "****************************************"
 	@echo ""

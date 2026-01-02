@@ -19,3 +19,4 @@
 ../rtl/depthwise_conv/kernel_buffer.v
 ../rtl/depthwise_conv/line_buffer.v
 ../rtl/depthwise_conv/mac_unit.v
+../rtl/depthwise_conv/srl_delay_tap.v

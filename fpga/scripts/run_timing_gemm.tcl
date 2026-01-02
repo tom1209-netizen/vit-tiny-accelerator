@@ -30,11 +30,11 @@ set fmax_report     [file join $build_dir "${top_module}_fmax_report.txt"]
 
 # Source Files - GEMM Core
 set rtl_files [list \
-    "$rtl_dir/gemm/processing_element.v" \
-    "$rtl_dir/gemm/systolic_array.v" \
-    "$rtl_dir/gemm/input_buffer_controller.v" \
-    "$rtl_dir/gemm/output_collector.v" \
-    "$rtl_dir/gemm/gemm_core_top.v" \
+    [file join $rtl_dir "gemm" "processing_element.v"] \
+    [file join $rtl_dir "gemm" "systolic_array.v"] \
+    [file join $rtl_dir "gemm" "input_buffer_controller.v"] \
+    [file join $rtl_dir "gemm" "output_collector.v"] \
+    [file join $rtl_dir "gemm" "gemm_core_top.v"] \
 ]
 
 # Read Sources

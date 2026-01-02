@@ -30,14 +30,30 @@ module kernel_buffer #(
     localparam NUM_GROUPS = MAX_CHANNELS / LANES;  // 16 groups for 128 channels
 
     // Kernel Weight Storage
-    (* ram_style = "registers" *)
-    reg [KERNEL_PACK_WIDTH-1:0] kernel_mem[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_0[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_1[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_2[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_3[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_4[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_5[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_6[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_7[0:NUM_GROUPS-1];
+    (* ram_style = "block" *) reg [INPUT_WIDTH-1:0] kernel_mem_8[0:NUM_GROUPS-1];
 
     // Initialize to zero
     integer init_i;
     initial begin
-        for (init_i = 0; init_i < NUM_GROUPS; init_i = init_i + 1)
-        kernel_mem[init_i] = {KERNEL_PACK_WIDTH{1'b0}};
+        for (init_i = 0; init_i < NUM_GROUPS; init_i = init_i + 1) begin
+            kernel_mem_0[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_1[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_2[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_3[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_4[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_5[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_6[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_7[init_i] = {INPUT_WIDTH{1'b0}};
+            kernel_mem_8[init_i] = {INPUT_WIDTH{1'b0}};
+        end
     end
 
     // Loading State Machine
@@ -132,11 +148,66 @@ module kernel_buffer #(
     // Stage 3: Write to kernel memory
     always @(posedge clk) begin
         if (wr_en_d) begin
-            kernel_mem[chan_group_d][coeff_idx_d*INPUT_WIDTH+:INPUT_WIDTH] <= data_d;
+            case (coeff_idx_d)
+                4'd0: kernel_mem_0[chan_group_d] <= data_d;
+                4'd1: kernel_mem_1[chan_group_d] <= data_d;
+                4'd2: kernel_mem_2[chan_group_d] <= data_d;
+                4'd3: kernel_mem_3[chan_group_d] <= data_d;
+                4'd4: kernel_mem_4[chan_group_d] <= data_d;
+                4'd5: kernel_mem_5[chan_group_d] <= data_d;
+                4'd6: kernel_mem_6[chan_group_d] <= data_d;
+                4'd7: kernel_mem_7[chan_group_d] <= data_d;
+                4'd8: kernel_mem_8[chan_group_d] <= data_d;
+                default: ;
+            endcase
         end
     end
 
-    // Kernel Lookup - combinational read
-    assign kernel_pack = kernel_mem[chan_group];
+    // Kernel Lookup - registered read (1-cycle)
+    reg [INPUT_WIDTH-1:0] kernel_r0;
+    reg [INPUT_WIDTH-1:0] kernel_r1;
+    reg [INPUT_WIDTH-1:0] kernel_r2;
+    reg [INPUT_WIDTH-1:0] kernel_r3;
+    reg [INPUT_WIDTH-1:0] kernel_r4;
+    reg [INPUT_WIDTH-1:0] kernel_r5;
+    reg [INPUT_WIDTH-1:0] kernel_r6;
+    reg [INPUT_WIDTH-1:0] kernel_r7;
+    reg [INPUT_WIDTH-1:0] kernel_r8;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            kernel_r0 <= {INPUT_WIDTH{1'b0}};
+            kernel_r1 <= {INPUT_WIDTH{1'b0}};
+            kernel_r2 <= {INPUT_WIDTH{1'b0}};
+            kernel_r3 <= {INPUT_WIDTH{1'b0}};
+            kernel_r4 <= {INPUT_WIDTH{1'b0}};
+            kernel_r5 <= {INPUT_WIDTH{1'b0}};
+            kernel_r6 <= {INPUT_WIDTH{1'b0}};
+            kernel_r7 <= {INPUT_WIDTH{1'b0}};
+            kernel_r8 <= {INPUT_WIDTH{1'b0}};
+        end else begin
+            kernel_r0 <= kernel_mem_0[chan_group];
+            kernel_r1 <= kernel_mem_1[chan_group];
+            kernel_r2 <= kernel_mem_2[chan_group];
+            kernel_r3 <= kernel_mem_3[chan_group];
+            kernel_r4 <= kernel_mem_4[chan_group];
+            kernel_r5 <= kernel_mem_5[chan_group];
+            kernel_r6 <= kernel_mem_6[chan_group];
+            kernel_r7 <= kernel_mem_7[chan_group];
+            kernel_r8 <= kernel_mem_8[chan_group];
+        end
+    end
+
+    assign kernel_pack = {
+        kernel_r8,
+        kernel_r7,
+        kernel_r6,
+        kernel_r5,
+        kernel_r4,
+        kernel_r3,
+        kernel_r2,
+        kernel_r1,
+        kernel_r0
+    };
 
 endmodule

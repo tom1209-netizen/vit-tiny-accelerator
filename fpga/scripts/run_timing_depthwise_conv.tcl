@@ -36,6 +36,7 @@ set rtl_files [list \
     [file join $rtl_dir "depthwise_conv" "kernel_buffer.v"] \
     [file join $rtl_dir "depthwise_conv" "line_buffer.v"] \
     [file join $rtl_dir "depthwise_conv" "mac_unit.v"] \
+    [file join $rtl_dir "depthwise_conv" "srl_delay_tap.v"] \
 ]
 
 foreach rtl_file $rtl_files {

@@ -3,9 +3,9 @@
 | **Document Information** |                                                   |
 | ------------------------ | ------------------------------------------------- |
 | **Module Name**          | `depthwise_conv_unit`                             |
-| **Version**              | 1.1                                               |
+| **Version**              | 1.2                                               |
 | **Design Status**        | In development                                    |
-| **Last Updated**         | January 02 2025                                   |
+| **Last Updated**         | January 02 2026                                   |
 | **Source Location**      | `fpga/rtl/depthwise_conv/`                        |
 | **Testbench**            | `fpga/tb/depthwise_conv/tb_depthwise_conv_unit.v` |
 | **Author**               | Le Phuc Khang                                     |
@@ -52,7 +52,7 @@ Unlike standard convolution which can be efficiently mapped to GEMM-based systol
 
 - **8 parallel lanes** processing 8 channels simultaneously per clock cycle
 - **Circular line buffers** for efficient row-wise data reuse
-- **Shift register banks** for column-wise sliding window extraction
+- **SRL delay taps (SRLC32E)** for column-wise sliding window extraction
 - **Fully-pipelined MAC unit** achieving II=1 (initiation interval of 1 cycle)
 
 ## 2. Features Summary
@@ -95,8 +95,21 @@ S_IDLE -> S_LOAD_KERNEL -> S_PROCESS -> S_DONE
 The 3×3 convolution window is formed using a combination of:
 
 - **Line Buffers (4 BRAMs)**: Store up to 4 complete rows of the input feature map in a circular fashion.
-- **Shift Register Banks**: Maintain a 2-column sliding history to extract left, center, and right column values.
+- **SRL Delay Taps (SRLC32E)**: Tap-selectable left/center column history using ping-pong banks.
 - **Lookahead Architecture**: The currently-read data serves as the "right" column, allowing continuous processing without stalls.
+
+### 3.2.1 SRLC32E Tap Rationale
+
+We use SRLC32E-based taps for column history instead of explicit register banks or BRAM shift registers because:
+
+- **Resource efficiency**: SRLC32E packs 32-cycle shift into a single LUT, reducing FF count and routing.
+- **Tap flexibility**: The tap address selects left/center columns without extra mux trees.
+- **Throughput preservation**: Tap reads are single-cycle and keep II=1 in steady state.
+
+Trade-offs:
+
+- **Depth limit**: Tap depth is capped at 32, so `2 × MAX_CHAN_BEATS <= 32`.
+- **LUT-as-memory usage**: Consumes LUTRAM resources (visible in utilization).
 
 ### 3.3 Boundary Handling
 
@@ -119,7 +132,8 @@ Zero-padding is applied implicitly:
 depthwise_conv_unit (top-level)
 │
 ├── kernel_buffer           # Stores 3×3 kernels for all channel groups
-│   └── kernel_mem[16]      # 576-bit packed registers × 16 groups
+│   ├── kernel_mem_0..8     # 9 × 64-bit BRAM banks (16 deep)
+│   └── kernel_pack_reg     # 1-cycle registered readout
 │
 ├── line_buffer             # 4-row circular BRAM storage
 │   ├── line_buf_0          # BRAM row 0 (448 × 64-bit)
@@ -134,9 +148,7 @@ depthwise_conv_unit (top-level)
 │
 ├── Input FIFO              # Decouples AXI input from line buffer writes
 │
-├── Shift Register Banks    # Dual-bank column history (ping-pong)
-│   ├── row_*_shift_a[33]   # Bank A for current row processing
-│   └── row_*_shift_b[33]   # Bank B for next-row prefetch
+├── srl_delay_tap ×12       # SRLC32E-based column delay taps (left/center)
 │
 └── Output FIFO + Serializer
     ├── out_fifo[16]        # 256-bit MAC result buffer
@@ -164,7 +176,7 @@ depthwise_conv_unit (top-level)
 | `KERNEL_SIZE`       | 9 (constant)               | 9             | 3×3 kernel positions        |
 | `KERNEL_PACK_WIDTH` | KERNEL_SIZE × INPUT_WIDTH  | 576           | Packed kernel width in bits |
 | `MAX_CHAN_BEATS`    | MAX_CHANNELS / LANES       | 16            | Max channel groups          |
-| `SHIFT_DEPTH`       | 2 × MAX_CHAN_BEATS + 1     | 33            | Shift register depth        |
+| `SRL_TAP_DEPTH`     | 32 (SRLC32E)               | 32            | Max tap delay (left/center) |
 | `MAC_WIDTH`         | LANES × ACC_WIDTH          | 256           | Full MAC result width       |
 | `OUT_SLICES`        | MAC_WIDTH / OUTPUT_WIDTH   | 4             | Output serialization factor |
 | `OUT_FIFO_DEPTH`    | 16 (constant)              | 16            | Output FIFO entries         |
@@ -176,6 +188,7 @@ depthwise_conv_unit (top-level)
 2. **Width Constraint**: `cfg_width` ≤ `MAX_WIDTH`
 3. **Channel Limit**: `cfg_channels` ≤ `MAX_CHANNELS`
 4. **Output Width**: `OUTPUT_WIDTH` must evenly divide `MAC_WIDTH` (256 bits)
+5. **SRL Tap Depth**: `2 × MAX_CHAN_BEATS` ≤ 32 (SRLC32E tap limit)
 
 ## 6. Interface Specification
 
@@ -332,12 +345,12 @@ stateDiagram-v2
 
 ### 8.2 State Descriptions
 
-| State           | Encoding | Entry Condition          | Exit Condition            | Actions                               |
-| --------------- | -------- | ------------------------ | ------------------------- | ------------------------------------- |
-| `S_IDLE`        | 2'b00    | Reset or S_DONE complete | `start` with valid config | Latch cfg\_\*, reset counters         |
-| `S_LOAD_KERNEL` | 2'b01    | `start` accepted         | `kernel_load_done`        | Accept kernel stream, fill kernel_mem |
-| `S_PROCESS`     | 2'b10    | Kernels loaded           | `last_beat_sent`          | Stream input, compute, emit output    |
-| `S_DONE`        | 2'b11    | All outputs sent         | Always (1 cycle)          | Assert `done`, return to S_IDLE       |
+| State           | Encoding | Entry Condition          | Exit Condition            | Actions                                |
+| --------------- | -------- | ------------------------ | ------------------------- | -------------------------------------- |
+| `S_IDLE`        | 2'b00    | Reset or S_DONE complete | `start` with valid config | Latch cfg\_\*, reset counters          |
+| `S_LOAD_KERNEL` | 2'b01    | `start` accepted         | `kernel_load_done`        | Accept kernel stream, fill kernel BRAM |
+| `S_PROCESS`     | 2'b10    | Kernels loaded           | `last_beat_sent`          | Stream input, compute, emit output     |
+| `S_DONE`        | 2'b11    | All outputs sent         | Always (1 cycle)          | Assert `done`, return to S_IDLE        |
 
 ### 8.3 Valid Configuration Check
 
@@ -361,21 +374,24 @@ start && (cfg_height > 0) && (cfg_width > 0) && (cfg_channels >= LANES)
 
 ### 10.1 End-to-End Pipeline Stages
 
-| Stage | Name                  | Latency  | Description                                      |
-| ----- | --------------------- | -------- | ------------------------------------------------ |
-| 1     | Input FIFO            | 1 cycle  | Decouples AXI input from internal timing         |
-| 2     | Line Buffer Write     | 1 cycle  | Write incoming data to circular BRAM             |
-| 3     | Line Buffer Read      | 1 cycle  | Synchronous BRAM read (3 parallel reads)         |
-| 4     | Row Mux Select        | 1 cycle  | Select above/center/below rows from BRAM outputs |
-| 5     | Shift Register Insert | 1 cycle  | Shift new data into column history               |
-| 6     | Window Assembly       | 1 cycle  | Form 3×3 window with boundary masking            |
-| 7-15  | MAC Pipeline          | 9 cycles | 9-stage pipelined multiply-accumulate            |
-| 16    | Output FIFO Write     | 1 cycle  | Buffer MAC result                                |
-| 17+   | Serializer            | 4 cycles | Emit 4× 64-bit slices per MAC result             |
+| Stage | Name                    | Latency  | Description                                      |
+| ----- | ----------------------- | -------- | ------------------------------------------------ |
+| 1     | Input FIFO              | 1 cycle  | Decouples AXI input from internal timing         |
+| 2     | Line Buffer Write       | 1 cycle  | Write incoming data to circular BRAM             |
+| 3     | Line Buffer Read        | 1 cycle  | Synchronous BRAM read (3 parallel reads)         |
+| 4     | Row Select + Pad        | 1 cycle  | Select above/center/below rows and apply padding |
+| 5     | Row Pipeline Align      | 2 cycles | Align issue/prefetch data for SRL taps           |
+| 6     | SRL Delay Taps          | 1-32     | Left/center column history using SRLC32E taps    |
+| 7     | Window Assembly + Align | 1 cycle  | Form 3×3 window and align to kernel BRAM read    |
+| 8-16  | MAC Pipeline            | 9 cycles | 9-stage pipelined multiply-accumulate            |
+| 17    | Output FIFO Write       | 1 cycle  | Buffer MAC result                                |
+| 18+   | Serializer              | 4 cycles | Emit 4× 64-bit slices per MAC result             |
 
-**Total Pipeline Latency**: ~18-20 cycles (first result appearance)
+**Total Pipeline Latency**: ~19-21 cycles (first result appearance, includes kernel BRAM read alignment)
 
 **Steady-State Throughput**: 1 MAC result (8 channels) per cycle after fill
+
+Kernel weights are read from BRAM with a 1-cycle latency in parallel; window data is registered to align with `kernel_pack`.
 
 ### 10.2 MAC Unit Pipeline Detail
 
@@ -449,12 +465,9 @@ When `axis_data_out_tready` deasserts:
 
 #### Architecture
 
-- **Storage**: 16 × 576-bit packed registers (not BRAM for single-cycle access)
-- **Write Pipeline**: 2-stage for timing closure
-  - Stage 1: Counter update, address generation
-  - Stage 2: Data registration
-  - Stage 3: Memory write
-- **Read**: Combinational (single-cycle latency)
+- **Storage**: 9 BRAM banks (64-bit × 16 groups), one per kernel coefficient index
+- **Write Pipeline**: 2-stage (address/data register → BRAM write)
+- **Read**: Registered (1-cycle latency), `kernel_pack` is the concatenation of 9 BRAM read registers
 
 ### 11.2 line_buffer
 
@@ -532,41 +545,42 @@ When `axis_data_out_tready` deasserts:
 
 ## 12. Resource Utilization
 
-### 12.1 Synthesis Results
+### 12.1 Post-Route Utilization
 
 **Target Device**: Xilinx Zynq-7020 (xc7z020clg400-1)  
 **Tool Version**: Vivado 2025.2  
-**Synthesis Mode**: Out-of-Context (OOC)
+**Implementation Mode**: Out-of-Context (OOC), post-route (physopt)
 
 | Resource            | Used   | Available | Utilization |
 | ------------------- | ------ | --------- | ----------- |
-| **Slice LUTs**      | 27,892 | 53,200    | 52.43%      |
-| - LUT as Logic      | 27,251 | 53,200    | 51.22%      |
-| - LUT as Memory     | 641    | 17,400    | 3.68%       |
-| **Slice Registers** | 33,692 | 106,400   | 31.67%      |
-| **F7 Muxes**        | 3,458  | 26,600    | 13.00%      |
-| **F8 Muxes**        | 1,537  | 13,300    | 11.56%      |
-| **Block RAM**       | 5      | 140       | 3.57%       |
+| **Slice LUTs**      | 7,962  | 53,200    | 14.97%      |
+| - LUT as Logic      | 6,681  | 53,200    | 12.56%      |
+| - LUT as Memory     | 1,281  | 17,400    | 7.36%       |
+| **Slice Registers** | 10,330 | 106,400   | 9.71%       |
+| **F7 Muxes**        | 401    | 26,600    | 1.51%       |
+| **F8 Muxes**        | 200    | 13,300    | 1.50%       |
+| **Block RAM**       | 14     | 140       | 10.00%      |
 | **DSP Slices**      | 72     | 220       | 32.73%      |
+
+SRL usage is captured under LUT-as-memory (1,281 LUTs configured as SRLC32E/SRL16E).
 
 ### 12.2 Resource Breakdown by Component
 
-| Component         | LUTs (est.) | Registers (est.) | BRAM | Notes                         |
-| ----------------- | ----------- | ---------------- | ---- | ----------------------------- |
-| kernel_buffer     | 2,500       | 9,500            | 0    | 576-bit × 16 packed regs      |
-| line_buffer       | 500         | 300              | 5    | 4 × 448 × 64-bit BRAMs        |
-| mac_unit          | 12,000      | 8,000            | 0    | 72 multipliers + accumulators |
-| Shift registers   | 10,000      | 12,000           | 0    | 2 banks × 33 × 192 bits       |
-| Output serializer | 2,000       | 3,000            | 0    | FIFO + slice muxing           |
-| Control logic     | 5,000       | 2,000            | 0    | FSM, counters, flow control   |
+| Component           | LUTs  | Registers | BRAM | DSP | Notes                        |
+| ------------------- | ----- | --------- | ---- | --- | ---------------------------- |
+| kernel_buffer       | 665   | 125       | 9    | 0   | 9 BRAM banks, 1-cycle read   |
+| line_buffer         | 386   | 0         | 4    | 0   | 4 × 448 × 64-bit BRAMs       |
+| srl_delay_tap (×12) | 1,543 | 0         | 0    | 0   | SRLC32E taps (SRLs = 768)    |
+| mac_unit            | 3,687 | 3,775     | 0    | 72  | 9-stage MAC pipeline         |
+| top-level/control   | 1,687 | 6,430     | 1    | 0   | FIFOs, sched/AXI, glue logic |
 
 ### 12.3 Resource Optimization Notes
 
-1. **DSP Usage Enabled**: 72 DSP48E1s inferred for MAC multiplies; LUT usage is reduced compared to the LUT-only build.
+1. **SRL Tap Conversion**: Column history uses SRLC32E taps; LUT-as-memory is now 1,281 with zero FFs in the tap path.
 
-2. **High Register Count**: Dominated by shift register banks. Could use SRL16/SRL32 primitives for reduction.
+2. **Kernel BRAM Storage**: Kernel weights moved to 9 BRAM banks; total BRAM usage is 14 (kernels + line buffers + FIFO).
 
-3. **BRAM Efficiency**: Only 5 of 140 BRAMs used. Additional line buffering or larger channel support possible.
+3. **DSP Usage**: MAC still consumes 72 DSP48E1s; reducing DSP use would require time-multiplexing or fewer lanes.
 
 ## 13. Timing Analysis
 
@@ -575,25 +589,25 @@ When `axis_data_out_tready` deasserts:
 | Metric                         | Value              |
 | ------------------------------ | ------------------ |
 | **Target Clock Period**        | 5.000 ns (200 MHz) |
-| **WNS (Worst Negative Slack)** | -1.189 ns          |
-| **Achieved Clock Period**      | 6.189 ns           |
-| **Estimated Fmax**             | 161.58 MHz         |
+| **WNS (Worst Negative Slack)** | -0.979 ns          |
+| **Achieved Clock Period**      | 5.979 ns           |
+| **Estimated Fmax**             | 167.25 MHz         |
 | **Timing Status**              | VIOLATED           |
 
 ### 13.2 Critical Path Analysis
 
-The critical path is likely in one of these areas:
+The critical path is dominated by the output position tracking path:
 
-1. **MAC Pipeline Stage Transitions**: 8-bit × 8-bit → 32-bit accumulation chains
-2. **Shift Register Muxing**: Large mux trees for column selection
-3. **FIFO Space Calculation**: `pending_count` computation with multiple adders
+1. **Output Control CE**: `num_chan_beats_reg` → `out_row_reg[*]/CE`
+2. **Compare/Fanout Logic**: `num_chan_beats` comparisons feeding output counters
+3. **Routing**: High fanout on control nets in the scheduler block
 
 ### 13.3 Timing Optimization Recommendations
 
-1. **DSP Inference**: Enabled for MAC multiplies; consider adding DSP input/output regs for better timing
-2. **Pipeline Mux Selection**: Add register stages in row selection logic
-3. **Reduce Shift Depth**: Use smaller `MAX_CHAN_BEATS` if application allows
-4. **Retiming**: Enable `synth_design -retiming` for automatic register balancing
+1. **Pipeline Output Tracking**: Add a register stage to break `num_chan_beats` fanout into `out_row/out_col` enables.
+2. **Precompute Compare Terms**: Register `num_chan_beats_minus1` and `num_cols_minus1` to reduce adder depth.
+3. **Reduce Fanout**: Replicate or locally register `num_chan_beats` for the scheduler block.
+4. **Full-Chip Constraints**: Provide real clock constraints (and HD.CLK_SRC) to reduce OOC skew pessimism.
 
 ## 14. Integration Guidelines
 
@@ -602,7 +616,7 @@ The critical path is likely in one of these areas:
 ![Integration Diagram](./figure/depthwise_conv/system_integration.png)
 
 > [!NOTE]
-> In the system diagram, this module is depicted as a standalone IP with standard AXI4 interfaces for integration. However, in the target architecture, this unit serves as a stage within a larger dataflow pipeline. Consequently, the configuration signals (cfg_*) are designed to be driven directly by a hardware scheduler ("sched tiler") rather than individual memory-mapped registers. The AXI4-Lite wrapper would only be implemented if deploying this unit as an independent IP core.
+> In the system diagram, this module is depicted as a standalone IP with standard AXI4 interfaces for integration. However, in the target architecture, this unit serves as a stage within a larger dataflow pipeline. Consequently, the configuration signals (cfg\_\*) are designed to be driven directly by a hardware scheduler ("sched tiler") rather than individual memory-mapped registers. The AXI4-Lite wrapper would only be implemented if deploying this unit as an independent IP core.
 
 ### 14.2 DMA Configuration
 
@@ -676,7 +690,11 @@ The testbench provides comprehensive functional verification:
 ### 15.3 Running Simulations
 
 ```bash
-# Using ModelSim
+# One-time UNISIM setup for Questa/ModelSim (requires XILINX_VIVADO)
+export XILINX_VIVADO=/path/to/Vivado
+make xilinx_libs
+
+# Using Questa/ModelSim
 cd fpga/sim
 make all TESTNAME=tb_depthwise_conv_unit
 
@@ -749,21 +767,23 @@ set_output_delay -clock clk -min 0.5 [get_ports axis_*_tvalid]
 | Fixed 3×3 kernel size | Cannot support other kernel sizes   | Use multiple passes or different module |
 | Fixed stride of 1     | Cannot support strided convolutions | Post-process with downsampler           |
 | Channel multiple of 8 | Odd channel counts require padding  | Pad channels to multiple of 8           |
+| SRL tap depth (32)    | MAX_CHAN_BEATS ≤ 16                 | Cascade SRLs or use BRAM shift register |
 | No dilation support   | Dilated convolutions not possible   | Not applicable to TinyViT workload      |
 
 ### 17.2 Timing Limitations
 
-| Issue                     | Current Status           | Mitigation                           |
-| ------------------------- | ------------------------ | ------------------------------------ |
-| Fmax < 200 MHz target     | 157 MHz achieved         | Reduce target or apply optimizations |
-| Large combinational paths | In shift register muxing | Add pipeline stages                  |
+| Issue                           | Current Status              | Mitigation                                |
+| ------------------------------- | --------------------------- | ----------------------------------------- |
+| Fmax < 200 MHz target           | 167.25 MHz achieved         | Reduce target or apply optimizations      |
+| Critical path in output control | num_chan_beats → out_row CE | Pipeline control or reduce compare fanout |
 
 ### 17.3 Resource Limitations
 
-| Issue                | Current Status               | Mitigation                            |
-| -------------------- | ---------------------------- | ------------------------------------- |
-| High LUT usage (60%) | Limits other logic on device | Enable DSP inference for MACs         |
-| No DSP usage         | Underutilizes available DSPs | Add `use_dsp` attribute to multiplies |
+| Issue              | Current Status           | Mitigation                                 |
+| ------------------ | ------------------------ | ------------------------------------------ |
+| DSP usage (72)     | 32.73% of device DSPs    | Time-multiplex MAC or reduce lanes         |
+| BRAM usage (14)    | 10.00% of device BRAMs   | Use LUTRAM for kernels if BRAM constrained |
+| SRL tap depth (32) | Limits max channel beats | Cascade SRLs or use BRAM shift register    |
 
 ## Appendix A: Quick Reference Card
 

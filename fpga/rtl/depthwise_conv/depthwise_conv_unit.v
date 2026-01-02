@@ -41,7 +41,7 @@ module depthwise_conv_unit #(
     localparam KERNEL_SIZE = 9;
     localparam KERNEL_PACK_WIDTH = KERNEL_SIZE * INPUT_WIDTH;
     localparam MAX_CHAN_BEATS = MAX_CHANNELS / LANES;
-    localparam SHIFT_DEPTH = 2 * MAX_CHAN_BEATS + 1;
+    localparam TAP_W = 5;  // SRL32E taps (supports up to 32-cycle delay)
     localparam MAC_WIDTH = LANES * ACC_WIDTH;
     localparam OUT_SLICES = MAC_WIDTH / OUTPUT_WIDTH;
     localparam OUT_SLICE_W = (OUT_SLICES <= 1) ? 1 : $clog2(OUT_SLICES);
@@ -176,6 +176,9 @@ module depthwise_conv_unit #(
     reg                          mac_data_last;
     reg  [KERNEL_PACK_WIDTH-1:0] mac_win_pack;
     reg  [KERNEL_PACK_WIDTH-1:0] mac_ker_pack;
+    reg                          win_valid_q;
+    reg                          win_last_q;
+    reg  [KERNEL_PACK_WIDTH-1:0] win_pack_q;
 
     mac_unit #(
         .DATA_WIDTH (DATA_WIDTH),
@@ -591,7 +594,6 @@ module depthwise_conv_unit #(
     reg [INPUT_WIDTH-1:0] row_above_pref_d2;
     reg [INPUT_WIDTH-1:0] row_center_pref_d2;
     reg [INPUT_WIDTH-1:0] row_below_pref_d2;
-    reg                   prefetch_clear_q;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -665,14 +667,6 @@ module depthwise_conv_unit #(
         end
     end
 
-
-    // Window Data Shift Registers
-    reg [INPUT_WIDTH-1:0] row_above_shift_a [0:SHIFT_DEPTH-1];
-    reg [INPUT_WIDTH-1:0] row_center_shift_a[0:SHIFT_DEPTH-1];
-    reg [INPUT_WIDTH-1:0] row_below_shift_a [0:SHIFT_DEPTH-1];
-    reg [INPUT_WIDTH-1:0] row_above_shift_b [0:SHIFT_DEPTH-1];
-    reg [INPUT_WIDTH-1:0] row_center_shift_b[0:SHIFT_DEPTH-1];
-    reg [INPUT_WIDTH-1:0] row_below_shift_b [0:SHIFT_DEPTH-1];
 
     function [INPUT_WIDTH-1:0] select_row_data;
         input [1:0] row_idx;
@@ -764,102 +758,160 @@ module depthwise_conv_unit #(
     wire [15:0] left_idx = (num_chan_beats << 1);
     wire [15:0] center_idx_sel = center_idx - 16'd1;
     wire [15:0] left_idx_sel = left_idx - 16'd1;
-    integer wi;
-    wire prefetch_clear = rd_issue_exec &&
-                          (rd_chan_beat == num_chan_beats - 1) &&
-                          (rd_col == num_cols - 1);
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            prefetch_clear_q <= 1'b0;
-        end else if (state == S_IDLE) begin
-            prefetch_clear_q <= 1'b0;
-        end else begin
-            prefetch_clear_q <= prefetch_clear;
-        end
-    end
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (wi = 0; wi < SHIFT_DEPTH; wi = wi + 1) begin
-                row_above_shift_a[wi]  <= {INPUT_WIDTH{1'b0}};
-                row_center_shift_a[wi] <= {INPUT_WIDTH{1'b0}};
-                row_below_shift_a[wi]  <= {INPUT_WIDTH{1'b0}};
-                row_above_shift_b[wi]  <= {INPUT_WIDTH{1'b0}};
-                row_center_shift_b[wi] <= {INPUT_WIDTH{1'b0}};
-                row_below_shift_b[wi]  <= {INPUT_WIDTH{1'b0}};
-            end
-        end else begin
-            if (prefetch_clear_q) begin
-                for (wi = 0; wi < SHIFT_DEPTH; wi = wi + 1) begin
-                    if (shift_bank_sel) begin
-                        row_above_shift_a[wi]  <= {INPUT_WIDTH{1'b0}};
-                        row_center_shift_a[wi] <= {INPUT_WIDTH{1'b0}};
-                        row_below_shift_a[wi]  <= {INPUT_WIDTH{1'b0}};
-                    end else begin
-                        row_above_shift_b[wi]  <= {INPUT_WIDTH{1'b0}};
-                        row_center_shift_b[wi] <= {INPUT_WIDTH{1'b0}};
-                        row_below_shift_b[wi]  <= {INPUT_WIDTH{1'b0}};
-                    end
-                end
-            end
+    // SRL32E taps (assumes MAX_CHAN_BEATS <= 16)
+    wire [TAP_W-1:0] center_tap = center_idx_sel[TAP_W-1:0];
+    wire [TAP_W-1:0] left_tap = left_idx_sel[TAP_W-1:0];
 
-            if (state == S_IDLE) begin
-                for (wi = 0; wi < SHIFT_DEPTH; wi = wi + 1) begin
-                    row_above_shift_a[wi]  <= {INPUT_WIDTH{1'b0}};
-                    row_center_shift_a[wi] <= {INPUT_WIDTH{1'b0}};
-                    row_below_shift_a[wi]  <= {INPUT_WIDTH{1'b0}};
-                    row_above_shift_b[wi]  <= {INPUT_WIDTH{1'b0}};
-                    row_center_shift_b[wi] <= {INPUT_WIDTH{1'b0}};
-                    row_below_shift_b[wi]  <= {INPUT_WIDTH{1'b0}};
-                end
-            end else begin
-                if (issue_ddd) begin
-                    for (wi = SHIFT_DEPTH - 1; wi > 0; wi = wi - 1) begin
-                        if (issue_bank_sel_ddd) begin
-                            row_above_shift_b[wi]  <= row_above_shift_b[wi-1];
-                            row_center_shift_b[wi] <= row_center_shift_b[wi-1];
-                            row_below_shift_b[wi]  <= row_below_shift_b[wi-1];
-                        end else begin
-                            row_above_shift_a[wi]  <= row_above_shift_a[wi-1];
-                            row_center_shift_a[wi] <= row_center_shift_a[wi-1];
-                            row_below_shift_a[wi]  <= row_below_shift_a[wi-1];
-                        end
-                    end
-                    if (issue_bank_sel_ddd) begin
-                        row_above_shift_b[0]  <= row_above_in_d2;
-                        row_center_shift_b[0] <= row_center_in_d2;
-                        row_below_shift_b[0]  <= row_below_in_d2;
-                    end else begin
-                        row_above_shift_a[0]  <= row_above_in_d2;
-                        row_center_shift_a[0] <= row_center_in_d2;
-                        row_below_shift_a[0]  <= row_below_in_d2;
-                    end
-                end
-                if (prefetch_fire_ddd) begin
-                    for (wi = SHIFT_DEPTH - 1; wi > 0; wi = wi - 1) begin
-                        if (prefetch_bank_sel_ddd) begin
-                            row_above_shift_b[wi]  <= row_above_shift_b[wi-1];
-                            row_center_shift_b[wi] <= row_center_shift_b[wi-1];
-                            row_below_shift_b[wi]  <= row_below_shift_b[wi-1];
-                        end else begin
-                            row_above_shift_a[wi]  <= row_above_shift_a[wi-1];
-                            row_center_shift_a[wi] <= row_center_shift_a[wi-1];
-                            row_below_shift_a[wi]  <= row_below_shift_a[wi-1];
-                        end
-                    end
-                    if (prefetch_bank_sel_ddd) begin
-                        row_above_shift_b[0]  <= row_above_pref_d2;
-                        row_center_shift_b[0] <= row_center_pref_d2;
-                        row_below_shift_b[0]  <= row_below_pref_d2;
-                    end else begin
-                        row_above_shift_a[0]  <= row_above_pref_d2;
-                        row_center_shift_a[0] <= row_center_pref_d2;
-                        row_below_shift_a[0]  <= row_below_pref_d2;
-                    end
-                end
+    wire issue_shift_a = issue_ddd && !issue_bank_sel_ddd;
+    wire issue_shift_b = issue_ddd && issue_bank_sel_ddd;
+    wire pref_shift_a = prefetch_fire_ddd && !prefetch_bank_sel_ddd;
+    wire pref_shift_b = prefetch_fire_ddd && prefetch_bank_sel_ddd;
+    wire shift_a_en = issue_shift_a || pref_shift_a;
+    wire shift_b_en = issue_shift_b || pref_shift_b;
 
-            end
-        end
-    end
+    wire [INPUT_WIDTH-1:0] row_above_a_in = issue_shift_a ? row_above_in_d2 : row_above_pref_d2;
+    wire [INPUT_WIDTH-1:0] row_center_a_in = issue_shift_a ? row_center_in_d2 : row_center_pref_d2;
+    wire [INPUT_WIDTH-1:0] row_below_a_in = issue_shift_a ? row_below_in_d2 : row_below_pref_d2;
+
+    wire [INPUT_WIDTH-1:0] row_above_b_in = issue_shift_b ? row_above_in_d2 : row_above_pref_d2;
+    wire [INPUT_WIDTH-1:0] row_center_b_in = issue_shift_b ? row_center_in_d2 : row_center_pref_d2;
+    wire [INPUT_WIDTH-1:0] row_below_b_in = issue_shift_b ? row_below_in_d2 : row_below_pref_d2;
+
+    wire [INPUT_WIDTH-1:0] row_above_left_a;
+    wire [INPUT_WIDTH-1:0] row_above_ctr_a;
+    wire [INPUT_WIDTH-1:0] row_center_left_a;
+    wire [INPUT_WIDTH-1:0] row_center_ctr_a;
+    wire [INPUT_WIDTH-1:0] row_below_left_a;
+    wire [INPUT_WIDTH-1:0] row_below_ctr_a;
+
+    wire [INPUT_WIDTH-1:0] row_above_left_b;
+    wire [INPUT_WIDTH-1:0] row_above_ctr_b;
+    wire [INPUT_WIDTH-1:0] row_center_left_b;
+    wire [INPUT_WIDTH-1:0] row_center_ctr_b;
+    wire [INPUT_WIDTH-1:0] row_below_left_b;
+    wire [INPUT_WIDTH-1:0] row_below_ctr_b;
+
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_above_ctr_a (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_a_en),
+        .din  (row_above_a_in),
+        .tap  (center_tap),
+        .dout (row_above_ctr_a)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_above_left_a (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_a_en),
+        .din  (row_above_a_in),
+        .tap  (left_tap),
+        .dout (row_above_left_a)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_center_ctr_a (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_a_en),
+        .din  (row_center_a_in),
+        .tap  (center_tap),
+        .dout (row_center_ctr_a)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_center_left_a (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_a_en),
+        .din  (row_center_a_in),
+        .tap  (left_tap),
+        .dout (row_center_left_a)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_below_ctr_a (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_a_en),
+        .din  (row_below_a_in),
+        .tap  (center_tap),
+        .dout (row_below_ctr_a)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_below_left_a (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_a_en),
+        .din  (row_below_a_in),
+        .tap  (left_tap),
+        .dout (row_below_left_a)
+    );
+
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_above_ctr_b (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_b_en),
+        .din  (row_above_b_in),
+        .tap  (center_tap),
+        .dout (row_above_ctr_b)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_above_left_b (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_b_en),
+        .din  (row_above_b_in),
+        .tap  (left_tap),
+        .dout (row_above_left_b)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_center_ctr_b (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_b_en),
+        .din  (row_center_b_in),
+        .tap  (center_tap),
+        .dout (row_center_ctr_b)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_center_left_b (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_b_en),
+        .din  (row_center_b_in),
+        .tap  (left_tap),
+        .dout (row_center_left_b)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_below_ctr_b (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_b_en),
+        .din  (row_below_b_in),
+        .tap  (center_tap),
+        .dout (row_below_ctr_b)
+    );
+    srl_delay_tap #(
+        .WIDTH(INPUT_WIDTH)
+    ) u_row_below_left_b (
+        .clk  (clk),
+        .rst_n(rst_n),
+        .en   (shift_b_en),
+        .din  (row_below_b_in),
+        .tap  (left_tap),
+        .dout (row_below_left_b)
+    );
 
 
     // Window Assemble and MAC Input
@@ -867,23 +919,19 @@ module depthwise_conv_unit #(
 
 
     wire [INPUT_WIDTH-1:0] row_above_left = shift_bank_sel_win ?
-                                            row_above_shift_b[left_idx_sel] :
-                                            row_above_shift_a[left_idx_sel];
-    wire [INPUT_WIDTH-1:0] row_above_ctr = shift_bank_sel_win ?
-                                           row_above_shift_b[center_idx_sel] :
-                                           row_above_shift_a[center_idx_sel];
+                                            row_above_left_b :
+                                            row_above_left_a;
+    wire [INPUT_WIDTH-1:0] row_above_ctr = shift_bank_sel_win ? row_above_ctr_b : row_above_ctr_a;
     wire [INPUT_WIDTH-1:0] row_center_left = shift_bank_sel_win ?
-                                             row_center_shift_b[left_idx_sel] :
-                                             row_center_shift_a[left_idx_sel];
+                                             row_center_left_b :
+                                             row_center_left_a;
     wire [INPUT_WIDTH-1:0] row_center_ctr = shift_bank_sel_win ?
-                                            row_center_shift_b[center_idx_sel] :
-                                            row_center_shift_a[center_idx_sel];
+                                            row_center_ctr_b :
+                                            row_center_ctr_a;
     wire [INPUT_WIDTH-1:0] row_below_left = shift_bank_sel_win ?
-                                            row_below_shift_b[left_idx_sel] :
-                                            row_below_shift_a[left_idx_sel];
-    wire [INPUT_WIDTH-1:0] row_below_ctr = shift_bank_sel_win ?
-                                           row_below_shift_b[center_idx_sel] :
-                                           row_below_shift_a[center_idx_sel];
+                                            row_below_left_b :
+                                            row_below_left_a;
+    wire [INPUT_WIDTH-1:0] row_below_ctr = shift_bank_sel_win ? row_below_ctr_b : row_below_ctr_a;
 
     wire [INPUT_WIDTH-1:0] row0_left = (is_left_col || is_top_row) ? {INPUT_WIDTH{1'b0}} :
                                        row_above_left;
@@ -913,20 +961,27 @@ module depthwise_conv_unit #(
             mac_data_last  <= 1'b0;
             mac_win_pack   <= {KERNEL_PACK_WIDTH{1'b0}};
             mac_ker_pack   <= {KERNEL_PACK_WIDTH{1'b0}};
+            win_valid_q    <= 1'b0;
+            win_last_q     <= 1'b0;
+            win_pack_q     <= {KERNEL_PACK_WIDTH{1'b0}};
         end else begin
-            mac_data_valid <= 1'b0;
             if (window_push) begin
-                mac_data_valid <= 1'b1;
-                mac_data_last <= is_last_output_beat;
-                mac_win_pack[0*INPUT_WIDTH+:INPUT_WIDTH] <= row0_left;
-                mac_win_pack[1*INPUT_WIDTH+:INPUT_WIDTH] <= row0_ctr;
-                mac_win_pack[2*INPUT_WIDTH+:INPUT_WIDTH] <= row0_right;
-                mac_win_pack[3*INPUT_WIDTH+:INPUT_WIDTH] <= row1_left;
-                mac_win_pack[4*INPUT_WIDTH+:INPUT_WIDTH] <= row1_ctr;
-                mac_win_pack[5*INPUT_WIDTH+:INPUT_WIDTH] <= row1_right;
-                mac_win_pack[6*INPUT_WIDTH+:INPUT_WIDTH] <= row2_left;
-                mac_win_pack[7*INPUT_WIDTH+:INPUT_WIDTH] <= row2_ctr;
-                mac_win_pack[8*INPUT_WIDTH+:INPUT_WIDTH] <= row2_right;
+                win_last_q <= is_last_output_beat;
+                win_pack_q[0*INPUT_WIDTH+:INPUT_WIDTH] <= row0_left;
+                win_pack_q[1*INPUT_WIDTH+:INPUT_WIDTH] <= row0_ctr;
+                win_pack_q[2*INPUT_WIDTH+:INPUT_WIDTH] <= row0_right;
+                win_pack_q[3*INPUT_WIDTH+:INPUT_WIDTH] <= row1_left;
+                win_pack_q[4*INPUT_WIDTH+:INPUT_WIDTH] <= row1_ctr;
+                win_pack_q[5*INPUT_WIDTH+:INPUT_WIDTH] <= row1_right;
+                win_pack_q[6*INPUT_WIDTH+:INPUT_WIDTH] <= row2_left;
+                win_pack_q[7*INPUT_WIDTH+:INPUT_WIDTH] <= row2_ctr;
+                win_pack_q[8*INPUT_WIDTH+:INPUT_WIDTH] <= row2_right;
+            end
+            win_valid_q <= window_push;
+            mac_data_valid <= win_valid_q;
+            mac_data_last <= win_last_q;
+            if (win_valid_q) begin
+                mac_win_pack <= win_pack_q;
                 mac_ker_pack <= kernel_pack;
             end
         end
