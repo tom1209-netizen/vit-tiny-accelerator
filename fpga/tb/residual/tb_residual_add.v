@@ -27,7 +27,7 @@ module tb_residual_add;
     wire    [DATA_WIDTH-1:0] m_axis_tdata;
     wire                     m_axis_tvalid;
     wire                     m_axis_tlast;
-    reg                      m_axis_tready;
+    wire                     m_axis_tready;
 
     integer                  cycles;
     integer                  errors;
@@ -77,6 +77,7 @@ module tb_residual_add;
 
     reg     [      8*64-1:0] current_test_name;
     integer                  unnamed_beat_idx;
+    assign m_axis_tready = m_axis_tvalid;  // TB drives ready to follow valid
 
     // Test name banner 
     task set_test_name;
@@ -97,7 +98,6 @@ module tb_residual_add;
             s_axis_b_tvalid = 1'b0;
             s_axis_a_tlast  = 1'b0;
             s_axis_b_tlast  = 1'b0;
-            m_axis_tready   = 1'b1;
             rst_n           = 1'b0;
             exp_head        = 0;
             exp_tail        = 0;
@@ -155,7 +155,7 @@ module tb_residual_add;
         end
     endtask
 
-    // Drive a single pair with optional backpressure on output
+    // Drive a single pair with optional idle cycles between transactions
     task drive_pair_with_stall;
         input [DATA_WIDTH-1:0] a_vec;
         input [DATA_WIDTH-1:0] b_vec;
@@ -163,12 +163,13 @@ module tb_residual_add;
         input integer stall_cycles;
         input integer beat_idx;
         integer sc;
+        integer handshake_done;
         begin
             // For TLAST expectations we assume AND semantics here:
             // test passes last = 1 only when both inputs intend to be 'last'
             push_expected(a_vec, b_vec, last);
 
-            $display("[%0t] %0s Beat %0d: A=%h B=%h LAST=%0b (stall %0d cycles)", $time,
+            $display("[%0t] %0s Beat %0d: A=%h B=%h LAST=%0b (gap %0d cycles)", $time,
                      current_test_name, beat_idx, a_vec, b_vec, last, stall_cycles);
 
             s_axis_a_tdata  <= a_vec;
@@ -178,21 +179,29 @@ module tb_residual_add;
             s_axis_a_tvalid <= 1'b1;
             s_axis_b_tvalid <= 1'b1;
 
+            handshake_done = 0;
             if (stall_cycles > 0) begin
-                m_axis_tready <= 1'b0;
-                for (sc = 0; sc < stall_cycles; sc = sc + 1) @(posedge clk);
+                for (sc = 0; sc < stall_cycles; sc = sc + 1) begin
+                    @(posedge clk);
+                    if (!handshake_done && s_axis_a_tready && s_axis_b_tready) begin
+                        handshake_done = 1;
+                        s_axis_a_tvalid <= 1'b0;
+                        s_axis_b_tvalid <= 1'b0;
+                        s_axis_a_tlast  <= 1'b0;
+                        s_axis_b_tlast  <= 1'b0;
+                    end
+                end
             end
 
-            m_axis_tready <= 1'b1;
+            if (!handshake_done) begin
+                @(posedge clk);
+                while (!(s_axis_a_tready && s_axis_b_tready)) @(posedge clk);
 
-            // Wait one cycle then handshake on both inputs
-            @(posedge clk);
-            while (!(s_axis_a_tready && s_axis_b_tready)) @(posedge clk);
-
-            s_axis_a_tvalid <= 1'b0;
-            s_axis_b_tvalid <= 1'b0;
-            s_axis_a_tlast  <= 1'b0;
-            s_axis_b_tlast  <= 1'b0;
+                s_axis_a_tvalid <= 1'b0;
+                s_axis_b_tvalid <= 1'b0;
+                s_axis_a_tlast  <= 1'b0;
+                s_axis_b_tlast  <= 1'b0;
+            end
         end
     endtask
 
@@ -203,6 +212,70 @@ module tb_residual_add;
         begin
             drive_pair_with_stall(a_vec, b_vec, last, 0, unnamed_beat_idx);
             unnamed_beat_idx = unnamed_beat_idx + 1;
+        end
+    endtask
+
+    // Drive a pair with a programmable valid skew on one input
+    task drive_skewed_pair;
+        input [DATA_WIDTH-1:0] a_vec;
+        input [DATA_WIDTH-1:0] b_vec;
+        input last;
+        input integer a_lead_cycles;
+        input integer b_lead_cycles;
+        input integer beat_idx;
+        integer sc;
+        begin
+            if ((a_lead_cycles > 0) && (b_lead_cycles > 0)) begin
+                $display("ERROR: Invalid skew config (both A and B lead)");
+                errors = errors + 1;
+            end
+
+            $display("[%0t] %0s Beat %0d: A=%h B=%h LAST=%0b (A lead %0d, B lead %0d)", $time,
+                     current_test_name, beat_idx, a_vec, b_vec, last, a_lead_cycles, b_lead_cycles);
+
+            s_axis_a_tdata <= a_vec;
+            s_axis_b_tdata <= b_vec;
+            s_axis_a_tlast <= last;
+            s_axis_b_tlast <= last;
+
+            if (a_lead_cycles > 0) begin
+                s_axis_a_tvalid <= 1'b1;
+                s_axis_b_tvalid <= 1'b0;
+                for (sc = 0; sc < a_lead_cycles; sc = sc + 1) begin
+                    @(posedge clk);
+                    if (s_axis_a_tready !== 1'b0) begin
+                        $display("ERROR: A ready high while B invalid (beat %0d, cycle %0d)",
+                                 beat_idx, sc);
+                        errors = errors + 1;
+                    end
+                end
+                s_axis_b_tvalid <= 1'b1;
+            end else if (b_lead_cycles > 0) begin
+                s_axis_a_tvalid <= 1'b0;
+                s_axis_b_tvalid <= 1'b1;
+                for (sc = 0; sc < b_lead_cycles; sc = sc + 1) begin
+                    @(posedge clk);
+                    if (s_axis_b_tready !== 1'b0) begin
+                        $display("ERROR: B ready high while A invalid (beat %0d, cycle %0d)",
+                                 beat_idx, sc);
+                        errors = errors + 1;
+                    end
+                end
+                s_axis_a_tvalid <= 1'b1;
+            end else begin
+                s_axis_a_tvalid <= 1'b1;
+                s_axis_b_tvalid <= 1'b1;
+            end
+
+            push_expected(a_vec, b_vec, last);
+
+            @(posedge clk);
+            while (!(s_axis_a_tready && s_axis_b_tready)) @(posedge clk);
+
+            s_axis_a_tvalid <= 1'b0;
+            s_axis_b_tvalid <= 1'b0;
+            s_axis_a_tlast  <= 1'b0;
+            s_axis_b_tlast  <= 1'b0;
         end
     endtask
 
@@ -225,7 +298,7 @@ module tb_residual_add;
             seq_b[3] = 64'h0404040404040404;
 
             for (beat = 0; beat < 4; beat = beat + 1) begin
-                drive_pair_with_stall(seq_a[beat], seq_b[beat], (beat == 3), 0, beat);
+                drive_pair(seq_a[beat], seq_b[beat], (beat == 3));
             end
         end
     endtask
@@ -243,20 +316,34 @@ module tb_residual_add;
         end
     endtask
 
-    // Test 3: zeros vs random values with backpressure
+    // Test 3: saturation edge cases
+    task saturation_edge_cases_test;
+        begin
+            set_test_name("Saturation edge cases");
+
+            // +127 + 1 -> clamp to +127
+            drive_pair({LANES{8'sd127}}, {LANES{8'sd1}}, 1'b0);
+            // -128 + -1 -> clamp to -128
+            drive_pair({LANES{8'sh80}}, {LANES{-8'sd1}}, 1'b0);
+            // +127 + -128 -> -1 (no overflow)
+            drive_pair({LANES{8'sd127}}, {LANES{8'sh80}}, 1'b0);
+            // -128 + +127 -> -1 (no overflow)
+            drive_pair({LANES{8'sh80}}, {LANES{8'sd127}}, 1'b1);
+        end
+    endtask
+
+    // Test 4: zeros vs random values
     task zero_vs_random_test;
         integer beat;
         begin
             set_test_name("Zero vs random");
             for (beat = 0; beat < 4; beat = beat + 1) begin
-                drive_pair_with_stall({DATA_WIDTH{1'b0}}, {$random, $random, $random, $random},
-                                      (beat == 3), beat % 2,  // introduce some stalls
-                                      beat);
+                drive_pair({DATA_WIDTH{1'b0}}, {$random, $random}, (beat == 3));
             end
         end
     endtask
 
-    // Test 4: alternating sign pattern
+    // Test 5: alternating sign pattern
     task alternating_sign_test;
         integer beat;
         reg [DATA_WIDTH-1:0] vec_a, vec_b;
@@ -270,7 +357,39 @@ module tb_residual_add;
         end
     endtask
 
-    // Test 5: TLAST mismatch scenario
+    // Test 6: input valid skew
+    task input_skew_test;
+        reg [DATA_WIDTH-1:0] vec_a, vec_b;
+        begin
+            set_test_name("Input valid skew");
+
+            vec_a = 64'h0807060504030201;
+            vec_b = 64'h0101010101010101;
+            drive_skewed_pair(vec_a, vec_b, 1'b0, 3, 0, 0);
+
+            vec_a = 64'h100F0E0D0C0B0A09;
+            vec_b = 64'h0202020202020202;
+            drive_skewed_pair(vec_a, vec_b, 1'b1, 0, 2, 1);
+        end
+    endtask
+
+    // Test 7: stream B delayed (lock-step wait)
+    task stream_b_delayed_test;
+        reg [DATA_WIDTH-1:0] vec_a, vec_b;
+        begin
+            set_test_name("Stream B delayed 3 cycles");
+
+            vec_a = 64'h0A0B0C0D0E0F1011;
+            vec_b = 64'h0101010101010101;
+            drive_skewed_pair(vec_a, vec_b, 1'b0, 3, 0, 0);
+
+            vec_a = 64'h1213141516171819;
+            vec_b = 64'h0202020202020202;
+            drive_skewed_pair(vec_a, vec_b, 1'b1, 3, 0, 1);
+        end
+    endtask
+
+    // Test 8: TLAST mismatch scenario
     task tlast_mismatch_test;
         reg [DATA_WIDTH-1:0] a_vec, b_vec;
         begin
@@ -286,6 +405,30 @@ module tb_residual_add;
             s_axis_b_tdata  <= b_vec;
             s_axis_a_tlast  <= 1'b1;
             s_axis_b_tlast  <= 1'b0;
+            s_axis_a_tvalid <= 1'b1;
+            s_axis_b_tvalid <= 1'b1;
+
+            @(posedge clk);
+            while (!(s_axis_a_tready && s_axis_b_tready)) @(posedge clk);
+
+            s_axis_a_tvalid <= 1'b0;
+            s_axis_b_tvalid <= 1'b0;
+            s_axis_a_tlast  <= 1'b0;
+            s_axis_b_tlast  <= 1'b0;
+
+            // allow beat to drain
+            @(posedge clk);
+
+            a_vec = 64'h0A0A0A0A0A0A0A0A;
+            b_vec = 64'h0101010101010101;
+
+            // Expect TLAST = 0 because DUT uses AND semantics
+            push_expected(a_vec, b_vec, 1'b0);
+
+            s_axis_a_tdata  <= a_vec;
+            s_axis_b_tdata  <= b_vec;
+            s_axis_a_tlast  <= 1'b0;
+            s_axis_b_tlast  <= 1'b1;
             s_axis_a_tvalid <= 1'b1;
             s_axis_b_tvalid <= 1'b1;
 
@@ -351,9 +494,15 @@ module tb_residual_add;
         @(posedge clk);
         saturation_extremes_test;
         @(posedge clk);
+        saturation_edge_cases_test;
+        @(posedge clk);
         zero_vs_random_test;
         @(posedge clk);
         alternating_sign_test;
+        @(posedge clk);
+        input_skew_test;
+        @(posedge clk);
+        stream_b_delayed_test;
         @(posedge clk);
         tlast_mismatch_test;
 

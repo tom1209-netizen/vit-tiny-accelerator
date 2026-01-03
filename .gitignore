@@ -31,3 +31,6 @@ test_files/
 
 # Github junk
 .github/
+
+# Xilins libs
+xilinx_lib/

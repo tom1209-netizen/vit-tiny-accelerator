@@ -13,6 +13,9 @@ timing_softmax:
 timing_depthwise_conv:
 	vivado -mode batch -source run_timing_depthwise_conv.tcl
 
+timing_residual_add:
+	vivado -mode batch -source run_timing_residual_add.tcl
+
 xsim:
 	vivado -mode batch -source run_xsim.tcl
 

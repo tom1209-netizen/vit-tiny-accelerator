@@ -1,6 +1,6 @@
 #Define variables
-TESTNAME 	?= tb_depthwise_conv_unit
-TB_NAME 	?= tb_depthwise_conv_unit
+TESTNAME 	?= tb_residual_add
+TB_NAME 	?= tb_residual_add
 RADIX		?= hex
 MEALY_FSM   ?= 0
 SIM_DEBUG   ?= 1
@@ -97,6 +97,7 @@ clean_libs:
 	rm -rf $(XILINX_LIB_DIR)
 
 xilinx_libs:
+	mkdir -p $(XILINX_LIB_DIR)
 	vlib $(XILINX_LIB_DIR)/unisim
 	vmap unisim $(XILINX_LIB_DIR)/unisim
 	vlog -work unisim $(XILINX_VIVADO)/data/verilog/src/unisims/*.v

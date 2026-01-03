@@ -1,0 +1,31 @@
+{
+    "signal": [
+        { "name": "clk", "wave": "p............" },
+        { "name": "rst_n", "wave": "01..........." },
+        {
+            "name": "a_tdata",
+            "wave": "x.=========x.",
+            "data": ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"]
+        },
+        { "name": "a_tready", "wave": "0.1........0." },
+        { "name": "a_tvalid", "wave": "0.1........0." },
+        { "name": "a_tlast", "wave": "0.........10." },
+        {
+            "name": "b_tdata",
+            "wave": "x.=========x.",
+            "data": ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"]
+        },
+        { "name": "b_tready", "wave": "0.1........0." },
+        { "name": "b_tvalid", "wave": "0.1........0." },
+        { "name": "b_tlast", "wave": "0.........10." },
+        {
+            "name": "out_tdata",
+            "wave": "..==========x",
+            "data": ["O0", "O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8"]
+        },
+        { "name": "out_tready", "wave": "0..1........0" },
+        { "name": "out_tvalid", "wave": "0..1........0" },
+        { "name": "out_tlast", "wave": "0..........10" }
+    ],
+    "config": { "hscale": 1 }
+}
