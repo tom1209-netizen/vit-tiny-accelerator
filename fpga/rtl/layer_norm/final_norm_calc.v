@@ -4,7 +4,7 @@ module final_norm_calc #(
     parameter DATA_WIDTH = 8,
     parameter PARALLEL_N = 8,
     parameter STAT_WIDTH = 32, 
-    parameter DO_REQUANTIZE = 1     
+    parameter DO_REQUANTIZE = 1      
 )(
     input  wire                   clk,
     input  wire                   aresetn,
@@ -21,7 +21,7 @@ module final_norm_calc #(
     input  wire signed [STAT_WIDTH-1:0]     gamma_val,
     input  wire signed [STAT_WIDTH-1:0]     beta_val,
     input  wire                             params_valid,
-    output wire                             params_ready, // [NEW] Handshake Output
+    output wire                             params_ready,
     
     // Output Stream
     output reg [PARALLEL_N*(DO_REQUANTIZE ? 8 : 32)-1:0] m_axis_data,
@@ -51,7 +51,6 @@ module final_norm_calc #(
     
     reg [1:0] state;
 
-    // [NEW] Ready when IDLE
     assign params_ready = (state == IDLE);
 
     always @(posedge clk) begin
@@ -68,7 +67,6 @@ module final_norm_calc #(
             case (state)
                 IDLE: begin
                     s_axis_ready <= 0;
-                    // [MODIFIED] Handshake: Only accept if Valid & Ready
                     if (params_valid && params_ready) begin
                         latched_mean <= mean_val;
                         latched_beta <= beta_val[STORE_W-1:0];
@@ -104,8 +102,6 @@ module final_norm_calc #(
         end
     end
 
-    // ... [Rest of the module (Stages 0-5) remains exactly the same] ...
-    
     // =========================================================
     // STAGE 0: INPUT ISOLATION
     // =========================================================
@@ -182,9 +178,18 @@ module final_norm_calc #(
     reg signed [31:0] st3_norm_val [0:PARALLEL_N-1];
     reg               st3_valid;
     reg               st3_last;
-    reg signed [55:0] full_sum_temp;
-    integer k;
+    
+    // [MODIFICATION] Combinational logic moved out of sequential block
+    wire signed [55:0] st3_full_sum_comb [0:PARALLEL_N-1];
+    genvar k_g;
+    generate
+        for (k_g = 0; k_g < PARALLEL_N; k_g = k_g + 1) begin : gen_st3_sum
+            // Recombine the split products (combinational)
+            assign st3_full_sum_comb[k_g] = (st2_prod_hi[k_g] <<< 17) + st2_prod_lo[k_g];
+        end
+    endgenerate
 
+    integer k;
     always @(posedge clk) begin
         if (!aresetn) begin
             st3_valid <= 0;
@@ -195,8 +200,8 @@ module final_norm_calc #(
 
             if (st2_valid) begin
                 for (k = 0; k < PARALLEL_N; k = k + 1) begin
-                    full_sum_temp = (st2_prod_hi[k] <<< 17) + st2_prod_lo[k];
-                    st3_norm_val[k] <= full_sum_temp[47:16];
+                    // Pure non-blocking assignment
+                    st3_norm_val[k] <= st3_full_sum_comb[k][47:16];
                 end
             end
         end
@@ -233,8 +238,23 @@ module final_norm_calc #(
     // =========================================================
     // STAGE 5: SHIFT & CLAMP (OUTPUT STAGE)
     // =========================================================
-    reg signed [31:0] final_int_shifted;
-    reg [7:0]         clamped_val_temp;
+    // [MODIFICATION] Combinational logic (Shift + Clamp) moved to generate block
+    wire signed [31:0] st5_shifted_comb [0:PARALLEL_N-1];
+    wire        [7:0]  st5_clamped_comb [0:PARALLEL_N-1];
+    
+    genvar m_g;
+    generate
+        for (m_g = 0; m_g < PARALLEL_N; m_g = m_g + 1) begin : gen_st5_clamp
+            // 1. Shift
+            assign st5_shifted_comb[m_g] = st4_val_w_offset[m_g] >>> 16;
+            
+            // 2. Clamp (Combinational Ternary)
+            assign st5_clamped_comb[m_g] = (st5_shifted_comb[m_g] > 127)  ? 8'd127 :
+                                           (st5_shifted_comb[m_g] < -128) ? -8'd128 :
+                                            st5_shifted_comb[m_g][7:0];
+        end
+    endgenerate
+
     integer m;
     
     always @(posedge clk) begin
@@ -249,15 +269,8 @@ module final_norm_calc #(
             if (st4_valid) begin
                 for (m = 0; m < PARALLEL_N; m = m + 1) begin
                     if (DO_REQUANTIZE) begin
-                        final_int_shifted = st4_val_w_offset[m] >>> 16;
-                        if (final_int_shifted > 127) 
-                            clamped_val_temp = 8'd127;
-                        else if (final_int_shifted < -128) 
-                            clamped_val_temp = -8'd128;
-                        else 
-                            clamped_val_temp = final_int_shifted[7:0];
-                        
-                        m_axis_data[m*8 +: 8] <= clamped_val_temp;
+                        // Use the pre-calculated combinational wire
+                        m_axis_data[m*8 +: 8] <= st5_clamped_comb[m];
                     end else begin
                         m_axis_data[m*32 +: 32] <= st4_val_w_offset[m];
                     end

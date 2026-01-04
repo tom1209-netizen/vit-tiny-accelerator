@@ -256,7 +256,7 @@ module tb_layer_norm_pipelined;
                     if (diff < 0) diff = -diff;
                     
                     if (diff > 1) begin
-                        if (err_cnt < 5) 
+                        
                             $display("[FAIL] Pkt%0d Idx%0d: Exp=%d, Act=%d", pkt_id, global_idx, exp_val, rtl_val);
                             err_cnt = err_cnt + 1;
                     end
