@@ -5,12 +5,12 @@ PYTHON ?= python3
 
 # Default paths
 CFG ?= $(MODELS_DIR)/configs/tiny_vit_5m.yaml
-CKPT ?= $(MODELS_DIR)/checkpoints/tiny_vit_5m_1k.pth
+CKPT ?= $(MODELS_DIR)/checkpoints/qat_int8/qat_best.pth
 
 # PTQ export parameters
 CALIB_DIR ?= $(MODELS_DIR)/dumps/sample_image/val
 OUT_DIR ?= $(MODELS_DIR)/checkpoints/int8_5m
-CALIB_BATCHES ?= 100   # <=0 means iterate over entire calibration set
+CALIB_BATCHES ?= 10   # <=0 means iterate over entire calibration set
 BATCH_SIZE ?= 16
 PER_CHANNEL ?= 1    # set to 0 to disable per-channel quant
 OBSERVER_PERCENTILE ?= 99.9
@@ -20,7 +20,7 @@ IMG ?= $(MODELS_DIR)/dumps/sample_image/example.jpeg
 IMG_SIZE ?= 224
 NUM_CLASSES ?= 1000
 DUMP_DIR ?= $(MODELS_DIR)/dumps/golden
-SCALES_JSON ?= $(MODELS_DIR)/checkpoints/int8_5m/scales.json
+SCALES_JSON ?= $(MODELS_DIR)/checkpoints/qat_int8/scales.json
 
 # QDQ report parameters
 QDQ_EPS ?= 1e-12
@@ -35,11 +35,14 @@ VAL_BATCH_SIZE ?= 128
 QAT_TRAIN_DIR ?= $(MODELS_DIR)/dumps/sample_image/train
 QAT_VAL_DIR   ?= $(MODELS_DIR)/dumps/sample_image/val
 QAT_OUT_DIR   ?= $(MODELS_DIR)/checkpoints/qat_int8
-QAT_EPOCHS    ?= 10
+QAT_EPOCHS    ?= 1
 QAT_BATCH     ?= 64
 QAT_LR        ?= 1e-4
 QAT_WORKERS   ?= 8
 QAT_SAVE_CONVERTED ?= 0
+
+# QAT evaluation parameters
+
 
 # Logging
 LOG_DIR ?= $(MODELS_DIR)/logs

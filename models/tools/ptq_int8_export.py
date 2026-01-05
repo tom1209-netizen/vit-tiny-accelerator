@@ -23,15 +23,19 @@ from models.core.tiny_vit import Conv2d_BN
 from typing import Dict, Tuple, List, Optional
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
 
 def mk_transform(img_size: int):
-    return T.Compose([
-        T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
-        T.CenterCrop(img_size),
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
+    return T.Compose(
+        [
+            T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
+            T.CenterCrop(img_size),
+            T.ToTensor(),
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
 
 class PercentileObserver:
     def __init__(self, p: float = 99.0, eps: float = 1e-12):
@@ -46,15 +50,14 @@ class PercentileObserver:
         # robust against NaNs/Infs
         a = a[torch.isfinite(a)]
         if a.numel():
-            self.maxvals.append(
-                torch.quantile(a.flatten(), self.p / 100.0).item()
-            )
+            self.maxvals.append(torch.quantile(a.flatten(), self.p / 100.0).item())
 
     def scale_symmetric_int8(self) -> float:
         if len(self.maxvals) == 0:
             return 1.0
         m = float(np.median(self.maxvals))
         return max(m, self.eps) / 127.0
+
 
 def fuse_conv_bn_weight_bias(
     conv_w: torch.Tensor,
@@ -75,6 +78,7 @@ def fuse_conv_bn_weight_bias(
     w_fused = conv_w * inv.reshape(-1, 1, 1, 1)
     b_fused = bn_b + (conv_bias - bn_running_mean) * inv
     return w_fused.contiguous(), b_fused.contiguous()
+
 
 def get_model_and_cfg(
     cfg_path: str,
@@ -116,11 +120,47 @@ def get_model_and_cfg(
     model.eval()
     return model, config
 
+
 def safe_load_checkpoint(model: nn.Module, ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
     state = ckpt.get("model", ckpt)
+
+    # Check if this is a QAT checkpoint (contains fake_quant keys)
+    is_qat = any("weight_fake_quant" in k for k in state.keys())
+
+    if is_qat:
+        print(
+            ">> [Loader] Detected QAT checkpoint. Adapting keys to match FP32 structure..."
+        )
+        new_state = OrderedDict()
+        for k, v in state.items():
+            # Strip QAT-specific fake quantization AND activation observer keys
+            if any(
+                x in k
+                for x in [
+                    "fake_quant",
+                    "observer",
+                    "attention_bias_idxs",
+                    "activation_post_process",
+                ]
+            ):
+                continue
+
+            # Map fused BN keys back to original positions
+            # QAT fuses Conv+BN, often resulting in keys like:
+            # "layers.0...conv1.c.bn.weight" (BN inside 'c')
+            # Standard model expects:
+            # "layers.0...conv1.bn.weight"
+            if ".c.bn." in k:
+                new_k = k.replace(".c.bn.", ".bn.")
+                new_state[new_k] = v
+            else:
+                new_state[k] = v
+        state = new_state
+
     msg = model.load_state_dict(state, strict=False)
     return str(msg)
+
 
 def _extract_tensor(arg):
     if torch.is_tensor(arg):
@@ -131,6 +171,7 @@ def _extract_tensor(arg):
             if t is not None:
                 return t
     return None
+
 
 def collect_activation_scales(
     model: nn.Module,
@@ -149,8 +190,14 @@ def collect_activation_scales(
     def register(module: nn.Module, name: str):
         if any(
             isinstance(module, t)
-            for t in [nn.Conv2d, nn.Linear, nn.GELU,
-                      nn.BatchNorm2d, nn.LayerNorm, Conv2d_BN]
+            for t in [
+                nn.Conv2d,
+                nn.Linear,
+                nn.GELU,
+                nn.BatchNorm2d,
+                nn.LayerNorm,
+                Conv2d_BN,
+            ]
         ):
             observers[name] = PercentileObserver(p=percentile)
 
@@ -187,6 +234,7 @@ def collect_activation_scales(
 
     return {k: v.scale_symmetric_int8() for k, v in observers.items()}
 
+
 def quant_per_channel_symmetric_int8(
     W: torch.Tensor, dim: int = 0, eps: float = 1e-12
 ) -> Tuple[torch.Tensor, np.ndarray]:
@@ -208,6 +256,7 @@ def quant_per_channel_symmetric_int8(
     qW = torch.cat(q, dim=dim).contiguous()
     return qW, np.array(scales, dtype=np.float32)
 
+
 def quant_per_tensor_symmetric_int8(
     W: torch.Tensor, eps: float = 1e-12
 ) -> Tuple[torch.Tensor, float]:
@@ -216,6 +265,7 @@ def quant_per_tensor_symmetric_int8(
     s = max(amax, eps) / 127.0
     qW = torch.clamp((Wf / s).round(), -128, 127).to(torch.int8)
     return qW, float(s)
+
 
 def export_int8_artifacts(
     model: nn.Module,
@@ -263,13 +313,11 @@ def export_int8_artifacts(
 
                 if per_channel:
                     bq = np.round(
-                        bf.detach().float().cpu().numpy()
-                        / (w_scales * s_a)
+                        bf.detach().float().cpu().numpy() / (w_scales * s_a)
                     ).astype(np.int32)
                 else:
                     bq = np.round(
-                        bf.detach().float().cpu().numpy()
-                        / (w_scales[0] * s_a)
+                        bf.detach().float().cpu().numpy() / (w_scales[0] * s_a)
                     ).astype(np.int32)
 
                 off_aligned, pad = align_off(offset)
@@ -419,6 +467,7 @@ def export_int8_artifacts(
             indent=2,
         )
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -524,6 +573,7 @@ def main():
         args.out_dir,
         per_channel=args.per_channel,
     )
+
 
 if __name__ == "__main__":
     main()
