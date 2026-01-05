@@ -1,4 +1,4 @@
-# AXI LITE INTERFACE UNIT
+# AXI LITE REGISTER UNIT
 
 | **Document Information** |                                      |
 | ------------------------ | ------------------------------------ |
