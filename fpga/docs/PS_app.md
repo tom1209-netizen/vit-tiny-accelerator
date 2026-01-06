@@ -230,3 +230,25 @@ The `main()` function orchestrates the initialization sequence:
 5. **Idle Loop:**
     
     - Enters `while(1)`. The CPU is now idle, but the **VDMA hardware continues running independently**, fetching data from DDR and refreshing the HDMI display at 60Hz.
+  
+## 5. Output Log
+This is the output log running the program on Arty Z7-20
+```text
+--- START HDMI RESIZE SINGLE IMAGE ---
+Resizing & Drawing to DDR at IMG_POS_X and IMG_POS_Y
+Done. Image ready in DDR.
+Read from Memory: Dog: 99%
+VDMA Running. Resized Image Displayed.
+
+=== AXI DMA Shim – Per-direction Tests ===
+
+--- Test MM2S (Mem → Stream) ---
+Start MM2S: addr=0x102364B0, len=80 bytes
+MM2S completed (dma_transfer_done=1)
+
+All per-direction tests finished.
+
+```
+
+The demo result on HDMI which resized 224x224 image and its classification:
+![demo](./figure/ps_app/demo_result.jpg)
