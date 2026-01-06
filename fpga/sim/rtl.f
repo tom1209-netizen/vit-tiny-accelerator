@@ -20,3 +20,6 @@
 ../rtl/depthwise_conv/line_buffer.v
 ../rtl/depthwise_conv/mac_unit.v
 ../rtl/depthwise_conv/srl_delay_tap.v
+
+// Requant unit
+../rtl/requant/requant_unit.v

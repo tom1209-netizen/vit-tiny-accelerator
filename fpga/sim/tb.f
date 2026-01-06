@@ -13,3 +13,6 @@
 
 // Depthwise convolution module
 ../tb/depthwise_conv/tb_depthwise_conv_unit.v
+
+// Requant module
+../tb/requant/tb_requant_unit.v

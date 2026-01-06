@@ -1,6 +1,6 @@
 #Define variables
-TESTNAME 	?= tb_residual_add
-TB_NAME 	?= tb_residual_add
+TESTNAME 	?= tb_requant_unit
+TB_NAME 	?= tb_requant_unit
 RADIX		?= hex
 MEALY_FSM   ?= 0
 SIM_DEBUG   ?= 1
