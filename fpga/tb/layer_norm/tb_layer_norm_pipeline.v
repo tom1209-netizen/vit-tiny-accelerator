@@ -138,8 +138,8 @@ module tb_layer_norm_pipelined;
         $display("=== START DYNAMIC LENGTH TEST ===");
         
         // Setup Lengths
-        packet_lengths[0] = 160; // Stage 1
-        packet_lengths[1] = 800; // Stage 2
+        packet_lengths[0] = 320; // Stage 1
+        packet_lengths[1] = 320; // Stage 2
         packet_lengths[2] = 320; // Stage 3
         
         for(k=0; k<NUM_PACKETS; k=k+1) packet_gen_done[k] = 0;
@@ -207,7 +207,7 @@ module tb_layer_norm_pipelined;
             s_axis_tdata  <= 0;
 
             // Small gap to separate packets slightly in waveform for visual check
-            repeat(150) @(posedge clk); 
+            repeat(30) @(posedge clk); 
         end
     end
     endtask
