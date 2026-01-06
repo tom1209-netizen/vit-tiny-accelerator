@@ -148,8 +148,8 @@ module tb_layer_norm_pipelined;
         s_axis_tdata = 0; s_axis_tvalid = 0; s_axis_tlast = 0;
         m_axis_tready = 1; 
         
-        cfg_gamma = real_to_q16(10); 
-        cfg_beta  = real_to_q16(5.0);
+        cfg_gamma = real_to_q16(1); 
+        cfg_beta  = real_to_q16(0.5);
 
         #(CLK_PERIOD * 10);
         aresetn = 1;
@@ -255,7 +255,7 @@ module tb_layer_norm_pipelined;
                     diff = rtl_val - exp_val;
                     if (diff < 0) diff = -diff;
                     
-                    if (diff > 1) begin
+                    if (diff >= 1) begin
                         
                             $display("[FAIL] Pkt%0d Idx%0d: Exp=%d, Act=%d", pkt_id, global_idx, exp_val, rtl_val);
                             err_cnt = err_cnt + 1;

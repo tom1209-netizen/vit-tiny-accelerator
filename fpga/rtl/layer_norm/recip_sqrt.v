@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 module recip_sqrt #(
     parameter DATA_WIDTH = 32,
-    parameter M_BITS     = 12,
+    parameter M_BITS     = 12, // number of bits we actually need from the fraction to use LUT
     parameter OUT_WIDTH  = 32,
     parameter FRAC_BITS  = 16 
 )(
@@ -44,7 +44,7 @@ module recip_sqrt #(
     always @(*) begin
         lod_comb = 0;
         for (i = 0; i < DATA_WIDTH; i = i + 1) begin
-            if (i_var[i]) lod_comb = i[K_WIDTH-1:0];
+            if (i_var[i]) lod_comb = i[K_WIDTH-1:0]; // the index k in the fixedpoint 16.16
         end
     end
 
@@ -85,7 +85,7 @@ module recip_sqrt #(
             
             if (st1_valid) begin
                 st2_k <= st1_k;
-                st2_mantissa <= (st1_var_d << ((DATA_WIDTH - 1) - st1_k)) >> (DATA_WIDTH - 1 - M_BITS);
+                st2_mantissa <= (st1_var_d << ((DATA_WIDTH - 1) - st1_k)) >> (DATA_WIDTH - 1 - M_BITS); // eg: 00101101 (M_BITS = 3, frac_bits = 4), becomes 00001011, so mantissa is 011
             end
         end
     end
@@ -99,12 +99,12 @@ module recip_sqrt #(
     reg                    st3_zero;
 
     wire signed [K_WIDTH:0] k_real_exponent; 
-    assign k_real_exponent = $signed({1'b0, st2_k}) - $signed(FRAC_BITS);
+    assign k_real_exponent = $signed({1'b0, st2_k}) - $signed(FRAC_BITS); // the index k in the integer part only
 
     wire signed [31:0] combined_val;
     wire signed [31:0] neg_halved;
-    assign combined_val = (k_real_exponent <<< M_BITS) | {20'd0, st2_mantissa};
-    assign neg_halved   = (-combined_val) >>> 1;
+    assign combined_val = (k_real_exponent <<< M_BITS) | {20'd0, st2_mantissa}; // k_x + x with 12 bits precise fraction for LUT, the format is Q20.12
+    assign neg_halved   = (-combined_val) >>> 1; // -(k_x + x) / 2
 
     always @(posedge clk) begin
         if (!aresetn) begin
@@ -117,8 +117,8 @@ module recip_sqrt #(
             st3_zero  <= st2_zero;
             
             if (st2_valid) begin
-                st3_u    <= neg_halved >>> M_BITS;
-                st3_addr <= neg_halved[M_BITS-1:0];
+                st3_u    <= neg_halved >>> M_BITS; // the negative int part of -(k_x + x) / 2 
+                st3_addr <= neg_halved[M_BITS-1:0]; // the positive fraction part for LUT
             end
         end
     end
@@ -142,8 +142,8 @@ module recip_sqrt #(
             st4_zero  <= st3_zero;
             
             if (st3_valid) begin
-                st4_lut_val <= lut_2_pow_v[st3_addr];
-                st4_u       <= st3_u;
+                st4_lut_val <= lut_2_pow_v[st3_addr]; // indexing LUT by the fraction part
+                st4_u       <= st3_u; // keep up the int part
             end
         end
     end
@@ -170,22 +170,23 @@ module recip_sqrt #(
             if (st4_valid) begin
                 st5_lut_val    <= st4_lut_val;
                 // Move the subtraction here (logic after register is fast)
-                st5_diff_shift <= st4_u - (30 - FRAC_BITS);
+                st5_diff_shift <= st4_u - (30 - FRAC_BITS); // shift right 30 - FRAC_BITS to conver lut_val from 2.30 to 16.16, then shift left u to do *2^u
             end
         end
     end
 
     // =========================================================================
-    // STAGE 6: FINAL SCALING (OUTPUT)
+    // STAGE 6: FINAL SCALING WITH SATURATION
     // =========================================================================
-    // Now the shifter inputs are fully registered
-    reg [OUT_WIDTH-1:0] st6_result;
+    reg [OUT_WIDTH-1:0] st6_raw_shift;
     
     always @(*) begin
+        // 1. Perform the shift (Raw)
+        // Note: For LEFT shift, <<< and << are the same. They both shift in 0s.
         if (st5_diff_shift >= 0)
-            st6_result = st5_lut_val << st5_diff_shift;
+            st6_raw_shift = st5_lut_val << st5_diff_shift; 
         else
-            st6_result = st5_lut_val >> (-st5_diff_shift);
+            st6_raw_shift = st5_lut_val >> (-st5_diff_shift);
     end
 
     always @(posedge clk) begin
@@ -194,11 +195,23 @@ module recip_sqrt #(
             o_recip_sqrt        <= 0;
         end else begin
             o_recip_sqrt_tvalid <= st5_valid;
+            
             if (st5_valid) begin
-                if (st5_zero) 
+                if (st5_zero) begin
+                    // Case 1: Input was zero -> Return MAX
                     o_recip_sqrt <= MAX_OUTPUT;
-                else 
-                    o_recip_sqrt <= st6_result;
+                end
+                else if (st5_diff_shift >= 0 && st6_raw_shift[OUT_WIDTH-1] == 1'b1) begin
+                    // Case 2: OVERFLOW DETECTED
+                    // We shifted left, and the Sign Bit (MSB) became '1'.
+                    // This means the result is too large for a positive signed integer.
+                    // CLAMP to Max Positive Value.
+                    o_recip_sqrt <= MAX_OUTPUT;
+                end
+                else begin
+                    // Case 3: Valid result
+                    o_recip_sqrt <= st6_raw_shift;
+                end
             end
         end
     end

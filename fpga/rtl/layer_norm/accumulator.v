@@ -52,7 +52,8 @@ module accumulator #(
     // =========================================================================
     // STAGE 1: SQUARING (DSP)
     // =========================================================================
-    (* use_dsp = "yes" *) reg signed [2*ELEM_WIDTH-1:0] st1_sq [0:NUM_ELEMS-1];
+    (* use_dsp = "yes" *) 
+    reg signed [2*ELEM_WIDTH-1:0] st1_sq [0:NUM_ELEMS-1];
     reg signed [ELEM_WIDTH-1:0]   st1_val [0:NUM_ELEMS-1];
     reg                           st1_valid, st1_last;
     integer j;
