@@ -510,7 +510,7 @@ Once the scale is ready, the module processes pixels in a continuous pipeline:
 
 The `tb_layer_norm_pipelined` module acts as a self-checking verification environment. It uses a **Driver-Monitor** architecture where the driver pushes random data packets of varying lengths into the RTL, and the monitor compares the output against a high-precision floating-point "Golden Model."
 
-### 1. The Golden Model & Rounding Verification
+### 10.1 The Golden Model & Rounding Verification
 
 The core verification logic relies on a software task that replicates the layer normalization math using `real` (double-precision) variables. This isolates hardware bugs from precision issues.
 
@@ -563,7 +563,7 @@ task calc_golden_model(input integer id, input integer len);
 endtask
 ```
 
-### 2. Dynamic Packet Generation (Driver)
+### 10.2 Dynamic Packet Generation (Driver)
 
 The driver allows testing multiple ViT stages by configuring an array of packet lengths. It generates random data, stores a copy in `history_buffer` for the Golden Model, and drives the AXI-Stream interface.
 
@@ -592,7 +592,7 @@ task driver_thread;
 endtask
 ```
 
-### 3. Monitor & Tolerance Check
+### 10.3 Monitor & Tolerance Check
 
 The monitor captures the hardware output and compares it to the expected buffer populated by the Golden Model.
 
@@ -627,6 +627,66 @@ task monitor_thread;
 endtask
 ```
 
+### 10.4 Output Log
+```text
+=== LAYER NORM TEST ===
+
+[Driver] Generating Pkt 0 (Len=128 items, Beats=16)
+---------------------------------------------------------------
+[Golden Pkt 0] Len=128, Mean=-2.8906, Var=5376.6912, InvStd=0.0136
+---------------------------------------------------------------
+[INPUT ] Pkt 0 Beat 00: c0895e8112153524
+[INPUT ] Pkt 0 Beat 01: b1f056638484d609
+[INPUT ] Pkt 0 Beat 02: 46df998d06b97b0d
+[INPUT ] Pkt 0 Beat 03: 89375212b2c28465
+[INPUT ] Pkt 0 Beat 04: 06d7cd0d00f3e301
+...
+[OUTPUT] Pkt 0 Beat 00: Actual=00ff02ff01010101 | Expected=00ff02ff01010101
+[OUTPUT] Pkt 0 Beat 01: Actual=ff000202ffff0001 | Expected=ff000202ffff0001
+[OUTPUT] Pkt 0 Beat 02: Actual=0200ffff01000201 | Expected=0100ffff01000201
+[OUTPUT] Pkt 0 Beat 03: Actual=ff010201ff00ff02 | Expected=ff010201ff00ff02
+[OUTPUT] Pkt 0 Beat 04: Actual=0100000101000001 | Expected=0100000101000001
+...
+[PASS] Packet 0 Verified.
+
+[Driver] Generating Pkt 1 (Len=128 items, Beats=16)
+---------------------------------------------------------------
+[Golden Pkt 1] Len=128, Mean=-1.9375, Var=5130.8555, InvStd=0.0140
+---------------------------------------------------------------
+[INPUT ] Pkt 1 Beat 00: 10642120c03b2280
+[INPUT ] Pkt 1 Beat 01: cecccc9d557845aa
+[INPUT ] Pkt 1 Beat 02: 8983b813cb203e96
+[INPUT ] Pkt 1 Beat 03: a9a7d65386bc380d
+[INPUT ] Pkt 1 Beat 04: eaa62ad5359fdd6b
+...
+[OUTPUT] Pkt 1 Beat 00: Actual=01020101000101ff | Expected=01020101000101ff
+[OUTPUT] Pkt 1 Beat 01: Actual=000000ff020202ff | Expected=000000ff020201ff
+[OUTPUT] Pkt 1 Beat 02: Actual=ffffff01000101ff | Expected=ffff0001000101ff
+[OUTPUT] Pkt 1 Beat 03: Actual=ffff0002ff000101 | Expected=ffff0002ff000101
+[OUTPUT] Pkt 1 Beat 04: Actual=00ff010001ff0002 | Expected=00ff010001ff0002
+...
+[PASS] Packet 1 Verified.
+
+[Driver] Generating Pkt 2 (Len=128 items, Beats=16)
+---------------------------------------------------------------
+[Golden Pkt 2] Len=128, Mean=5.0469, Var=5012.3728, InvStd=0.0141
+---------------------------------------------------------------
+[INPUT ] Pkt 2 Beat 00: 27f2554f42f24185
+[INPUT ] Pkt 2 Beat 01: 1d06333a9dcc603b
+[INPUT ] Pkt 2 Beat 02: 0aaa4b15bf23327e
+[INPUT ] Pkt 2 Beat 03: 6c9c4bd978d99bf1
+[INPUT ] Pkt 2 Beat 04: 2635fb4c31230762
+...
+[OUTPUT] Pkt 2 Beat 00: Actual=01000202010001ff | Expected=01000202010001ff
+[OUTPUT] Pkt 2 Beat 01: Actual=01010101ff000201 | Expected=01010101ff000201
+[OUTPUT] Pkt 2 Beat 02: Actual=01ff0201ff010102 | Expected=01ff010100010102
+[OUTPUT] Pkt 2 Beat 03: Actual=02ff02000200ff00 | Expected=02ff01000200ff00
+[OUTPUT] Pkt 2 Beat 04: Actual=0101000201010102 | Expected=0101000201010102
+...
+[PASS] Packet 2 Verified.
+
+=== TEST COMPLETED ===
+```
 ## 11. Resource Utilization and Timing Analysis
 
 ### 11.1 Resource Utilization

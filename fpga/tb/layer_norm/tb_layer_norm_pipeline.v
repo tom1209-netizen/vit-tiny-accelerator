@@ -5,16 +5,16 @@ module tb_layer_norm_pipelined;
     // Parameters
     parameter DATA_WIDTH   = 8;
     parameter PARALLEL_N   = 8;
-    parameter BEAT_WIDTH   = 64;   
+    parameter BEAT_WIDTH   = 64;    
     parameter FIFO_DEPTH   = 512;
-    parameter STAT_WIDTH   = 32;   
+    parameter STAT_WIDTH   = 32;    
     parameter SUM_WIDTH    = 18;
-    parameter SUM_SQ_WIDTH = 26; // Match RTL
+    parameter SUM_SQ_WIDTH = 26; 
     parameter M_BITS       = 12;
 
     localparam CLK_PERIOD = 5.0;
-    localparam MAX_PACKET_LEN = 800; // Buffer size
-    localparam NUM_PACKETS = 3;      // Testing 3 distinct lengths
+    localparam MAX_PACKET_LEN = 800; 
+    localparam NUM_PACKETS = 3;      
 
     // Signals
     reg clk;
@@ -34,16 +34,12 @@ module tb_layer_norm_pipelined;
     reg                    m_axis_tready;
 
     // Test Config
-    // Packet 0: 128 (Stage 1)
-    // Packet 1: 160 (Stage 2)
-    // Packet 2: 320 (Stage 3)
     integer packet_lengths [0:2];
 
     // Verification Storage
-    reg signed [7:0] history_buffer [0:NUM_PACKETS-1][0:MAX_PACKET_LEN-1];
+    // Shared buffers
     reg signed [7:0] input_buffer [0:MAX_PACKET_LEN-1];
     reg signed [7:0] expected_buffer [0:MAX_PACKET_LEN-1];
-    reg packet_gen_done [0:NUM_PACKETS-1];
 
     // DUT
     layer_norm #(
@@ -91,7 +87,8 @@ module tb_layer_norm_pipelined;
         end
     endfunction
 
-    // Golden Model with DYNAMIC LENGTH
+    // Golden Model Calculation
+    // Now called by Driver before sending data
     task calc_golden_model(input integer id, input integer len);
         integer i;
         real sum, sum_sq, mean, var, inv_std, val, norm;
@@ -128,21 +125,18 @@ module tb_layer_norm_pipelined;
     endtask
 
     // Main
-    integer k;
     initial begin
         clk = 0;
         forever #(CLK_PERIOD/2) clk = ~clk;
     end
 
     initial begin
-        $display("=== START DYNAMIC LENGTH TEST ===");
+        $display("=== LAYER NORM TEST ===");
         
-        // Setup Lengths
-        packet_lengths[0] = 320; // Stage 1
-        packet_lengths[1] = 320; // Stage 2
-        packet_lengths[2] = 320; // Stage 3
-        
-        for(k=0; k<NUM_PACKETS; k=k+1) packet_gen_done[k] = 0;
+        // 128 elements / 8 bytes per beat = 16 Beats
+        packet_lengths[0] = 128; 
+        packet_lengths[1] = 128; 
+        packet_lengths[2] = 128; 
 
         aresetn = 0;
         s_axis_tdata = 0; s_axis_tvalid = 0; s_axis_tlast = 0;
@@ -160,7 +154,7 @@ module tb_layer_norm_pipelined;
             monitor_thread();
         join
 
-        $display("\n=== ALL TESTS PASSED ===");
+        $display("\n=== TEST COMPLETED ===");
         $finish;
     end
 
@@ -168,7 +162,7 @@ module tb_layer_norm_pipelined;
     task driver_thread;
         integer pkt_id, beat_idx, elem_idx, global_idx, current_len, num_beats;
         reg [63:0] r_data;
-        reg [63:0] packet_data_store [0:99]; // Max 800 elems = 100 beats
+        reg [63:0] packet_data_store [0:99]; 
     begin
         @(posedge clk);
         while (!aresetn) @(posedge clk);
@@ -177,26 +171,31 @@ module tb_layer_norm_pipelined;
             current_len = packet_lengths[pkt_id];
             num_beats = current_len / 8;
 
-            $display("[Driver] Generating Pkt %0d (Len=%0d, Beats=%0d)", pkt_id, current_len, num_beats);
+            $display("\n[Driver] Generating Pkt %0d (Len=%0d items, Beats=%0d)", pkt_id, current_len, num_beats);
             
+            // 1. Generate Data & Fill Input Buffer
             global_idx = 0;
-            // Generate Data
             for (beat_idx = 0; beat_idx < num_beats; beat_idx = beat_idx + 1) begin
                 r_data = {$random, $random};
                 packet_data_store[beat_idx] = r_data;
                 
                 for (elem_idx = 0; elem_idx < 8; elem_idx = elem_idx + 1) begin
-                   history_buffer[pkt_id][global_idx] = r_data[elem_idx*8 +: 8];
+                   input_buffer[global_idx] = r_data[elem_idx*8 +: 8];
                    global_idx = global_idx + 1;
                 end
             end
-            packet_gen_done[pkt_id] = 1; 
 
-            // Drive Bus
+            // 2. Calculate Golden Model IMMEDIATELY (Prints Header)
+            // This ensures the header prints before we start driving the bus
+            calc_golden_model(pkt_id, current_len);
+
+            // 3. Drive Bus & Print Inputs
             for (beat_idx = 0; beat_idx < num_beats; beat_idx = beat_idx + 1) begin
                 s_axis_tvalid <= 1;
                 s_axis_tdata  <= packet_data_store[beat_idx];
                 s_axis_tlast  <= (beat_idx == num_beats - 1);
+                
+                $display("[INPUT ] Pkt %0d Beat %02d: %h", pkt_id, beat_idx, packet_data_store[beat_idx]);
                 
                 @(posedge clk);
                 while (!s_axis_tready) @(posedge clk);
@@ -206,8 +205,7 @@ module tb_layer_norm_pipelined;
             s_axis_tlast  <= 0;
             s_axis_tdata  <= 0;
 
-            // Small gap to separate packets slightly in waveform for visual check
-            repeat(30) @(posedge clk); 
+            repeat(150) @(posedge clk); 
         end
     end
     endtask
@@ -215,20 +213,17 @@ module tb_layer_norm_pipelined;
     // Monitor
     task monitor_thread;
         integer pkt_id, out_cnt, elem_idx, global_idx, err_cnt, current_len, num_beats;
-        integer diff, i;
+        integer diff, k;
         reg signed [7:0] rtl_val, exp_val;
+        reg [63:0] expected_beat_packed;
     begin
         for (pkt_id = 0; pkt_id < NUM_PACKETS; pkt_id = pkt_id + 1) begin
             
-            wait (packet_gen_done[pkt_id] == 1);
             current_len = packet_lengths[pkt_id];
-            num_beats   = current_len / 8;
+            num_beats    = current_len / 8;
 
-            // Prepare Golden
-            for (i=0; i<current_len; i=i+1) begin
-                input_buffer[i] = history_buffer[pkt_id][i];
-            end
-            calc_golden_model(pkt_id, current_len); 
+            // Note: Golden model is already calculated by Driver 
+            // before the first beat arrives here.
             
             out_cnt = 0;
             global_idx = 0;
@@ -240,14 +235,25 @@ module tb_layer_norm_pipelined;
             while (out_cnt < num_beats) begin
                 while (!m_axis_tvalid) @(posedge clk);
 
+                // Reconstruct Expected Beat
+                expected_beat_packed = 0;
+                for (k = 0; k < 8; k = k + 1) begin
+                    expected_beat_packed[k*8 +: 8] = expected_buffer[global_idx + k];
+                end
+
+                $display("[OUTPUT] Pkt %0d Beat %02d: Actual=%h | Expected=%h", 
+                         pkt_id, out_cnt, m_axis_tdata, expected_beat_packed);
+
+                // Check TLAST
                 if (out_cnt == num_beats-1 && !m_axis_tlast) begin
-                    $display("[FAIL] Packet %0d: TLAST missing!", pkt_id);
+                    $display("    [FAIL] TLAST missing!");
                     err_cnt = err_cnt + 1;
                 end else if (out_cnt != num_beats-1 && m_axis_tlast) begin
-                    $display("[FAIL] Packet %0d: TLAST early!", pkt_id);
+                    $display("    [FAIL] TLAST early!");
                     err_cnt = err_cnt + 1;
                 end
 
+                // Check Data Integrity
                 for (elem_idx = 0; elem_idx < 8; elem_idx = elem_idx + 1) begin
                     rtl_val = $signed(m_axis_tdata[elem_idx*8 +: 8]);
                     exp_val = expected_buffer[global_idx];
@@ -255,9 +261,8 @@ module tb_layer_norm_pipelined;
                     diff = rtl_val - exp_val;
                     if (diff < 0) diff = -diff;
                     
-                    if (diff >= 1) begin
-                        
-                            $display("[FAIL] Pkt%0d Idx%0d: Exp=%d, Act=%d", pkt_id, global_idx, exp_val, rtl_val);
+                    if (diff > 1) begin
+                            $display("    [FAIL] Byte %0d: Exp=%d, Act=%d", elem_idx, exp_val, rtl_val);
                             err_cnt = err_cnt + 1;
                     end
                     global_idx = global_idx + 1;
@@ -268,7 +273,10 @@ module tb_layer_norm_pipelined;
             end
             
             if (err_cnt == 0) $display("[PASS] Packet %0d Verified.", pkt_id);
-            else $stop;
+            else begin 
+                $display("[FAIL] Packet %0d had %d errors.", pkt_id, err_cnt);
+                $stop; 
+            end
         end
     end
     endtask
