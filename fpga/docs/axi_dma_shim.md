@@ -275,7 +275,7 @@ stateDiagram-v2
 
 ## 6. Verification
 
-For testing this `axi_dma_shim` module, I used a block design containing ZYNQ7 Processing System, AXI DMA, AXI GPIO IP from Vivado and my module `axi_dma_shim` which is placed between the PS and the AXI DMA. The block design script is at
+For testing this `axi_dma_shim` module, I used a block design containing ZYNQ7 Processing System, AXI DMA, AXI GPIO IP from Vivado and my module `axi_dma_shim` which is placed between the PS and the AXI DMA. The block design script is at fpga/scripts/bd/AXI_DMA_VDMA_system.tcl
 
 The main processing flow: 
 ```
