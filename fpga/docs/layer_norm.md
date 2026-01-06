@@ -1,3 +1,5 @@
+# Layer Normalization
+
 | **Document Information** |                                               |
 | ------------------------ | --------------------------------------------- |
 | **Module Name**          | layer_norm                                    |
@@ -247,12 +249,12 @@ Beat layout (64 bits):
 
 ### 8.1 Normal Operation
 
-![[ln_default.png]]
+![ln_default](./waveform/layer_norm/ln_default.png)
 Note: the `layer_norm` module has Input and Output FIFO so whenever the FIFO is not empty, the `axis_s_tready` signal is high
 ### 8.2 Pipelined Operation
 
 
-![[ln_pipe.png]]
+![ln_pipe](./waveform/layer_norm/ln_pipe.png)
 
 Note: the Parameters FIFO stores all of the parameters needed for the final normalization and output, so the (Gamma, Beta) pair of the later beats will not conflict with the former pair and break the output
 
@@ -392,7 +394,7 @@ This module calculates the reciprocal square root ($\frac{1}{\sqrt{X}}$) essenti
 |---|---|---|---|
 |`i_var`|Input|32|Input variance ($\sigma^2$) in fixed-point format.|
 |`i_var_tvalid`|Input|1|Valid signal for input.|
-|`o_recip_sqrt`|Output|32|Result $1/\sqrt{\text{var}}$ in Q16.16 format.|
+|`o_recip_sqrt`|Output|32|Result $\frac{1}{\sqrt{var}}$ in Q16.16 format.|
 |`o_recip_sqrt_tvalid`|Output|1|Valid signal for output.|
 
 #### Functional Description
@@ -413,7 +415,7 @@ The module utilizes a 6-stage pipeline to transform the input into the log domai
     
 6. **Final Scaling:** Performs the final denormalization shift on the LUT value to produce the correct fixed-point result. If the input is zero, the output is clamped to `MAX_OUTPUT`.
 
-### Final Normalization Engine (`final_norm_calc.v`)
+### 9.5 Final Normalization Engine (`final_norm_calc.v`)
 
 This module executes the final affine transformation $y = \frac{x - \mu}{\sqrt{\sigma^2}} \cdot \gamma + \beta$. It applies the calculated statistics and learned parameters to the delayed input stream. To maximize throughput, it pre-calculates a combined scaling factor once per packet, reducing the per-pixel operation to a simplified Multiply-Accumulate (MAC).
 
@@ -627,7 +629,7 @@ endtask
 
 ## 11. Resource Utilization and Timing Analysis
 
-### 11.1 Synthesis Results
+### 11.1 Resource Utilization
 
 **Target Device**: Xilinx Zynq-7020 (xc7z020clg400-1)  
 **Tool Version**: Vivado 2024.2  
@@ -704,8 +706,7 @@ The normalization formula is $y = (x - \mu) \cdot (1/\sigma) \cdot \gamma + \bet
 
 Implementing two sequential multiplications (* inv_sqrt then * gamma) inside the pixel pipeline would double the latency and resource usage per pixel.
 
-- Optimization: The final_norm_calc.v FSM pauses the stream briefly at the start of each packet to compute a Combined Scale Factor:
-    $$\text{Combined Scale} = \text{inv\_sqrt} \times \gamma$$
+- Optimization: The final_norm_calc.v FSM pauses the stream briefly at the start of each packet to compute a Combined Scale Factor: $$\text{Combined Scale} = \text{inv\\_sqrt} \times \gamma$$
     
 - **Result:** The high-speed pixel pipeline only performs **one** multiplication ($y = (x-\mu) \cdot \text{scale} + \beta$). This removes an entire multiplier from the critical path of the data stream.
 
