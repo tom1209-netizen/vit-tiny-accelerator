@@ -109,7 +109,7 @@ $$\frac{1}{\sqrt{X}} \approx 2^{\frac{-(k_x + x)}{2}}$$
 
 #### 3.2.2 Hardware Algorithm
 
-The implementation calculates the term $2^{\frac{-(k_x + x)}{2}}$ by decomposing the exponent into an integer component $u$ and a fractional component $v$, such that $$2^{\frac{-(k_x + x)}{2}} = 2^u \cdot 2^v$$ which means $$\frac{-(k_x + x)}{2} = u + v$$This is executed in Verilog through the following steps:
+The implementation calculates the term $2^{\frac{-(k_x + x)}{2}}$ by decomposing the exponent into an integer component $u$ and a fractional component $v$, such that $$2^{\frac{-(k_x + x)}{2}} = 2^u \cdot 2^v$$ which means $$\frac{-(k_x + x)}{2} = u + v$$ This is executed in Verilog through the following steps:
 
 
 1. **Leading One Detection:** Determine $k_x$, the index of the most significant bit of the input variance $Var$.
