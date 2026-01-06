@@ -249,12 +249,12 @@ Beat layout (64 bits):
 
 ### 8.1 Normal Operation
 
-![ln_default](./waveform/layer_norm/ln_default.png)
+![ln_default](./figure/layer_norm/ln_default.png)
 Note: the `layer_norm` module has Input and Output FIFO so whenever the FIFO is not empty, the `axis_s_tready` signal is high
 ### 8.2 Pipelined Operation
 
 
-![ln_pipe](./waveform/layer_norm/ln_pipe.png)
+![ln_pipe](./figure/layer_norm/ln_pipe.png)
 
 Note: the Parameters FIFO stores all of the parameters needed for the final normalization and output, so the (Gamma, Beta) pair of the later beats will not conflict with the former pair and break the output
 
