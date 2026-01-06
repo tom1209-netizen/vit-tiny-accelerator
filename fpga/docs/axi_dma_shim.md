@@ -85,12 +85,12 @@ This interface is the "Control Plane." The Shim acts as a Master to write config
 | `m_axi_lite_bready`        | Out     | 1         | Write Response Ready. Master is ready to accept response.   | Asserted by FSM after address/data handshakes complete to close the transaction.    |
 | **Read Address Channel**   |         |           |                                                             |                                                                                     |
 | `m_axi_lite_araddr`        | Out     | 32        | Read Address. Address of register the shim want to read.    | Used only in `ST_POLL_RD` to point to the Status Register (`0x04` or `0x34`).       |
-| `m_axi_lite_arprot`        | Out     | 3         | Protection type.                                            | Hardcoded to `3'b000`.                                                              |
+| `m_axi_lite_arprot`        | Out     | 3         | Protection type.                                            | Hardcoded to `3'b000` (Unprivileged - Secure - Data access)                         |
 | `m_axi_lite_arvalid`       | Out     | 1         | Read Address Valid.                                         | Asserted during polling state.                                                      |
 | `m_axi_lite_arready`       | In      | 1         | Read Address Ready (the DMA ready to be read)               | Used to detect `ar_done`.                                                           |
 | **Read Data Channel**      |         |           |                                                             |                                                                                     |
 | `m_axi_lite_rdata`         | In      | 32        | Read Data. The value read from the register.                | Evaluated in `ST_POLL_RD`. Bits 12 and 1 are checked to determine DMA status.       |
-| `m_axi_lite_rresp`         | In      | 2         | Read Response.                                              | **Ignored.**                                                                        |
+| `m_axi_lite_rresp`         | In      | 2         | Read Response.                                              | Assume internal connections are reliable, so ignore rresp, keep the FSM lightweight |
 | `m_axi_lite_rvalid`        | In      | 1         | Read Data Valid.                                            | Indicates valid `rdata` is available for evaluation.                                |
 | `m_axi_lite_rready`        | Out     | 1         | Read Ready. Master accepts the read data.                   | Asserted by FSM to complete the read transaction.                                   |
 
