@@ -1,4 +1,14 @@
-# Module Documentation: `axi_dma_shim`
+# `AXI DMA Shim`
+
+| **Document Information** |                                               |
+| ------------------------ | --------------------------------------------- |
+| **Module Name**          | axi_dma_shim                                  |
+| **Version**              | 1.0                                           |
+| **Design Status**        | In development                                |
+| **Last Updated**         | January 02 2026                               |
+| **Source Location**      | `fpga/rtl/axi_dma_shim/`                      |
+| **Testbench**            | `sw/sources/axi_dma_vdma.c` (PS App with test)|
+| **Author**               | Nguyen Bui Tuan Anh                           |
 
 ## 1. Overview
 
