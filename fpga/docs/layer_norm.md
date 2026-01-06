@@ -138,7 +138,7 @@ This method allows us to trade off precision against memory usage by adjusting t
 
 ## 4.1 Block Diagram 
 
-![[layernorm.png]]
+![ln_default](./figure/layer_norm/block.png)
 ## 4.2 Module Hierarchy
 ```
 layer_norm 
