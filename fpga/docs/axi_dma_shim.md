@@ -1,4 +1,4 @@
-# `AXI DMA Shim`
+# AXI DMA Shim
 
 | **Document Information** |                                               |
 | ------------------------ | --------------------------------------------- |
@@ -273,31 +273,201 @@ stateDiagram-v2
     - Returns to `ST_IDLE`.
         
 
----
+## 6. Verification
+
+For testing this `axi_dma_shim` module, I used a block design containing ZYNQ7 Processing System, AXI DMA, AXI GPIO IP from Vivado and my module `axi_dma_shim` which is placed between the PS and the AXI DMA. The block design script is at
+
+The main processing flow: 
+```
+Processing System -> AXI GPIO -> axi_dma_shim <-> AXI DMA
+										|
+										v
+									  ViT PL		
+```
+
+The AXI GPIO is used to convert the master interface M_AXI_GP0 of PS to the friendly interface command signals (`dma_start_transfer, dma_ddr_addr, dma_length_byte...`) mentioned above.
+
+### 6.1 PS Testing Application
+
+A PS application will control the PS and send command signals  to `axi_dma_shim`. These are the core functions:
+
+a. Command Initiation: `dma_start_transfer`
+
+This function acts as the bridge between the processor and your hardware FSM. It performs a specific sequence of GPIO writes to satisfy the signal protocol required by the `axi_dma_shim`.
+
+- **Address Configuration:** It first writes the target DDR buffer address to the `GPIO_ADDR_CHANNEL`. This corresponds to the `dma_ddr_addr` input on your module.
+    
+- **Control Configuration:** It packs the transaction length (bytes) and the direction bit (MM2S vs S2MM) into a single 32-bit integer and writes it to the `GPIO_LEN_CHANNEL`.
+    
+- **Pulse Generation:** The crucial step is the generation of the `start_pulse`. The function sets the designated start bit high, waits for a short duration (`usleep`) to ensure the shim's edge detector (`start_d1` / `start_d2`) captures the signal, and then clears the bit. This transition triggers the Verilog FSM to move from `ST_IDLE` to `ST_WR_DMACR`.
+
+```c
+// Activate dma_start_transfer
+void dma_start_transfer(u32 addr, u32 length_bytes, u8 direction) {
+    u32 control_value;
+    // 1. Set address
+    XGpio_DiscreteWrite(&GpioOut, GPIO_ADDR_CHANNEL, addr);
+    // 2. Set length + direction
+    control_value = (length_bytes << 2) | (direction << LENGTH_DIR_BIT);
+    XGpio_DiscreteWrite(&GpioOut, GPIO_LEN_CHANNEL, control_value);
+    // 3. Create start pulse (set bit start)
+    control_value |= (1 << LENGTH_START_BIT);
+    XGpio_DiscreteWrite(&GpioOut, GPIO_LEN_CHANNEL, control_value);
+    // 4. Hold start for some cycles
+    usleep(1000);
+    // 5. Clear start bit
+    control_value &= ~(1 << LENGTH_START_BIT);
+    XGpio_DiscreteWrite(&GpioOut, GPIO_LEN_CHANNEL, control_value);
+}
+```
+
+b. Status Polling: `dma_wait_for_completion`
+
+Since the `axi_dma_shim` handles the AXI4-Lite configuration autonomously, the PS must wait for the hardware to report completion.
+
+- This function continuously polls the `GPIO_STATUS_CHANNEL`, which is connected to the `dma_transfer_done` output of your module.
+    
+- The function implements a software timeout mechanism. It reads the GPIO status bit in a loop with a 1ms delay. If the `axi_dma_shim` FSM reaches the `ST_DONE` state and asserts the done signal within the timeout window, the function returns success; otherwise, it flags a timeout error.
+
+```c
+// Function to wait for dma_transfer_done
+int dma_wait_for_completion(int timeout_ms) {
+    int timeout = 0;
+    while (timeout < timeout_ms) {
+        if (XGpio_DiscreteRead(&GpioIn, GPIO_STATUS_CHANNEL) & 0x1) {
+            return 1; // Done
+        }
+        usleep(1000); // 1ms
+        timeout++;
+    }
+    return 0; // Timeout
+}
+```
+
+c. Integration Test: `test_mm2s`
+
+This high-level function orchestrates a complete Memory-to-Stream transfer with packet length TEST_PKT_LEN_BYTES = 10.
+
+- **The source buffer**: TX_BUFFER_BASE will store the pixel data of a 224x224 image. 
+
+- **Cache Management:** It performs `Xil_DCacheFlushRange` on the source buffer. This is critical in Zynq systems to ensure the physical DDR memory contains the data the CPU wrote, as the AXI DMA reads directly from DDR, bypassing the CPU cache.
+
+- **Execution:** It calls `dma_start_transfer` with the address of the transmission buffer (`TxBuffer`) and the packet length (`TEST_PKT_LEN_BYTES`), setting the direction to `1` (MM2S).
+
+- **Verification:** It waits for the hardware handshake using `dma_wait_for_completion`. A successful return confirms that the shim correctly configured the DMA registers via AXI-Lite and that the DMA controller successfully processed the data stream.
+
+```c
+/*********************************************************************
+ * Test 1: MM2S (Memory → Stream)
+ * Require: s_axis_tready = 1
+ ********************************************************************/
+int test_mm2s()
+{
+    xil_printf("\r\n--- Test MM2S (Mem → Stream) ---\r\n");
+    u8 *TxBuffer = (u8 *)TX_BUFFER_BASE;
+    Xil_DCacheFlushRange((UINTPTR)TxBuffer, FRAME_SIZE);
+    
+    xil_printf("Start MM2S: addr=0x%08X, len=%d bytes\r\n",
+               (unsigned)TxBuffer, TEST_PKT_LEN_BYTES);
+
+    dma_start_transfer((u32)TxBuffer, TEST_PKT_LEN_BYTES, 1); // 1 = MM2S
+
+    if (!dma_wait_for_completion(5000)) {  // 5s
+        xil_printf("MM2S timeout (check stream sink / tready)\r\n");
+        return XST_FAILURE;
+    }
+
+    xil_printf("MM2S completed (dma_transfer_done=1)\r\n");
+
+    return XST_SUCCESS;
+}
+```
+
+d. Integration Test: `test_s2mm`
+
+This function verifies the Stream-to-Memory (S2MM) path, ensuring data flows correctly from the accelerator (or data stream), through the shim, to the AXI DMA, and finally into system memory.
+
+- **Buffer Preparation:** The function begins by manually zeroing out the receive buffer (`RxBuffer`) and performing a **Data Cache Flush** (`Xil_DCacheFlushRange`). This guarantees that the physical DDR memory actually contains zeros before the hardware attempts to write to it, preventing false positives where the verification step might read old data from a previous run.
+    
+- **Execution:** It initiates the transfer by calling `dma_start_transfer` with the direction bit set to `0`. This instructs the `axi_dma_shim` FSM to target the S2MM control registers (offsets `0x30`–`0x58`) rather than the MM2S registers used in the previous test.
+    
+- **Cache Invalidation (Critical):** Once `dma_wait_for_completion` returns (indicating the hardware has finished writing to DDR), the function executes `Xil_DCacheInvalidateRange`.
+    
+    - _Reasoning:_ The AXI DMA writes directly to physical DDR memory, bypassing the CPU's L1/L2 cache. Without invalidation, the CPU would continue to see the "stale" zero values it cached during the preparation phase. This function forces the CPU to discard those cache lines and re-fetch the new, valid data from DDR.
+        
+- **Data Verification:** Finally, the function reads the buffer - now guaranteed to be fresh from DDR, and prints the bytes to the console. This allows for manual inspection to confirm the received pattern matches the expected output from the accelerator.
+
+```c
+/*********************************************************************
+ * Test 2: S2MM (Stream → Memory)
+ * Require: AXIS source send TEST_PKT_LEN_BYTES to S2MM
+ ********************************************************************/
+int test_s2mm()
+{
+    xil_printf("\r\n--- Test S2MM (Stream → Mem) ---\r\n");
+    u8 *RxBuffer = (u8 *)RX_BUFFER_BASE;
+
+    // Clear buffer before receiving
+    for (int i = 0; i < TEST_PKT_LEN_BYTES; ++i) {
+        RxBuffer[i] = 0x00;
+    }
+
+    Xil_DCacheFlushRange((UINTPTR)RxBuffer, TEST_PKT_LEN_BYTES);
+
+    xil_printf("Start S2MM: addr=0x%08X, len=%d bytes\r\n",
+               (unsigned)RxBuffer, TEST_PKT_LEN_BYTES);
+
+    dma_start_transfer((u32)RxBuffer, TEST_PKT_LEN_BYTES, 0); // 0 = S2MM
+
+    if (!dma_wait_for_completion(5000)) {  // 5s
+        xil_printf("S2MM timeout (check AXIS source)\r\n");
+        debug_gpio_status();
+        return XST_FAILURE;
+    }
+
+    xil_printf("S2MM completed, reading back buffer...\r\n");
+    // invalidate cache to read new data from DDR
+    Xil_DCacheInvalidateRange((UINTPTR)RxBuffer, TEST_PKT_LEN_BYTES);
+    // print test packet bytes
+    for (int i = 0; i < TEST_PKT_LEN_BYTES; ++i) {
+        xil_printf("0x%02X ", RxBuffer[i]);
+        if ((i & 0x0F) == 0x0F) xil_printf("\r\n");
+    }
+    
+    xil_printf("\r\n");
+    return XST_SUCCESS;
+
+}
+```
+
+
+### 6.2 Waveform
+
+I used the Integrated Logic Analyzer (ILA) IP from Vivado to capture the signal while running on real time Arty Z7 board.
+
+a. MM2S test:
+
+- In this picture, the `axi_dma_shim` module has written the `dma_length_byte` data (80 bytes = 0x50) to the register MM2S_LENGTH (offset 0x28). We can see that the AWADDR is 0x41e00028 and WDATA is 0x50
+- Then the shim immediately change to the Polling State (POLL_RD) and keep reading the MM2S_DMASR to check for the IOC (bit 12) or Idle (bit 1) which indicate the completion
+
+![mm2s_polling](./figure/axi_dma_shim/mm2s_polling.png)
+
+- After several clock cycles, the AXI DMA start sending the Data Stream which has 10 beats (10 beats x 8 bytes = 80 bytes) as expected
+
+![mm2s_stream](./figure/axi_dma_shim/mm2s_stream.png)
+
+- Finally, after the last stream beat, the MM2S_DMASR IOC_Irq bit will be 1 (indicate a complete transfer). So the `axi_dma_shim` move to state ST_ACK_IRQ to write 1 to the IOC Interrupt bit (bit 12) to clear the interrupt. In the waveform we can see that at the cycle 56, the AWADDR is 0x41E0004 (MM2S_DMASR with 0x04 offset) and the WDATA is 0x0001000
+
+![mm2s_clear_ioc](./figure/axi_dma_shim/mm2s_clear_ioc.png)
 
 ## 6. Usage Guide for Scheduler
 
 To use this shim effectively in your scheduler state machine:
 
-1. **Setup:** Ensure `dma_direction`, `dma_ddr_addr`, and `dma_length_bytes` are valid.
+1. **Trigger:** Pulse `dma_start_transfer` high for at least one clock cycle.
     
-2. **Trigger:** Pulse `dma_start_transfer` high for at least one clock cycle.
+2. **Wait:** Enter a wait state. Do not change inputs while the Shim is busy (though inputs are latched internally).
     
-3. **Wait:** Enter a wait state. Do not change inputs while the Shim is busy (though inputs are latched internally).
-    
-4. **Finish:** Wait for `dma_transfer_done` to go high. This indicates the data has fully moved (S2MM) or has been fully requested (MM2S) and the DMA controller is idle.
-    
+3. **Finish:** Wait for `dma_transfer_done` to go high. This indicates the data has fully moved (S2MM) or has been fully requested (MM2S) and the DMA controller is idle.
 
----
-
-## 7. Important Hardware Notes
-
-1. **64-bit Axis Data Width:**
-    
-    - The Shim uses `parameter AXIS_DATA_WIDTH = 64`.
-        
-    - **Requirement:** Ensure the AXI DMA IP core in Vivado/Block Design is configured for a **64-bit Stream Data Width**. If the IP is 32-bit, data packing/alignment issues will occur.
-    
-2. **Address Alignment:**
-    
-    - AXI DMA usually requires addresses to be aligned (often 4-byte aligned). Ensure `dma_ddr_addr` from the scheduler meets the alignment requirements of the specific DMA configuration (DRE - Data Realignment Engine status).
+4. Ensure the AXI DMA IP core in Vivado/Block Design is configured for a **64-bit Stream Data Width**. If the IP is 32-bit, data packing/alignment issues will occur.
