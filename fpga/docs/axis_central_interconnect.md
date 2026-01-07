@@ -195,8 +195,42 @@ A synchronous, ring-buffer FIFO that decouples timing between the interconnect m
         
 - **Memory Type:** The design uses asynchronous reads (`assign m_packed = mem[rd_ptr]`), which typically infers **Distributed RAM (LUTRAM)** rather than Block RAM, minimizing latency for shallow depths.
     
+## 5. Verification
 
----
+For testing this `axis_central_interconnect` module, I create a testbench with some kind of topology tests.
+
+### 5.1 Diamond Topology Test:
+
+This test idea is to use 1 source (External source) to simultanously drive 2 destination (2 path).
+
+- The first path will be EXTERNAL INPUT -> RESIDUAL INPUT A
+- The second path will be EXTERNAL INPUT -> LAYER_NORM -> RESIDUAL INPUT B
+- And finally the RESIDUAL OUTPUT -> EXTERNAL OUTPUT
+
+Althought that the `residual_add` module can handle unaligned Input sources, however it is only true if there are 2 distinct unaligned stream inputs, not 1 single stream driving 2 unaligned inputs.
+
+- For 2 distinct unaligned streams input, this part of code in `residual_add` handle it perfectly
+```verilog
+ // Lock-step join: only assert ready on a side if the other side is valid, so pairs are consumed together
+    assign s_axis_a_tready = ready_for_inputs && s_axis_b_tvalid;
+    assign s_axis_b_tready = ready_for_inputs && s_axis_a_tvalid;
+```
+- For 1 single stream driving 2 unaligned inputs, the problem is that when stream A comes to Residual A first, its valid signal will assert Residual B's ready, but residual B is not valid so Residual A's ready is deasserted. Because of 1 unready signal, the `combined_ready` is 0, cause the source to stuck and never complete sending. 
+
+So the solution is the `axis_fifo` connected to each destination of this interconnect. This helps the `combined_ready` signal assert whenever the FIFO is not full. And the single source can send to both Residual A and B, without losing data when A must wait for B to finish first.
+
+Now, I will analyzed the waveform:
+
+- The source data from testbench is 8 beats with value from 10 -> 80 (0x0a -> 0x50). We can see that the s_axis_ext_tdata is routed to the `ln_s_tdata` (`layer_norm` input) - second path, it also route to `resid_a_s_tdata` - first path, but `resid_a_s_tready` deassert so the residual does not receive now.
+
+![dia1](./figure/axis_central_interconnect/dia1.png)
+
+- After the `layer_norm` finish executing, the `ln_m_tdata` is routed to the `resid_b_s_tdata`, and the `resid_a_s_tdata` start receiving the raw data. Both input are aligned perfectly. Then, the `resid_c_m_tdata` start generating the output. Finally we can also see the `resid_c_m_tdata` is routed to the `m_axis_ext_tdata` and complete the test.
+
+![dia2](./figure/axis_central_interconnect/dia2.png)
+![dia3](./figure/axis_central_interconnect/dia3.png)
+
+
 
 ## 5. Summary of Data Flow
 

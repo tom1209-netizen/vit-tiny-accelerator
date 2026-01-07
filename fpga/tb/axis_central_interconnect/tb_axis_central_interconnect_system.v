@@ -84,7 +84,7 @@ module tb_central_interconnect_system;
 
     // Clock Gen
     initial begin
-        clk = 0;
+        clk = 1;
         forever #(CLK_PERIOD/2) clk = ~clk;
     end
 
@@ -128,7 +128,7 @@ module tb_central_interconnect_system;
         #(CLK_PERIOD*10);
         rst = 0;
         #(CLK_PERIOD*10);
-
+        #0.1;
         $display("Ref: Starting Diamond Topology Test...");
         
         // 4. Enable Output Sink
