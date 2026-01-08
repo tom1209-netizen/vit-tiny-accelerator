@@ -16,10 +16,10 @@ int main(void)
 
     xil_printf("\r\n--- START HDMI RESIZE SINGLE IMAGE ---\r\n");
 
-    /* 1. Resize và Load ảnh vào DDR */
+    /* 1. Resize, Load image and classification text to DDR */
     Resize_Load_Image_To_DDR();
     Update_Classification_From_Memory();
-    /* 2. Khởi tạo VDMA */
+    /* 2. Initialize VDMA */
     Config = XAxiVdma_LookupConfig(XPAR_XAXIVDMA_0_BASEADDR);
     if (!Config) {
         xil_printf("No Video DMA found for ID %d\r\n", XPAR_XAXIVDMA_0_BASEADDR);
@@ -29,11 +29,11 @@ int main(void)
     Status = XAxiVdma_CfgInitialize(&AxiVdma, Config, Config->BaseAddress);
     if (Status != XST_SUCCESS) return XST_FAILURE;
 
-    /* 3. Cấu hình VDMA */
+    /* 3. Config VDMA */
     Status = ReadSetup(&AxiVdma);
     if (Status != XST_SUCCESS) return XST_FAILURE;
 
-    /* 4. Bắt đầu truyền */
+    /* 4. Start transfer */
     Status = StartTransfer(&AxiVdma);
     if (Status != XST_SUCCESS) return XST_FAILURE;
 
@@ -65,12 +65,12 @@ int main(void)
         return XST_FAILURE;
     }
 
-    // direction: OUT → điều khiển shim, IN → đọc dma_transfer_done
+    // direction: OUT → control shim, IN → read dma_transfer_done
     XGpio_SetDataDirection(&GpioOut, GPIO_ADDR_CHANNEL, 0x00000000); // outputs
     XGpio_SetDataDirection(&GpioOut, GPIO_LEN_CHANNEL,  0x00000000); // outputs
     XGpio_SetDataDirection(&GpioIn,  GPIO_STATUS_CHANNEL, 0x00000001); // bit0 input
 
-    // --- chạy từng testcase ---
+    // --- run axi_dma_shim testcase ---
     if (test_mm2s() != XST_SUCCESS) {
         xil_printf("MM2S test FAILED\r\n");
         return XST_FAILURE;
@@ -86,7 +86,7 @@ int main(void)
     
 
     while (1) {
-        // CPU rảnh rỗi, VDMA tự chạy ngầm
+        // CPU free, VDMA still running in background
     }
 
     return XST_SUCCESS;
