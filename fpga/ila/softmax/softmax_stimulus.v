@@ -137,7 +137,7 @@ module softmax_axis_stimulus #(
                 end
 
                 STREAM: begin
-                    m_axis_tlast <= (beat_count == num_beats - 1);
+                    m_axis_tlast <= (beat_count == num_beats - 2);
 
                     if (m_axis_tready && m_axis_tvalid) begin
                         if (beat_count == num_beats - 1) begin

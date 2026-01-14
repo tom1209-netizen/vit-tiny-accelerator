@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module debug_top (
+module requant_top (
     input wire clk
 );
 
@@ -169,16 +169,24 @@ module debug_top (
         .clk    (clk),
         .probe0 (s_axis_sb_tdata),
         .probe1 (s_axis_sb_tvalid),
-        .probe2 (sb_load_done),
-        .probe3 (s_axis_tdata),
-        .probe4 (s_axis_tvalid),
-        .probe5 (s_axis_tready),
-        .probe6 (m_axis_tdata),
-        .probe7 (m_axis_tvalid),
-        .probe8 (m_axis_tlast),
-        .probe9 (cfg_proc_start),
-        .probe10(vio_mode_int32),
-        .probe11(vio_start)
+        .probe2 (s_axis_sb_tlast),
+        .probe3 (s_axis_sb_tready),
+        
+        .probe4 (s_axis_tdata),
+        .probe5 (s_axis_tvalid),
+        .probe6 (s_axis_tready),
+        .probe7 (s_axis_tlast),
+        
+        .probe8 (m_axis_tdata),
+        .probe9 (m_axis_tvalid),
+        .probe10 (m_axis_tlast),
+        .probe11 (m_axis_tready),
+        
+        .probe12 (sb_load_done),
+        
+        .probe13 (cfg_proc_start),
+        .probe14 (vio_mode_int32),
+        .probe15 (vio_start)
     );
 
 endmodule
