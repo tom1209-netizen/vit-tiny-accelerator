@@ -4,3 +4,11 @@ termcolor
 wandb
 gdown
 tqdm
+
+# Inference server dependencies
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+python-multipart>=0.0.6
+websockets>=11.0
+opencv-python>=4.8.0
+aiofiles>=23.0.0
