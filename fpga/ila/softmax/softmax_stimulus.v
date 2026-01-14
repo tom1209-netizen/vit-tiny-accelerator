@@ -22,15 +22,20 @@ module softmax_axis_stimulus #(
 );
 
     localparam LANES = AXIS_DATA_WIDTH / DATA_WIDTH;  // 8 tokens per beat
+    localparam START_DELAY_CYCLES = 3;
 
     reg [7:0] beat_count;
     reg [7:0] num_beats;
+    reg [7:0] start_delay_cnt;
+    reg [31:0] tokens_sent;
+    integer lane;
 
     localparam IDLE = 3'd0;
     localparam START_PULSE = 3'd1;
-    localparam STREAM = 3'd2;
-    localparam WAIT_DONE = 3'd3;
-    localparam FINISHED = 3'd4;
+    localparam PRE_STREAM = 3'd2;
+    localparam STREAM = 3'd3;
+    localparam WAIT_DONE = 3'd4;
+    localparam FINISHED = 3'd5;
     reg [2:0] state;
 
     // Edge detection
@@ -48,26 +53,35 @@ module softmax_axis_stimulus #(
         end
     end
 
+    function [7:0] pattern_val;
+        input [2:0] sel;
+        begin
+            case (sel)
+                3'd0: pattern_val = 8'hF8;  // -8
+                3'd1: pattern_val = 8'h00;  // 0
+                3'd2: pattern_val = 8'h07;  // +7
+                3'd3: pattern_val = 8'hF0;  // -16
+                3'd4: pattern_val = 8'h0F;  // +15
+                3'd5: pattern_val = 8'h05;  // +5
+                3'd6: pattern_val = 8'hFF;  // -1
+                3'd7: pattern_val = 8'h01;  // +1
+                default: pattern_val = 8'h00;
+            endcase
+        end
+    endfunction
+
     // Generate attention-logit-like patterns (INT8: -16 to +15 range)
     // This range is typical for requantized attention scores
     always @(*) begin
         m_axis_tdata = {AXIS_DATA_WIDTH{1'b0}};
 
         if (state == STREAM) begin
-            case (beat_count[2:0])
-                // Pattern 1: Gradient from -8 to +7
-                3'd0: m_axis_tdata = 64'hF8_F9_FA_FB_FC_FD_FE_FF;  // -8 to -1
-                3'd1: m_axis_tdata = 64'h00_01_02_03_04_05_06_07;  // 0 to +7
-                // Pattern 2: Peak in center (simulates attention focus)
-                3'd2: m_axis_tdata = 64'hF0_F0_F0_0F_0F_F0_F0_F0;  // -16, peak at +15
-                3'd3: m_axis_tdata = 64'h00_00_00_0F_00_00_00_00;  // Single attention peak
-                // Pattern 3: Uniform (flat attention)
-                3'd4: m_axis_tdata = 64'h00_00_00_00_00_00_00_00;  // All zeros
-                3'd5: m_axis_tdata = 64'h05_05_05_05_05_05_05_05;  // All +5
-                // Pattern 4: Alternating
-                3'd6: m_axis_tdata = 64'hF0_0F_F0_0F_F0_0F_F0_0F;  // -16, +15 alternating
-                3'd7: m_axis_tdata = 64'h00_FF_00_FF_00_FF_00_FF;  // 0, -1 alternating
-            endcase
+            for (lane = 0; lane < LANES; lane = lane + 1) begin
+                if (tokens_sent + lane < num_tokens) begin
+                    m_axis_tdata[lane*DATA_WIDTH +: DATA_WIDTH] =
+                        pattern_val((tokens_sent + lane) & 3'b111);
+                end
+            end
         end
     end
 
@@ -81,6 +95,8 @@ module softmax_axis_stimulus #(
             m_axis_tlast  <= 1'b0;
             beat_count    <= 8'd0;
             num_beats     <= 8'd0;
+            start_delay_cnt <= 8'd0;
+            tokens_sent   <= 32'd0;
         end else begin
             start <= 1'b0;  // Single-cycle pulse
 
@@ -89,6 +105,8 @@ module softmax_axis_stimulus #(
                     m_axis_tvalid <= 1'b0;
                     m_axis_tlast  <= 1'b0;
                     beat_count    <= 8'd0;
+                    start_delay_cnt <= 8'd0;
+                    tokens_sent <= 32'd0;
 
                     if (start_trigger_edge) begin
                         // Calculate number of beats (round up to nearest 8 tokens)
@@ -101,8 +119,21 @@ module softmax_axis_stimulus #(
                 START_PULSE: begin
                     // Assert start for one cycle before streaming
                     start <= 1'b1;
-                    state <= STREAM;
-                    m_axis_tvalid <= 1'b1;
+                    start_delay_cnt <= START_DELAY_CYCLES[7:0];
+                    if (num_beats == 0) begin
+                        state <= WAIT_DONE;
+                    end else begin
+                        state <= PRE_STREAM;
+                    end
+                end
+
+                PRE_STREAM: begin
+                    if (start_delay_cnt == 0) begin
+                        state <= STREAM;
+                        m_axis_tvalid <= 1'b1;
+                    end else begin
+                        start_delay_cnt <= start_delay_cnt - 1;
+                    end
                 end
 
                 STREAM: begin
@@ -116,6 +147,7 @@ module softmax_axis_stimulus #(
                         end else begin
                             beat_count <= beat_count + 1;
                         end
+                        tokens_sent <= tokens_sent + LANES;
                     end
                 end
 

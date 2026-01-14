@@ -35,20 +35,26 @@ module debug_top (
     wire                       vio_start;
     wire                       vio_reset_n;
     wire [                7:0] vio_num_tokens;
+    wire                       vio_bp_enable;
+    wire [                7:0] vio_bp_threshold;
 
     //-------------------------------------------------------------------------
     // 1. VIO (Virtual Input/Output)
     //-------------------------------------------------------------------------
     // Configure in IP Catalog:
-    // - Output Probe Count: 3
+    // - Output Probe Count: 5
     //   - PROBE_OUT0: Width 1 (reset_n) - Set Initial Value to 0x1
     //   - PROBE_OUT1: Width 1 (start_trigger)
     //   - PROBE_OUT2: Width 8 (num_tokens) - Set Initial Value to 0x10 (16 tokens)
+    //   - PROBE_OUT3: Width 1 (bp_enable) - Set Initial Value to 0x0
+    //   - PROBE_OUT4: Width 8 (bp_threshold) - Set Initial Value to 0x80
     vio_0 my_vio (
         .clk       (clk),
         .probe_out0(vio_reset_n),
         .probe_out1(vio_start),
-        .probe_out2(vio_num_tokens)
+        .probe_out2(vio_num_tokens),
+        .probe_out3(vio_bp_enable),
+        .probe_out4(vio_bp_threshold)
     );
 
     //-------------------------------------------------------------------------
@@ -104,15 +110,25 @@ module debug_top (
         .m_axis_tready(m_axis_tready)
     );
 
-    // Perfect sink - always ready
-    assign m_axis_tready = 1'b1;
+    // Simple backpressure generator (LFSR-based)
+    reg [7:0] bp_lfsr;
+    always @(posedge clk or negedge vio_reset_n) begin
+        if (!vio_reset_n) begin
+            bp_lfsr <= 8'h1;
+        end else begin
+            bp_lfsr <= {bp_lfsr[6:0], bp_lfsr[7] ^ bp_lfsr[5]};
+        end
+    end
+
+    wire bp_ready = (bp_lfsr < vio_bp_threshold);
+    assign m_axis_tready = vio_bp_enable ? bp_ready : 1'b1;
 
     //-------------------------------------------------------------------------
     // 4. ILA (Integrated Logic Analyzer)
     //-------------------------------------------------------------------------
     // Configure in IP Catalog:
     // - Monitor Type: Native
-    // - Probe Count: 10
+    // - Probe Count: 15
     //   - Probe 0: s_axis_tdata (64 bit) - INT8 logits input
     //   - Probe 1: s_axis_tvalid (1 bit)
     //   - Probe 2: s_axis_tlast (1 bit)
@@ -120,9 +136,14 @@ module debug_top (
     //   - Probe 4: m_axis_tdata (64 bit) - UINT8 probabilities output
     //   - Probe 5: m_axis_tvalid (1 bit)
     //   - Probe 6: m_axis_tlast (1 bit)
-    //   - Probe 7: start (1 bit)
-    //   - Probe 8: done (1 bit)
-    //   - Probe 9: vio_start (1 bit) - for trigger
+    //   - Probe 7: m_axis_tready (1 bit)
+    //   - Probe 8: start (1 bit)
+    //   - Probe 9: done (1 bit)
+    //   - Probe 10: num_tokens (32 bit)
+    //   - Probe 11: vio_start (1 bit) - for trigger
+    //   - Probe 12: vio_reset_n (1 bit)
+    //   - Probe 13: vio_bp_enable (1 bit)
+    //   - Probe 14: vio_bp_threshold (8 bit)
     ila_0 my_ila (
         .clk   (clk),
         .probe0(s_axis_tdata),
@@ -132,9 +153,14 @@ module debug_top (
         .probe4(m_axis_tdata),
         .probe5(m_axis_tvalid),
         .probe6(m_axis_tlast),
-        .probe7(start),
-        .probe8(done),
-        .probe9(vio_start)
+        .probe7(m_axis_tready),
+        .probe8(start),
+        .probe9(done),
+        .probe10(num_tokens),
+        .probe11(vio_start),
+        .probe12(vio_reset_n),
+        .probe13(vio_bp_enable),
+        .probe14(vio_bp_threshold)
     );
 
 endmodule

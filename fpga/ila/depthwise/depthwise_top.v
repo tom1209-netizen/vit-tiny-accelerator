@@ -139,37 +139,47 @@ module debug_top (
     //-------------------------------------------------------------------------
     // Configure in IP Catalog:
     // - Monitor Type: Native
-    // - Probe Count: 14
+    // - Probe Count: 19
     //   - Probe 0: axis_kernel_in_tdata (64 bit)
     //   - Probe 1: axis_kernel_in_tvalid (1 bit)
     //   - Probe 2: axis_kernel_in_tlast (1 bit)
-    //   - Probe 3: axis_data_in_tdata (64 bit)
-    //   - Probe 4: axis_data_in_tvalid (1 bit)
-    //   - Probe 5: axis_data_in_tready (1 bit)
-    //   - Probe 6: axis_data_out_tdata (64 bit) - INT32 conv output
-    //   - Probe 7: axis_data_out_tvalid (1 bit)
-    //   - Probe 8: axis_data_out_tlast (1 bit)
-    //   - Probe 9: start (1 bit)
-    //   - Probe 10: done (1 bit)
-    //   - Probe 11: cfg_height (16 bit)
-    //   - Probe 12: cfg_width (16 bit)
-    //   - Probe 13: vio_start (1 bit) - for trigger
+    //   - Probe 3: axis_kernel_in_tready (1 bit)
+    //   - Probe 4: axis_data_in_tdata (64 bit)
+    //   - Probe 5: axis_data_in_tvalid (1 bit)
+    //   - Probe 6: axis_data_in_tlast (1 bit)
+    //   - Probe 7: axis_data_in_tready (1 bit)
+    //   - Probe 8: axis_data_out_tdata (64 bit) - INT32 conv output
+    //   - Probe 9: axis_data_out_tvalid (1 bit)
+    //   - Probe 10: axis_data_out_tlast (1 bit)
+    //   - Probe 11: axis_data_out_tready (1 bit)
+    //   - Probe 12: start (1 bit)
+    //   - Probe 13: done (1 bit)
+    //   - Probe 14: cfg_height (16 bit)
+    //   - Probe 15: cfg_width (16 bit)
+    //   - Probe 16: cfg_channels (16 bit)
+    //   - Probe 17: vio_start (1 bit) - for trigger
+    //   - Probe 18: vio_reset_n (1 bit)
     ila_0 my_ila (
         .clk    (clk),
         .probe0 (axis_kernel_in_tdata),
         .probe1 (axis_kernel_in_tvalid),
         .probe2 (axis_kernel_in_tlast),
-        .probe3 (axis_data_in_tdata),
-        .probe4 (axis_data_in_tvalid),
-        .probe5 (axis_data_in_tready),
-        .probe6 (axis_data_out_tdata),
-        .probe7 (axis_data_out_tvalid),
-        .probe8 (axis_data_out_tlast),
-        .probe9 (start),
-        .probe10(done),
-        .probe11(cfg_height),
-        .probe12(cfg_width),
-        .probe13(vio_start)
+        .probe3 (axis_kernel_in_tready),
+        .probe4 (axis_data_in_tdata),
+        .probe5 (axis_data_in_tvalid),
+        .probe6 (axis_data_in_tlast),
+        .probe7 (axis_data_in_tready),
+        .probe8 (axis_data_out_tdata),
+        .probe9 (axis_data_out_tvalid),
+        .probe10(axis_data_out_tlast),
+        .probe11(axis_data_out_tready),
+        .probe12(start),
+        .probe13(done),
+        .probe14(cfg_height),
+        .probe15(cfg_width),
+        .probe16(cfg_channels),
+        .probe17(vio_start),
+        .probe18(vio_reset_n)
     );
 
 endmodule
