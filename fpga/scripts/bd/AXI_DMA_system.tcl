@@ -46,7 +46,7 @@ if { [string first $scripts_vivado_version $current_vivado_version] == -1 } {
 
 # The design that will be created by this Tcl script contains the following 
 # module references:
-# axi_dma_shim
+# axi_dma_shim, axis_source
 
 # Please add the sources of those modules before sourcing this Tcl script.
 
@@ -176,6 +176,7 @@ set bCheckModules 1
 if { $bCheckModules == 1 } {
    set list_check_mods "\ 
 axi_dma_shim\
+axis_source\
 "
 
    set list_mods_missing ""
@@ -293,7 +294,9 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_APU_CLK_RATIO_ENABLE {6:2:1} \
     CONFIG.PCW_APU_PERIPHERAL_FREQMHZ {650} \
     CONFIG.PCW_CAN0_PERIPHERAL_CLKSRC {External} \
+    CONFIG.PCW_CAN0_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_CAN1_PERIPHERAL_CLKSRC {External} \
+    CONFIG.PCW_CAN1_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_CAN_PERIPHERAL_CLKSRC {IO PLL} \
     CONFIG.PCW_CAN_PERIPHERAL_VALID {0} \
     CONFIG.PCW_CLK0_FREQ {125000000} \
@@ -407,11 +410,14 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_GPIO_MIO_GPIO_ENABLE {1} \
     CONFIG.PCW_GPIO_MIO_GPIO_IO {MIO} \
     CONFIG.PCW_GPIO_PERIPHERAL_ENABLE {0} \
+    CONFIG.PCW_I2C0_PERIPHERAL_ENABLE {0} \
+    CONFIG.PCW_I2C1_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_I2C_RESET_ENABLE {0} \
     CONFIG.PCW_I2C_RESET_POLARITY {Active Low} \
     CONFIG.PCW_IMPORT_BOARD_PRESET {None} \
     CONFIG.PCW_INCLUDE_ACP_TRANS_CHECK {0} \
     CONFIG.PCW_IRQ_F2P_INTR {1} \
+    CONFIG.PCW_IRQ_F2P_MODE {DIRECT} \
     CONFIG.PCW_MIO_0_IOTYPE {LVCMOS 3.3V} \
     CONFIG.PCW_MIO_0_PULLUP {enabled} \
     CONFIG.PCW_MIO_0_SLEW {slow} \
@@ -625,6 +631,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_PCAP_PERIPHERAL_CLKSRC {IO PLL} \
     CONFIG.PCW_PCAP_PERIPHERAL_FREQMHZ {200} \
     CONFIG.PCW_PERIPHERAL_BOARD_PRESET {part0} \
+    CONFIG.PCW_PJTAG_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_PLL_BYPASSMODE_ENABLE {0} \
     CONFIG.PCW_PRESET_BANK0_VOLTAGE {LVCMOS 3.3V} \
     CONFIG.PCW_PRESET_BANK1_VOLTAGE {LVCMOS 1.8V} \
@@ -666,19 +673,25 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_SPI1_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_SPI_PERIPHERAL_CLKSRC {IO PLL} \
     CONFIG.PCW_SPI_PERIPHERAL_VALID {0} \
+    CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64} \
+    CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {64} \
     CONFIG.PCW_TPIU_PERIPHERAL_CLKSRC {External} \
+    CONFIG.PCW_TRACE_INTERNAL_WIDTH {2} \
+    CONFIG.PCW_TRACE_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_TTC0_CLK0_PERIPHERAL_CLKSRC {CPU_1X} \
     CONFIG.PCW_TTC0_CLK0_PERIPHERAL_DIVISOR0 {1} \
     CONFIG.PCW_TTC0_CLK1_PERIPHERAL_CLKSRC {CPU_1X} \
     CONFIG.PCW_TTC0_CLK1_PERIPHERAL_DIVISOR0 {1} \
     CONFIG.PCW_TTC0_CLK2_PERIPHERAL_CLKSRC {CPU_1X} \
     CONFIG.PCW_TTC0_CLK2_PERIPHERAL_DIVISOR0 {1} \
+    CONFIG.PCW_TTC0_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_TTC1_CLK0_PERIPHERAL_CLKSRC {CPU_1X} \
     CONFIG.PCW_TTC1_CLK0_PERIPHERAL_DIVISOR0 {1} \
     CONFIG.PCW_TTC1_CLK1_PERIPHERAL_CLKSRC {CPU_1X} \
     CONFIG.PCW_TTC1_CLK1_PERIPHERAL_DIVISOR0 {1} \
     CONFIG.PCW_TTC1_CLK2_PERIPHERAL_CLKSRC {CPU_1X} \
     CONFIG.PCW_TTC1_CLK2_PERIPHERAL_DIVISOR0 {1} \
+    CONFIG.PCW_TTC1_PERIPHERAL_ENABLE {0} \
     CONFIG.PCW_UART0_BASEADDR {0xE0000000} \
     CONFIG.PCW_UART0_BAUD_RATE {115200} \
     CONFIG.PCW_UART0_GRP_FULL_ENABLE {0} \
@@ -789,6 +802,7 @@ proc create_root_design { parentCell } {
     CONFIG.PCW_VALUE_SILVERSION {3} \
     CONFIG.PCW_WDT_PERIPHERAL_CLKSRC {CPU_1X} \
     CONFIG.PCW_WDT_PERIPHERAL_DIVISOR0 {1} \
+    CONFIG.PCW_WDT_PERIPHERAL_ENABLE {0} \
   ] $processing_system7_0
 
 
@@ -831,7 +845,7 @@ proc create_root_design { parentCell } {
   # Create instance: axi_smc, and set properties
   set axi_smc [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 axi_smc ]
   set_property -dict [list \
-    CONFIG.NUM_MI {3} \
+    CONFIG.NUM_MI {4} \
     CONFIG.NUM_SI {1} \
   ] $axi_smc
 
@@ -913,11 +927,19 @@ proc create_root_design { parentCell } {
   set_property -dict [list \
     CONFIG.M_HAS_TKEEP {1} \
     CONFIG.M_HAS_TLAST {1} \
+    CONFIG.M_HAS_TREADY {1} \
+    CONFIG.M_HAS_TSTRB {0} \
     CONFIG.M_TDATA_NUM_BYTES {3} \
+    CONFIG.M_TDEST_WIDTH {0} \
+    CONFIG.M_TID_WIDTH {0} \
     CONFIG.M_TUSER_WIDTH {1} \
     CONFIG.S_HAS_TKEEP {1} \
     CONFIG.S_HAS_TLAST {1} \
+    CONFIG.S_HAS_TREADY {1} \
+    CONFIG.S_HAS_TSTRB {0} \
     CONFIG.S_TDATA_NUM_BYTES {4} \
+    CONFIG.S_TDEST_WIDTH {0} \
+    CONFIG.S_TID_WIDTH {0} \
     CONFIG.S_TUSER_WIDTH {1} \
     CONFIG.TDATA_REMAP {tdata[23:0]} \
   ] $axis_subset_converter_0
@@ -936,12 +958,12 @@ proc create_root_design { parentCell } {
     CONFIG.CLKOUT2_USED {true} \
     CONFIG.CLKOUT3_JITTER {157.337} \
     CONFIG.CLKOUT3_PHASE_ERROR {127.299} \
-    CONFIG.CLKOUT3_REQUESTED_OUT_FREQ {148.5} \
+    CONFIG.CLKOUT3_REQUESTED_OUT_FREQ {100.000} \
     CONFIG.CLKOUT3_USED {false} \
     CONFIG.CLK_IN1_BOARD_INTERFACE {sys_clock} \
     CONFIG.CLK_OUT1_PORT {pixel_clk} \
     CONFIG.CLK_OUT2_PORT {serdes_clk} \
-    CONFIG.CLK_OUT3_PORT {pixel_fast_clk} \
+    CONFIG.CLK_OUT3_PORT {clk_out3} \
     CONFIG.MMCM_CLKFBOUT_MULT_F {62.375} \
     CONFIG.MMCM_CLKIN1_PERIOD {8.000} \
     CONFIG.MMCM_CLKIN2_PERIOD {10.000} \
@@ -967,10 +989,11 @@ proc create_root_design { parentCell } {
   set system_ila_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:system_ila:1.1 system_ila_0 ]
   set_property -dict [list \
     CONFIG.C_MON_TYPE {MIX} \
-    CONFIG.C_NUM_MONITOR_SLOTS {5} \
-    CONFIG.C_NUM_OF_PROBES {2} \
+    CONFIG.C_NUM_MONITOR_SLOTS {6} \
+    CONFIG.C_NUM_OF_PROBES {4} \
     CONFIG.C_PROBE0_TYPE {0} \
     CONFIG.C_PROBE1_TYPE {0} \
+    CONFIG.C_PROBE3_TYPE {0} \
     CONFIG.C_SLOT_0_APC_EN {0} \
     CONFIG.C_SLOT_0_AXI_AR_SEL_DATA {1} \
     CONFIG.C_SLOT_0_AXI_AR_SEL_TRIG {1} \
@@ -1015,7 +1038,33 @@ proc create_root_design { parentCell } {
     CONFIG.C_SLOT_4_AXI_DATA_SEL {1} \
     CONFIG.C_SLOT_4_AXI_TRIG_SEL {1} \
     CONFIG.C_SLOT_4_INTF_TYPE {xilinx.com:interface:axis_rtl:1.0} \
+    CONFIG.C_SLOT_5_APC_EN {0} \
+    CONFIG.C_SLOT_5_AXI_DATA_SEL {1} \
+    CONFIG.C_SLOT_5_AXI_TRIG_SEL {1} \
+    CONFIG.C_SLOT_5_INTF_TYPE {xilinx.com:interface:axis_rtl:1.0} \
   ] $system_ila_0
+
+
+  # Create instance: axis_source_0, and set properties
+  set block_name axis_source
+  set block_cell_name axis_source_0
+  if { [catch {set axis_source_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $axis_source_0 eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+  
+  # Create instance: axi_gpio_2, and set properties
+  set axi_gpio_2 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio:2.0 axi_gpio_2 ]
+  set_property -dict [list \
+    CONFIG.C_ALL_OUTPUTS {1} \
+    CONFIG.C_ALL_OUTPUTS_2 {1} \
+    CONFIG.C_GPIO2_WIDTH {30} \
+    CONFIG.C_GPIO_WIDTH {1} \
+    CONFIG.C_IS_DUAL {1} \
+  ] $axi_gpio_2
 
 
   # Create interface connections
@@ -1038,8 +1087,12 @@ connect_bd_intf_net -intf_net [get_bd_intf_nets axi_dma_shim_0_m_axis] [get_bd_i
   connect_bd_intf_net -intf_net axi_smc_M00_AXI [get_bd_intf_pins axi_smc/M00_AXI] [get_bd_intf_pins axi_gpio_0/S_AXI]
   connect_bd_intf_net -intf_net axi_smc_M01_AXI [get_bd_intf_pins axi_gpio_1/S_AXI] [get_bd_intf_pins axi_smc/M01_AXI]
   connect_bd_intf_net -intf_net axi_smc_M02_AXI [get_bd_intf_pins axi_smc/M02_AXI] [get_bd_intf_pins axi_vdma_0/S_AXI_LITE]
+  connect_bd_intf_net -intf_net axi_smc_M03_AXI [get_bd_intf_pins axi_gpio_2/S_AXI] [get_bd_intf_pins axi_smc/M03_AXI]
   connect_bd_intf_net -intf_net axi_vdma_0_M_AXIS_MM2S [get_bd_intf_pins axi_vdma_0/M_AXIS_MM2S] [get_bd_intf_pins axis_subset_converter_0/S_AXIS]
   connect_bd_intf_net -intf_net axi_vdma_0_M_AXI_MM2S [get_bd_intf_pins axi_vdma_0/M_AXI_MM2S] [get_bd_intf_pins smartconnect_0/S00_AXI]
+  connect_bd_intf_net -intf_net axis_source_0_m_axis [get_bd_intf_pins axis_source_0/m_axis] [get_bd_intf_pins axi_dma_shim_0/s_accel_axis]
+connect_bd_intf_net -intf_net [get_bd_intf_nets axis_source_0_m_axis] [get_bd_intf_pins axis_source_0/m_axis] [get_bd_intf_pins system_ila_0/SLOT_5_AXIS]
+  set_property HDL_ATTRIBUTE.DEBUG {true} [get_bd_intf_nets axis_source_0_m_axis]
   connect_bd_intf_net -intf_net axis_subset_converter_0_M_AXIS [get_bd_intf_pins axis_subset_converter_0/M_AXIS] [get_bd_intf_pins v_axi4s_vid_out_0/video_in]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
@@ -1062,9 +1115,15 @@ connect_bd_intf_net -intf_net [get_bd_intf_nets axi_dma_shim_0_m_axis] [get_bd_i
   [get_bd_pins xlslice_1/Din] \
   [get_bd_pins xlslice_2/Din]
   connect_bd_net -net axi_gpio_0_gpio_io_o  [get_bd_pins axi_gpio_0/gpio_io_o] \
-  [get_bd_pins axi_dma_shim_0/dma_ddr_addr] \
-  [get_bd_pins system_ila_0/probe1]
+  [get_bd_pins system_ila_0/probe1] \
+  [get_bd_pins axi_dma_shim_0/dma_ddr_addr]
   set_property HDL_ATTRIBUTE.DEBUG {true} [get_bd_nets axi_gpio_0_gpio_io_o]
+  connect_bd_net -net axi_gpio_2_gpio2_io_o  [get_bd_pins axi_gpio_2/gpio2_io_o] \
+  [get_bd_pins axis_source_0/length_bytes]
+  connect_bd_net -net axi_gpio_2_gpio_io_o  [get_bd_pins axi_gpio_2/gpio_io_o] \
+  [get_bd_pins axis_source_0/start] \
+  [get_bd_pins system_ila_0/probe3]
+  set_property HDL_ATTRIBUTE.DEBUG {true} [get_bd_nets axi_gpio_2_gpio_io_o]
   connect_bd_net -net clk_wiz_0_locked  [get_bd_pins clk_wiz_0/locked] \
   [get_bd_ports locked_0] \
   [get_bd_pins proc_sys_reset_0/dcm_locked]
@@ -1099,8 +1158,10 @@ connect_bd_intf_net -intf_net [get_bd_intf_nets axi_dma_shim_0_m_axis] [get_bd_i
   [get_bd_pins axi_vdma_0/s_axi_lite_aclk] \
   [get_bd_pins v_axi4s_vid_out_0/aclk] \
   [get_bd_pins processing_system7_0/S_AXI_HP1_ACLK] \
-  [get_bd_pins axi_dma_shim_0/clk] \
-  [get_bd_pins system_ila_0/clk]
+  [get_bd_pins system_ila_0/clk] \
+  [get_bd_pins axi_gpio_2/s_axi_aclk] \
+  [get_bd_pins axis_source_0/clk] \
+  [get_bd_pins axi_dma_shim_0/clk]
   connect_bd_net -net processing_system7_0_FCLK_RESET0_N  [get_bd_pins processing_system7_0/FCLK_RESET0_N] \
   [get_bd_pins rst_ps7_0_142M/ext_reset_in] \
   [get_bd_pins proc_sys_reset_0/ext_reset_in]
@@ -1116,8 +1177,10 @@ connect_bd_intf_net -intf_net [get_bd_intf_nets axi_dma_shim_0_m_axis] [get_bd_i
   [get_bd_pins axis_subset_converter_0/aresetn] \
   [get_bd_pins axi_vdma_0/axi_resetn] \
   [get_bd_pins smartconnect_0/aresetn] \
-  [get_bd_pins axi_dma_shim_0/resetn] \
-  [get_bd_pins system_ila_0/resetn]
+  [get_bd_pins system_ila_0/resetn] \
+  [get_bd_pins axi_gpio_2/s_axi_aresetn] \
+  [get_bd_pins axis_source_0/resetn] \
+  [get_bd_pins axi_dma_shim_0/resetn]
   connect_bd_net -net sys_clock_1  [get_bd_ports sys_clock] \
   [get_bd_pins clk_wiz_0/clk_in1]
   connect_bd_net -net v_axi4s_vid_out_0_vtg_ce  [get_bd_pins v_axi4s_vid_out_0/vtg_ce] \
@@ -1129,6 +1192,7 @@ connect_bd_intf_net -intf_net [get_bd_intf_nets axi_dma_shim_0_m_axis] [get_bd_i
   connect_bd_net -net xlslice_0_Dout  [get_bd_pins xlslice_0/Dout] \
   [get_bd_pins axi_dma_shim_0/dma_length_bytes]
   connect_bd_net -net xlslice_1_Dout  [get_bd_pins xlslice_1/Dout] \
+  [get_bd_pins system_ila_0/probe2] \
   [get_bd_pins axi_dma_shim_0/dma_start_transfer]
   connect_bd_net -net xlslice_2_Dout  [get_bd_pins xlslice_2/Dout] \
   [get_bd_pins axi_dma_shim_0/dma_direction]
@@ -1136,6 +1200,7 @@ connect_bd_intf_net -intf_net [get_bd_intf_nets axi_dma_shim_0_m_axis] [get_bd_i
   # Create address segments
   assign_bd_address -offset 0x41200000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_0/S_AXI/Reg] -force
   assign_bd_address -offset 0x41210000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_1/S_AXI/Reg] -force
+  assign_bd_address -offset 0x41220000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_2/S_AXI/Reg] -force
   assign_bd_address -offset 0x43000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_vdma_0/S_AXI_LITE/Reg] -force
   assign_bd_address -offset 0x00000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_MM2S] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
   assign_bd_address -offset 0x00000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force

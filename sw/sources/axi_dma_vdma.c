@@ -12,6 +12,7 @@
 
 XGpio GpioOut;
 XGpio GpioIn;
+XGpio GpioAxis; // for axis source gpio
 XAxiVdma_DmaSetup ReadCfg;
 
 
@@ -46,6 +47,15 @@ void dma_start_transfer(u32 addr, u32 length_bytes, u8 direction) {
     // 5. Clear start bit
     control_value &= ~(1 << LENGTH_START_BIT);
     XGpio_DiscreteWrite(&GpioOut, GPIO_LEN_CHANNEL, control_value);
+}
+
+void start_axis_source()
+{
+    XGpio_DiscreteWrite(&GpioAxis, GPIO_AXIS_LENGTH_CHANNEL, TEST_PKT_LEN_BYTES);
+    XGpio_DiscreteWrite(&GpioAxis, GPIO_AXIS_START_CHANNEL, 1);
+    usleep(1000); 
+    XGpio_DiscreteWrite(&GpioAxis, GPIO_AXIS_START_CHANNEL, 0);
+
 }
 
 // Function to wait for dma_transfer_done
@@ -107,6 +117,8 @@ int test_s2mm()
                (unsigned)RxBuffer, TEST_PKT_LEN_BYTES);
 
     dma_start_transfer((u32)RxBuffer, TEST_PKT_LEN_BYTES, 0); // 0 = S2MM
+    // usleep(1);
+    start_axis_source();
 
     if (!dma_wait_for_completion(5000)) {  // 5s
         xil_printf("S2MM timeout (check AXIS source)\r\n");
@@ -122,7 +134,7 @@ int test_s2mm()
     // print test packet bytes
     for (int i = 0; i < TEST_PKT_LEN_BYTES; ++i) {
         xil_printf("0x%02X ", RxBuffer[i]);
-        if ((i & 0x0F) == 0x0F) xil_printf("\r\n");
+        if ((i + 1) % 8 == 0) xil_printf("\r\n");
     }
     xil_printf("\r\n");
 
@@ -227,7 +239,7 @@ void Update_Classification_From_Memory()
 {
     // 1. Invalidate Cache the DDR_BASE_TEST_FROM_VIT (to ensure reading the newest data from RAM)
     char *text_ptr = (char *)DDR_BASE_TEXT_FROM_VIT;
-    text_ptr = "Dog: 99%";
+    text_ptr = "Dog: 98%";
     Xil_DCacheInvalidateRange((UINTPTR)DDR_BASE_TEXT_FROM_VIT, 64);
     
     // 2. Read the string

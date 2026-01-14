@@ -10,6 +10,7 @@
 
 extern XGpio GpioOut;
 extern XGpio GpioIn;
+extern XGpio GpioAxis; // for axis source gpio
 
 extern XAxiVdma AxiVdma;
 extern XAxiVdma_DmaSetup ReadCfg;
@@ -32,18 +33,22 @@ void DrawString(u32 *frame, int x, int y, const char *str, u32 color, int scale)
 
 
 
-#define GPIO_OUT_BASEADDR   XPAR_AXI_GPIO_0_BASEADDR
-#define GPIO_IN_BASEADDR    XPAR_AXI_GPIO_1_BASEADDR
+#define GPIO_OUT_BASEADDR           XPAR_AXI_GPIO_0_BASEADDR // gpio send dma_start_transfer, dma_ddr_addr, dma_direction, dma_length
+#define GPIO_IN_BASEADDR            XPAR_AXI_GPIO_1_BASEADDR // gpio receive dma_transfer_done
+#define GPIO_AXIS_SOURCE_BASEADDR   XPAR_AXI_GPIO_2_BASEADDR
 
 #define GPIO_ADDR_CHANNEL       1   // dma_ddr_addr[31:0]
 #define GPIO_LEN_CHANNEL        2   // {dma_length_bytes[29:0], dma_direction, dma_start_transfer}
+#define GPIO_STATUS_CHANNEL     1   // dma_transfer_done
+
+#define GPIO_AXIS_START_CHANNEL       1
+#define GPIO_AXIS_LENGTH_CHANNEL      2
 
 // Bit positions in GPIO_LEN_CHANNEL
 #define LENGTH_START_BIT    0
 #define LENGTH_DIR_BIT      1  
-#define LENGTH_DATA_BITS    30 // bits [31:2] cho length
+#define LENGTH_DATA_BITS    30 // bits [31:2] for length
 
-#define GPIO_STATUS_CHANNEL     1   // dma_transfer_done
 
 /* Screen config 720p */
 #define H_RES_PIXELS        1280

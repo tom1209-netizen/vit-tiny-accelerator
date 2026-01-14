@@ -42,7 +42,7 @@ int main(void)
     xil_printf("\r\n=== AXI DMA Shim – Per-direction Tests ===\r\n");
 
     
-
+    // gpio 0 config
     cfg = XGpio_LookupConfig(GPIO_OUT_BASEADDR);
     if (!cfg) {
         xil_printf("Lookup GPIO_OUT failed\r\n");
@@ -53,7 +53,7 @@ int main(void)
         xil_printf("GPIO_OUT init failed\r\n");
         return XST_FAILURE;
     }
-
+    // gpio 1 config
     cfg = XGpio_LookupConfig(GPIO_IN_BASEADDR);
     if (!cfg) {
         xil_printf("Lookup GPIO_IN failed\r\n");
@@ -64,22 +64,36 @@ int main(void)
         xil_printf("GPIO_IN init failed\r\n");
         return XST_FAILURE;
     }
+    // gpio 2 config
+    cfg = XGpio_LookupConfig(GPIO_AXIS_SOURCE_BASEADDR);
+    if (!cfg) {
+        xil_printf("Lookup GPIO_IN failed\r\n");
+        return XST_FAILURE;
+    }
+    Status = XGpio_CfgInitialize(&GpioAxis, cfg, cfg->BaseAddress);
+    if (Status != XST_SUCCESS) {
+        xil_printf("GPIO_IN init failed\r\n");
+        return XST_FAILURE;
+    }
 
     // direction: OUT → control shim, IN → read dma_transfer_done
     XGpio_SetDataDirection(&GpioOut, GPIO_ADDR_CHANNEL, 0x00000000); // outputs
     XGpio_SetDataDirection(&GpioOut, GPIO_LEN_CHANNEL,  0x00000000); // outputs
     XGpio_SetDataDirection(&GpioIn,  GPIO_STATUS_CHANNEL, 0x00000001); // bit0 input
-
+    // direction: axis source out -> shim
+    XGpio_SetDataDirection(&GpioAxis, GPIO_AXIS_START_CHANNEL, 0x00000000); // outputs
+    XGpio_SetDataDirection(&GpioAxis, GPIO_AXIS_LENGTH_CHANNEL, 0x00000000); // outputs
     // --- run axi_dma_shim testcase ---
+
     if (test_mm2s() != XST_SUCCESS) {
         xil_printf("MM2S test FAILED\r\n");
         return XST_FAILURE;
     }
 
-    // if (test_s2mm() != XST_SUCCESS) {
-    //     xil_printf("S2MM test FAILED\r\n");
-    //     return XST_FAILURE;
-    // }
+    if (test_s2mm() != XST_SUCCESS) {
+        xil_printf("S2MM test FAILED\r\n");
+        return XST_FAILURE;
+    }
 
     xil_printf("\r\nAll per-direction tests finished.\r\n");
 
