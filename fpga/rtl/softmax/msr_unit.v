@@ -17,7 +17,7 @@ module msr_unit #(
     parameter integer SUM_WIDTH   = 32,
     parameter integer RECIP_WIDTH = 16,
     parameter integer LUT_ADDR_W  = 6,                   // 64-entry LUT
-    parameter         INIT_FILE   = "lut/recip_lut.hex"
+    parameter         INIT_FILE   = "recip_lut.mem"
 ) (
     input  wire                   clk,
     input  wire                   rst_n,

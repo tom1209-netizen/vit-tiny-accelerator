@@ -131,8 +131,8 @@ module gemm_axis_stimulus #(
                     m_axis_b_tdata <= b_beat_data;
 
                     // TLAST on final beat
-                    m_axis_a_tlast <= (beat_count == BURST_LEN - 1);
-                    m_axis_b_tlast <= (beat_count == BURST_LEN - 1);
+                    m_axis_a_tlast <= (beat_count == BURST_LEN - 2);
+                    m_axis_b_tlast <= (beat_count == BURST_LEN - 2);
 
                     // Handshake
                     if (m_axis_a_tready && m_axis_b_tready && m_axis_a_tvalid) begin

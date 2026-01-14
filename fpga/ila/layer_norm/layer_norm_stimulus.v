@@ -1,11 +1,15 @@
 `timescale 1ns / 1ps
 
-module relu_stimulus #(
-    parameter DATA_WIDTH = 64
+module layer_norm_stimulus #(
+    parameter DATA_WIDTH = 64,
+    parameter STAT_WIDTH = 32
 ) (
     input wire clk,
     input wire rst_n,
     input wire start_trigger,
+    
+    output wire [STAT_WIDTH-1:0] cfg_gamma,
+    output wire [STAT_WIDTH-1:0] cfg_beta,
 
     output reg  [DATA_WIDTH-1:0] m_axis_tdata,   // Changed to reg for always @(*)
     output reg                   m_axis_tvalid,
@@ -39,10 +43,12 @@ module relu_stimulus #(
     // 1. COMBINATIONAL DATA PATH 
     //-------------------------------------------------------------------------
     // Logic updates IMMEDIATELY when beat_count changes
+    assign cfg_gamma = 32'd2 << 16;
+    assign cfg_beta = 2'd1 << 16;
     always @(*) begin
         // Default values to prevent latches
         m_axis_tdata = {DATA_WIDTH{1'b0}};
-
+        
 
         if (state == RUN) begin
             // Data Pattern
@@ -50,7 +56,7 @@ module relu_stimulus #(
                 0: m_axis_tdata = {8{8'h05}};  // All 5
                 1: m_axis_tdata = {8{8'hF0}};  // All -16
                 2: m_axis_tdata = 64'hF0_05_F0_05_F0_05_F0_05;  // Alternating
-                3: m_axis_tdata = 64'h80_7F_80_7F_80_7F_80_7F;  // Limits
+                3: m_axis_tdata = 64'h80_7F_80_7F_80_7F_80_7F;  
                 4: m_axis_tdata = 64'h12_34_56_78_9a_bc_de_f0;
                 5: m_axis_tdata = 64'hf0_de_bc_9a_78_56_34_12;
                 6: m_axis_tdata = 64'h00_01_02_03_04_05_06_07;
@@ -61,7 +67,7 @@ module relu_stimulus #(
                 default: m_axis_tdata = 64'h0;
             endcase
 
-   
+            
         end
     end
 
@@ -86,8 +92,8 @@ module relu_stimulus #(
                 end
 
                 RUN: begin
+                    m_axis_tlast <= (beat_count == BURST_LEN - 2);  
                     // Handshake Logic
-                    m_axis_tlast <= (beat_count == BURST_LEN - 2);
                     if (m_axis_tready && m_axis_tvalid) begin
                         // Check if this is the LAST beat
                         if (beat_count == BURST_LEN - 1) begin

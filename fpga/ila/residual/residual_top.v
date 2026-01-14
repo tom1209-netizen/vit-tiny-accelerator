@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module debug_top (
+module residual_top (
     input wire clk
 );
 
@@ -105,16 +105,22 @@ module debug_top (
     //   - Probe 9: vio_start (1 bit) - for trigger
     ila_0 my_ila (
         .clk   (clk),
+        
         .probe0(s_axis_a_tdata),
         .probe1(s_axis_a_tvalid),
-        .probe2(s_axis_a_tready),
-        .probe3(s_axis_b_tdata),
-        .probe4(s_axis_b_tvalid),
-        .probe5(m_axis_tdata),
-        .probe6(m_axis_tvalid),
-        .probe7(m_axis_tlast),
-        .probe8(m_axis_tready),
-        .probe9(vio_start)
+        .probe2(s_axis_a_tlast),
+        .probe3(s_axis_a_tready),
+        
+        .probe4(s_axis_b_tdata),
+        .probe5(s_axis_b_tvalid),
+        .probe6(s_axis_b_tlast),
+        .probe7(s_axis_b_tready),
+        
+        .probe8(m_axis_tdata),
+        .probe9(m_axis_tvalid),
+        .probe10(m_axis_tlast),
+        .probe11(m_axis_tready)
+        
     );
 
 endmodule

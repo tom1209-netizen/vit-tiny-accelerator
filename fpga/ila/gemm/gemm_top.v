@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module debug_top (
+module gemm_top (
     input wire clk
 );
 
@@ -105,35 +105,28 @@ module debug_top (
     //-------------------------------------------------------------------------
     // 4. ILA (Integrated Logic Analyzer)
     //-------------------------------------------------------------------------
-    // Configure in IP Catalog:
-    // - Monitor Type: Native
-    // - Probe Count: 12
-    //   - Probe 0: s_axis_a_tdata (64 bit)
-    //   - Probe 1: s_axis_a_tvalid (1 bit)
-    //   - Probe 2: s_axis_a_tlast (1 bit)
-    //   - Probe 3: s_axis_a_tready (1 bit)
-    //   - Probe 4: s_axis_b_tdata (64 bit)
-    //   - Probe 5: s_axis_b_tvalid (1 bit)
-    //   - Probe 6: m_axis_out_tdata (64 bit) - INT32 results
-    //   - Probe 7: m_axis_out_tvalid (1 bit)
-    //   - Probe 8: m_axis_out_tlast (1 bit)
-    //   - Probe 9: start_tile (1 bit)
-    //   - Probe 10: tile_done (1 bit)
-    //   - Probe 11: vio_start (1 bit) - for trigger
+    
     ila_0 my_ila (
         .clk    (clk),
+        
         .probe0 (s_axis_a_tdata),
         .probe1 (s_axis_a_tvalid),
         .probe2 (s_axis_a_tlast),
         .probe3 (s_axis_a_tready),
+        
         .probe4 (s_axis_b_tdata),
         .probe5 (s_axis_b_tvalid),
-        .probe6 (m_axis_out_tdata),
-        .probe7 (m_axis_out_tvalid),
-        .probe8 (m_axis_out_tlast),
-        .probe9 (start_tile),
-        .probe10(tile_done),
-        .probe11(vio_start)
+        .probe6 (s_axis_b_tlast),
+        .probe7 (s_axis_b_tready),
+        
+        .probe8 (m_axis_out_tdata),
+        .probe9 (m_axis_out_tvalid),
+        .probe10 (m_axis_out_tlast),
+        .probe11 (m_axis_out_tready),
+        
+        .probe12 (start_tile),
+        .probe13(tile_done)
+        
     );
 
 endmodule

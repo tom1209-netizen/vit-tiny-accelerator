@@ -26,6 +26,7 @@ module avg_var_calc #(
     reg signed [17:0] inv_n_val; // selected constant
     
     // TinyViT Constants (2^18 / N)
+    localparam INV_80  = 18'd3277;
     localparam INV_128 = 18'd2048; // 262144 / 128
     localparam INV_160 = 18'd1638; // 262144 / 160 = 1638.4
     localparam INV_320 = 18'd819;  // 262144 / 320 = 819.2
@@ -33,6 +34,7 @@ module avg_var_calc #(
 
     always @(*) begin
         case (pkt_len_in)
+            16'd80 : inv_n_val = INV_80;
             16'd128: inv_n_val = INV_128;
             16'd160: inv_n_val = INV_160;
             16'd320: inv_n_val = INV_320;

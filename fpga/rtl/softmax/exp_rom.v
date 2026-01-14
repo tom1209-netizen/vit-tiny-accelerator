@@ -3,7 +3,7 @@
 module exp_rom #(
     parameter integer ADDR_WIDTH = 8,
     parameter integer DATA_WIDTH = 20,
-    parameter         INIT_FILE  = "lut/exp_table_q4_16.hex"
+    parameter         INIT_FILE  = "exp_table_q4_16.mem"
 ) (
     input  wire                         clk,
     input  wire signed [ADDR_WIDTH-1:0] addr,
