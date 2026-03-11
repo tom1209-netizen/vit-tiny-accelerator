@@ -65,8 +65,9 @@
     - [9.1 Unit Tests](#91-unit-tests)
     - [9.2 Integration Tests](#92-integration-tests)
     - [9.3 System Tests](#93-system-tests)
-  - [10. Risks \& Mitigations](#10-risks--mitigations)
-  - [11. Tools \& Environment](#11-tools--environment)
+  - [10. Experimental Result on HDMI](#10-experimental-result-on-hdmi)
+  - [11. Risks \& Mitigations](#11-risks--mitigations)
+  - [12. Tools \& Environment](#12-tools--environment)
   - [Appendix A. Requantization Details](#appendix-a-requantization-details)
   - [Appendix B. Signal Dictionary (excerpt)](#appendix-b-signal-dictionary-excerpt)
 
@@ -1064,13 +1065,17 @@ More details in [Depthwise Conv documentation](./fpga/docs/depthwise_conv_unit.m
 
 - DMA loopback; GEMM microbenchmark; PS<->PL regression.
 
-## 10. Risks & Mitigations
+## 10. Experimental Result on HDMI
+
+![Experimental Result](./figure/demo/IMG_0308.png)
+
+## 11. Risks & Mitigations
 
 - **DDR bandwidth bottleneck:** double-buffering, larger bursts, on-chip reuse.  
 - **Timing closure @ 180–200 MHz:** extra pipelining, floorplanning, temp smaller PE array.  
 - **Quantization accuracy:** per-channel scales, larger LUTs, post-quant calibration.
 
-## 11. Tools & Environment
+## 12. Tools & Environment
 
 Vivado/Vitis 2024.x, Verilator/xsim, Python 3.10 reference model; Arty Z7-20 board; XDC constraints.
 
