@@ -1,9 +1,7 @@
 module top_DMA_VDMA (
     input clk125,                    
-
-    // -------------------------------------------------------------------------
-    // CÁC PORT CỦA ZYNQ/DDR 
-    // -------------------------------------------------------------------------
+    
+    //  DDR ports 
     inout [14:0] DDR_addr,
     inout [2:0]  DDR_ba,
     inout        DDR_cas_n,
@@ -26,43 +24,35 @@ module top_DMA_VDMA (
     inout        FIXED_IO_ps_porb,
     inout        FIXED_IO_ps_srstb,
 
-    // -------------------------------------------------------------------------
-    // OUTPUT HDMI 
-    // -------------------------------------------------------------------------
+    
+    // Output HDMI 
     output       tmds_tx_clk_p,
     output       tmds_tx_clk_n,
     output [2:0] tmds_tx_data_p,
     output [2:0] tmds_tx_data_n
 );
 
-    // =========================================================================
-    // 1. KHAI BÁO DÂY TÍN HIỆU NỘI BỘ
-    // =========================================================================
     
-    // Clock lấy từ Block Design
     wire pixel_clk;   // 74.25 MHz
     wire serdes_clk;  // 371.25 MHz
     
-    // Video signal lấy từ Block Design
+    // Video signal from Block Design
     wire [23:0] vid_data;
     wire        vid_active;
     wire        vid_hsync;
     wire        vid_vsync;
 
-    // Tín hiệu điều khiển HDMI PHY
+  
     wire [9:0] tmds_data [0:2];
     wire [1:0] ctl [0:2];
     wire locked;
     reg [7:0] rstcnt = 0;
 
-    // =========================================================================
-    // 2. MODULE WRAPPER 
-    // =========================================================================
+    
+    // Module wrapper 
     AXI_DMA_system_wrapper system_i (
-        // Clock đầu vào (125MHz)
         .sys_clock(clk125),
 
-        // Các chân DDR/Fixed IO (Nối thẳng ra port)
         .DDR_addr(DDR_addr),
         .DDR_ba(DDR_ba),
         .DDR_cas_n(DDR_cas_n),
@@ -85,9 +75,7 @@ module top_DMA_VDMA (
         .FIXED_IO_ps_porb(FIXED_IO_ps_porb),
         .FIXED_IO_ps_srstb(FIXED_IO_ps_srstb),
 
-        // VIDEO INTERFACE & CLOCKS
-        // 
-        
+        // Video interfaces & clocks        
         .pixel_clk_0   (pixel_clk),    // Output clock 74.25MHz
         .serdes_clk_0  (serdes_clk),   // Output clock 371.25MHz
         .locked_0      (locked),
@@ -103,11 +91,8 @@ module top_DMA_VDMA (
         .vid_io_out_0_vblank       ()
     );
 
-    // =========================================================================
-    // 3. LOGIC HDMI PHY (Dùng lại code tmds_encode/oserdes cũ)
-    // =========================================================================
+    
 
-    // Gán tín hiệu điều khiển (Blue Channel mang Sync)
     assign ctl[0] = {vid_vsync, vid_hsync};
     assign ctl[1] = 2'b00;
     assign ctl[2] = 2'b00;
@@ -125,7 +110,7 @@ module top_DMA_VDMA (
 
 assign rst = (rstcnt == 8'hff) ? 1'b0 : 1'b1;
 
-    // --- Channel 0: Blue (Bits [7:0]) ---
+    // Channel 0: Blue (Bits [7:0])
     tmds_encode enc_b (
         .pixel_clk(pixel_clk), 
         .rst(rst), // Reset = 0 
@@ -143,7 +128,7 @@ assign rst = (rstcnt == 8'hff) ? 1'b0 : 1'b1;
         .tmds_serdes_n(tmds_tx_data_n[0])
     );
 
-    // --- Channel 1: Green (Bits [15:8]) ---
+    // Channel 1: Green (Bits [15:8])
     tmds_encode enc_g (
         .pixel_clk(pixel_clk), 
         .rst(rst), 
@@ -161,7 +146,7 @@ assign rst = (rstcnt == 8'hff) ? 1'b0 : 1'b1;
         .tmds_serdes_n(tmds_tx_data_n[1])
     );
 
-    // --- Channel 2: Red (Bits [23:16]) ---
+    // Channel 2: Red (Bits [23:16])
     tmds_encode enc_r (
         .pixel_clk(pixel_clk), 
         .rst(rst), 
@@ -179,7 +164,7 @@ assign rst = (rstcnt == 8'hff) ? 1'b0 : 1'b1;
         .tmds_serdes_n(tmds_tx_data_n[2])
     );
 
-    // --- Clock Channel ---
+    // Clock Channel
     tmds_oserdes ser_c (
         .pixel_clk(pixel_clk), 
         .serdes_clk(serdes_clk), 
